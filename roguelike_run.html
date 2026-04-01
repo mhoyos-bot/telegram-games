@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<!-- STD-031 EXCEPTION: Single-file HTML game build per STD-025.
+     Splitting across files is prohibited by build standard.
+     Line count ~1290 justified — Three.js scene, pools, upgrade system,
+     input, UI all tightly coupled in module scope. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>VOID RUN</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    touch-action: none;
+    font-family: 'Courier New', monospace;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #c {
+    display: block;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 1;
+  }
+  #flash {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 5;
+    pointer-events: none;
+    background: #fff;
+    opacity: 0;
+  }
+  #float-canvas {
+    display: block;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 8;
+    pointer-events: none;
+  }
+  #hud {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 10;
+    pointer-events: none;
+  }
+  #score {
+    position: absolute;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #0ff;
+    font-size: 26px;
+    font-weight: bold;
+    text-shadow: 0 0 12px #0ff, 0 0 24px #0ff;
+    letter-spacing: 2px;
+    transition: transform 0.05s;
+  }
+  #score.pulse {
+    transform: translateX(-50%) scale(1.25);
+  }
+  #level-ind {
+    position: absolute;
+    top: 16px;
+    right: 14px;
+    color: #0aa;
+    font-size: 14px;
+    letter-spacing: 1px;
+  }
+  #hp-wrap {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  #hp-label {
+    color: #888;
+    font-size: 11px;
+    letter-spacing: 1px;
+  }
+  #hp-bar-outer {
+    width: 160px;
+    height: 6px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  #hp-bar-inner {
+    height: 100%;
+    width: 100%;
+    background: #0f0;
+    border-radius: 3px;
+    transition: width 0.1s, background 0.3s;
+  }
+  #shield-ind {
+    color: #88f;
+    font-size: 11px;
+    letter-spacing: 1px;
+    min-height: 14px;
+  }
+
+  /* LEVEL UP OVERLAY */
+  #levelup-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.9);
+    z-index: 20;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    pointer-events: all;
+  }
+  #levelup-overlay.active { display: flex; }
+  #levelup-title {
+    color: #0ff;
+    font-size: 28px;
+    font-weight: bold;
+    text-shadow: 0 0 16px #0ff;
+    letter-spacing: 4px;
+  }
+  #levelup-sub {
+    color: #066;
+    font-size: 13px;
+    letter-spacing: 2px;
+  }
+  .upgrade-card {
+    width: 260px;
+    border: 1px solid #0ff;
+    background: rgba(0,20,40,0.95);
+    border-radius: 8px;
+    padding: 16px 18px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .upgrade-card:active {
+    background: rgba(0,60,100,0.95);
+    border-color: #fff;
+  }
+  .upgrade-card .uname {
+    color: #0ff;
+    font-size: 15px;
+    font-weight: bold;
+    margin-bottom: 6px;
+  }
+  .upgrade-card .udesc {
+    color: #aaa;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  /* GAME OVER OVERLAY */
+  #gameover-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.92);
+    z-index: 20;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    pointer-events: all;
+  }
+  #gameover-overlay.active { display: flex; }
+  #go-dead {
+    color: #f00;
+    font-size: 52px;
+    font-weight: bold;
+    text-shadow: 0 0 20px #f00, 0 0 40px #f00;
+    letter-spacing: 8px;
+  }
+  #go-dist {
+    color: #0ff;
+    font-size: 22px;
+    text-shadow: 0 0 8px #0ff;
+  }
+  #go-kills {
+    color: #888;
+    font-size: 16px;
+  }
+  #restart-btn {
+    margin-top: 10px;
+    background: #0ff;
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    padding: 14px 44px;
+    font-size: 18px;
+    font-weight: bold;
+    font-family: 'Courier New', monospace;
+    cursor: pointer;
+    letter-spacing: 2px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #restart-btn:active { background: #0aa; }
+  #go-best {
+    color: #0aa;
+    font-size: 14px;
+    letter-spacing: 1px;
+  }
+  #go-new-record {
+    display: none;
+    color: #ff0;
+    font-size: 22px;
+    font-weight: bold;
+    text-shadow: 0 0 14px #ff0, 0 0 28px #ff0;
+    letter-spacing: 4px;
+    animation: record-flash 0.35s steps(2) infinite;
+  }
+  @keyframes record-flash {
+    0%   { opacity: 1; }
+    50%  { opacity: 0.4; }
+    100% { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div>
+<canvas id="float-canvas"></canvas>
+<div id="hud">
+  <div id="score">0m</div>
+  <div id="level-ind">LVL 1</div>
+  <div id="hp-wrap">
+    <div id="shield-ind"></div>
+    <div id="hp-bar-outer"><div id="hp-bar-inner"></div></div>
+    <div id="hp-label">HP</div>
+  </div>
+</div>
+<div id="levelup-overlay">
+  <div id="levelup-title">LEVEL UP!</div>
+  <div id="levelup-sub">CHOOSE AN UPGRADE</div>
+  <div id="upgrade-cards"></div>
+</div>
+<div id="gameover-overlay">
+  <div id="go-dead">DEAD</div>
+  <div id="go-new-record">★ NEW BEST ★</div>
+  <div id="go-dist">0m</div>
+  <div id="go-kills">0 KILLS</div>
+  <div id="go-best">BEST: 0m</div>
+  <button id="restart-btn">RUN AGAIN</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ─── TELEGRAM WEBAPP API ─────────────────────────────────────────────────────
+var tg = window.Telegram && window.Telegram.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+}
+
+// ─── RENDERER + CAMERA ───────────────────────────────────────────────────────
+var canvas = document.getElementById('c');
+var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000510);
+
+var W = window.innerWidth, H = window.innerHeight;
+renderer.setSize(W, H);
+
+var VH = 22;
+var aspect = W / H;
+var VW = VH * aspect;
+
+var camera = new THREE.OrthographicCamera(
+  -VW / 2, VW / 2, VH / 2, -VH / 2, 0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+var scene = new THREE.Scene();
+
+var ambient = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambient);
+var dirLight = new THREE.DirectionalLight(0x4488ff, 0.8);
+dirLight.position.set(0, 5, 10);
+scene.add(dirLight);
+
+// ─── FLOAT CANVAS OVERLAY ────────────────────────────────────────────────────
+var fCanvas = document.getElementById('float-canvas');
+var fCtx = fCanvas.getContext('2d');
+fCanvas.width = W;
+fCanvas.height = H;
+
+// ─── FLASH OVERLAY ───────────────────────────────────────────────────────────
+var flashEl = document.getElementById('flash');
+var flashAlpha = 0;
+
+function triggerFlash(intensity) {
+  flashAlpha = Math.min(1, intensity);
+  flashEl.style.display = 'block';
+  flashEl.style.opacity = flashAlpha;
+}
+
+function updateFlash(dt) {
+  if (flashAlpha <= 0) return;
+  flashAlpha -= dt * 4;
+  if (flashAlpha <= 0) {
+    flashAlpha = 0;
+    flashEl.style.display = 'none';
+  } else {
+    flashEl.style.opacity = flashAlpha;
+  }
+}
+
+// ─── SHARED GEOMETRIES & MATERIALS ───────────────────────────────────────────
+var G = {
+  box:    new THREE.BoxGeometry(1, 1, 1),
+  boxSm:  new THREE.BoxGeometry(0.5, 0.5, 0.5),
+  sphere: new THREE.SphereGeometry(0.5, 8, 8),
+  oct:    new THREE.OctahedronGeometry(0.45, 0),
+  bullet: new THREE.BoxGeometry(0.18, 0.45, 0.18),
+  eBullet:new THREE.SphereGeometry(0.22, 6, 6),
+  tile:   new THREE.PlaneGeometry(4, 4),
+  particle: new THREE.BoxGeometry(0.2, 0.2, 0.2),
+  ring:   new THREE.BoxGeometry(0.15, 0.15, 0.15)
+};
+
+var M = {
+  player:  new THREE.MeshLambertMaterial({ color: 0x0088ff, emissive: 0x002244 }),
+  shield:  new THREE.MeshLambertMaterial({ color: 0x4444ff, transparent: true, opacity: 0.35, wireframe: true }),
+  bullet:  new THREE.MeshLambertMaterial({ color: 0x00ffff, emissive: 0x004444 }),
+  eBullet: new THREE.MeshLambertMaterial({ color: 0xff8800, emissive: 0x441100 }),
+  walker:  new THREE.MeshLambertMaterial({ color: 0xff2222, emissive: 0x220000 }),
+  shooter: new THREE.MeshLambertMaterial({ color: 0xff8800, emissive: 0x221100 }),
+  tank:    new THREE.MeshLambertMaterial({ color: 0x9933ff, emissive: 0x220044 }),
+  pickup:  new THREE.MeshLambertMaterial({ color: 0xff44aa, emissive: 0x220011 }),
+  tileA:   new THREE.MeshLambertMaterial({ color: 0x000d1a }),
+  tileB:   new THREE.MeshLambertMaterial({ color: 0x000820 }),
+};
+
+// ─── GAME STATE ───────────────────────────────────────────────────────────────
+var GS = {
+  running: false,
+  paused: false,
+  distance: 0,
+  kills: 0,
+  hp: 5,
+  maxHp: 5,
+  level: 1,
+  nextLevelDist: 500,
+  speedMult: 1,
+  fireRate: 0.35,
+  fireCooldown: 0,
+  bulletCount: 1,
+  pierce: 0,
+  bsize: 1.0,
+  bdamage: 1,
+  shieldHits: 0,
+  nova: false,
+  invincible: false,
+  invincibleTimer: 0,
+  blinkTimer: 0,
+  shake: 0,
+  shakeX: 0,
+  shakeY: 0,
+  touchLeft: false,
+  touchRight: false,
+  spawnTimer: 0,
+  spawnInterval: 1.2,
+  moveSpeed: 5.5,
+  scorePulseTimer: 0
+};
+
+// ─── PLAYER ───────────────────────────────────────────────────────────────────
+var playerGroup = new THREE.Group();
+scene.add(playerGroup);
+
+var playerMesh = new THREE.Mesh(G.box, M.player.clone());
+playerGroup.add(playerMesh);
+
+var shieldMesh = new THREE.Mesh(new THREE.SphereGeometry(0.85, 10, 10), M.shield.clone());
+shieldMesh.visible = false;
+playerGroup.add(shieldMesh);
+
+var PLAYER_Y = -VH / 2 + 3;
+playerGroup.position.set(0, PLAYER_Y, 0.5);
+
+// ─── TRAIL ────────────────────────────────────────────────────────────────────
+var TRAIL_LEN = 7;
+var trailPositions = [];
+var trailMeshes = [];
+for (var t = 0; t < TRAIL_LEN; t++) {
+  trailPositions.push({ x: 0, y: PLAYER_Y });
+  var tm = new THREE.Mesh(G.box, new THREE.MeshLambertMaterial({
+    color: 0x0044aa,
+    transparent: true,
+    opacity: 0
+  }));
+  var s = 0.9 - t * 0.1;
+  tm.scale.set(s, s, s);
+  scene.add(tm);
+  trailMeshes.push(tm);
+}
+
+// ─── OBJECT POOLS ─────────────────────────────────────────────────────────────
+var pBullets = [];
+for (var i = 0; i < 80; i++) {
+  var bm = new THREE.Mesh(G.bullet, new THREE.MeshLambertMaterial({ color: 0x00ffff, emissive: 0x004444 }));
+  bm.visible = false;
+  bm.userData = { active: false, pierceLeft: 0 };
+  scene.add(bm);
+  pBullets.push(bm);
+}
+
+var eBullets = [];
+for (var i = 0; i < 40; i++) {
+  var ebm = new THREE.Mesh(G.eBullet, new THREE.MeshLambertMaterial({ color: 0xff8800, emissive: 0x441100 }));
+  ebm.visible = false;
+  ebm.userData = { active: false, vx: 0, vy: 0 };
+  scene.add(ebm);
+  eBullets.push(ebm);
+}
+
+var enemies = [];
+for (var i = 0; i < 30; i++) {
+  var eg = new THREE.Group();
+  var em = new THREE.Mesh(G.box, new THREE.MeshLambertMaterial({ color: 0xff2222, emissive: 0x220000 }));
+  eg.add(em);
+  eg.visible = false;
+  eg.userData = {
+    active: false, type: 'walker', hp: 1, maxHp: 1,
+    speed: 4, points: 10, vx: 0, shootTimer: 0,
+    zigDir: 1, zigTimer: 0
+  };
+  scene.add(eg);
+  enemies.push(eg);
+}
+
+var pickups = [];
+for (var i = 0; i < 10; i++) {
+  var pm = new THREE.Mesh(G.oct, new THREE.MeshLambertMaterial({ color: 0xff44aa, emissive: 0x220011 }));
+  pm.visible = false;
+  pm.userData = { active: false };
+  scene.add(pm);
+  pickups.push(pm);
+}
+
+// Burst particles (pool A — directional burst)
+var particles = [];
+for (var i = 0; i < 150; i++) {
+  var part = new THREE.Mesh(G.particle, new THREE.MeshLambertMaterial({
+    color: 0xffffff, transparent: true, opacity: 1
+  }));
+  part.visible = false;
+  part.userData = { active: false, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0 };
+  scene.add(part);
+  particles.push(part);
+}
+
+// Ring particles (pool B — radial ring on kill)
+var ringParts = [];
+for (var i = 0; i < 64; i++) {
+  var rp = new THREE.Mesh(G.ring, new THREE.MeshLambertMaterial({
+    color: 0xffffff, transparent: true, opacity: 1
+  }));
+  rp.visible = false;
+  rp.userData = { active: false, vx: 0, vy: 0, life: 0, maxLife: 0 };
+  scene.add(rp);
+  ringParts.push(rp);
+}
+
+// ─── GROUND TILES ─────────────────────────────────────────────────────────────
+var TILE_SIZE = 4;
+var TCOLS = Math.ceil(VW / TILE_SIZE) + 2;
+var TROWS = Math.ceil(VH / TILE_SIZE) + 3;
+var tiles = [];
+var tileOffsetY = 0;
+
+for (var row = 0; row < TROWS; row++) {
+  for (var col = 0; col < TCOLS; col++) {
+    var isA = (row + col) % 2 === 0;
+    var tm2 = new THREE.Mesh(G.tile, isA ? M.tileA : M.tileB);
+    tm2.rotation.x = -Math.PI / 2;
+    var tx = (col - Math.floor(TCOLS / 2)) * TILE_SIZE;
+    var ty = (row - Math.floor(TROWS / 2)) * TILE_SIZE;
+    tm2.position.set(tx, ty, -0.1);
+    scene.add(tm2);
+    tiles.push({ mesh: tm2, baseRow: row });
+  }
+}
+
+// ─── FLOAT NUMBERS ───────────────────────────────────────────────────────────
+var floatNums = [];
+
+function spawnFloat(text, worldX, worldY, color, big) {
+  color = color || '#fff';
+  var sx = (worldX / VW + 0.5) * W;
+  var sy = (0.5 - worldY / VH) * H;
+  floatNums.push({ text: text, x: sx, y: sy, alpha: 1.0, color: color, life: 0, big: big || false });
+}
+
+function updateFloats(dt) {
+  fCtx.clearRect(0, 0, W, H);
+  for (var i = floatNums.length - 1; i >= 0; i--) {
+    var fn = floatNums[i];
+    fn.life += dt;
+    fn.y -= (fn.big ? 64 : 48) * dt;
+    fn.alpha = Math.max(0, 1 - fn.life * (fn.big ? 0.8 : 1));
+    if (fn.alpha <= 0 || fn.life >= (fn.big ? 1.4 : 1.0)) {
+      floatNums.splice(i, 1);
+      continue;
+    }
+    fCtx.save();
+    fCtx.globalAlpha = fn.alpha;
+    fCtx.fillStyle = fn.color;
+    fCtx.font = (fn.big ? 'bold 24px' : 'bold 16px') + ' Courier New';
+    fCtx.textAlign = 'center';
+    fCtx.shadowColor = fn.color;
+    fCtx.shadowBlur = fn.big ? 16 : 8;
+    fCtx.fillText(fn.text, fn.x, fn.y);
+    fCtx.restore();
+  }
+}
+
+// ─── INPUT ────────────────────────────────────────────────────────────────────
+var touchLeft = false, touchRight = false;
+var mouseLeft = false, mouseRight = false;
+
+function getTouchSide(clientX) {
+  return clientX < W / 2 ? 'left' : 'right';
+}
+
+var activeTouches = {};
+
+window.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    var side = getTouchSide(t.clientX);
+    activeTouches[t.identifier] = side;
+    if (side === 'left') touchLeft = true;
+    else touchRight = true;
+  }
+}, { passive: false });
+
+window.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    var prevSide = activeTouches[t.identifier];
+    var newSide = getTouchSide(t.clientX);
+    if (prevSide !== newSide) {
+      activeTouches[t.identifier] = newSide;
+      touchLeft = false; touchRight = false;
+      for (var id in activeTouches) {
+        if (activeTouches[id] === 'left') touchLeft = true;
+        else touchRight = true;
+      }
+    }
+  }
+}, { passive: false });
+
+window.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    delete activeTouches[t.identifier];
+  }
+  touchLeft = false; touchRight = false;
+  for (var id in activeTouches) {
+    if (activeTouches[id] === 'left') touchLeft = true;
+    else touchRight = true;
+  }
+}, { passive: false });
+
+window.addEventListener('touchcancel', function(e) {
+  activeTouches = {};
+  touchLeft = false; touchRight = false;
+}, { passive: false });
+
+window.addEventListener('mousedown', function(e) {
+  if (e.clientX < W / 2) mouseLeft = true;
+  else mouseRight = true;
+});
+window.addEventListener('mouseup', function() {
+  mouseLeft = false; mouseRight = false;
+});
+
+// ─── HUD HELPERS ─────────────────────────────────────────────────────────────
+var elScore = document.getElementById('score');
+var elLevel = document.getElementById('level-ind');
+var elHpInner = document.getElementById('hp-bar-inner');
+var elShield = document.getElementById('shield-ind');
+
+function updateHUD() {
+  elScore.textContent = Math.floor(GS.distance) + 'm';
+  elLevel.textContent = 'LVL ' + GS.level;
+  var pct = GS.hp / GS.maxHp;
+  elHpInner.style.width = Math.max(0, pct * 100) + '%';
+  if (pct > 0.6) elHpInner.style.background = '#0f0';
+  else if (pct > 0.3) elHpInner.style.background = '#ff0';
+  else elHpInner.style.background = '#f00';
+  elShield.textContent = GS.shieldHits > 0 ? 'SHIELD x' + GS.shieldHits : '';
+}
+
+function pulseScore() {
+  elScore.classList.add('pulse');
+  GS.scorePulseTimer = 0.12;
+}
+
+// ─── PARTICLES ───────────────────────────────────────────────────────────────
+function spawnParticles(x, y, color, count) {
+  var spawned = 0;
+  for (var i = 0; i < particles.length && spawned < count; i++) {
+    var p = particles[i];
+    if (!p.userData.active) {
+      p.userData.active = true;
+      p.visible = true;
+      p.position.set(x, y, 0.3);
+      p.material.color.set(color);
+      p.material.opacity = 1;
+      var angle = Math.random() * Math.PI * 2;
+      var spd = 2.5 + Math.random() * 4.0;
+      p.userData.vx = Math.cos(angle) * spd;
+      p.userData.vy = Math.sin(angle) * spd;
+      p.userData.vz = Math.random() * 1.5;
+      p.userData.life = 0;
+      p.userData.maxLife = 0.45 + Math.random() * 0.25;
+      spawned++;
+    }
+  }
+}
+
+// Enhanced ring burst on kill
+function spawnKillRing(x, y, color, count) {
+  var spawned = 0;
+  for (var i = 0; i < ringParts.length && spawned < count; i++) {
+    var p = ringParts[i];
+    if (!p.userData.active) {
+      p.userData.active = true;
+      p.visible = true;
+      p.position.set(x, y, 0.4);
+      p.material.color.set(color);
+      p.material.opacity = 1;
+      var angle = (spawned / count) * Math.PI * 2;
+      var spd = 5 + Math.random() * 3;
+      p.userData.vx = Math.cos(angle) * spd;
+      p.userData.vy = Math.sin(angle) * spd;
+      p.userData.life = 0;
+      p.userData.maxLife = 0.35 + Math.random() * 0.15;
+      spawned++;
+    }
+  }
+}
+
+function updateParticles(dt) {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    if (!p.userData.active) continue;
+    p.userData.life += dt;
+    if (p.userData.life >= p.userData.maxLife) {
+      p.userData.active = false;
+      p.visible = false;
+      continue;
+    }
+    var f = 1 - p.userData.life / p.userData.maxLife;
+    p.material.opacity = f;
+    p.position.x += p.userData.vx * dt;
+    p.position.y += p.userData.vy * dt;
+    p.position.z += p.userData.vz * dt;
+    p.userData.vx *= 0.88;
+    p.userData.vy *= 0.88;
+    p.rotation.x += 3 * dt;
+    p.rotation.y += 3 * dt;
+  }
+  for (var i = 0; i < ringParts.length; i++) {
+    var p = ringParts[i];
+    if (!p.userData.active) continue;
+    p.userData.life += dt;
+    if (p.userData.life >= p.userData.maxLife) {
+      p.userData.active = false;
+      p.visible = false;
+      continue;
+    }
+    var f = 1 - p.userData.life / p.userData.maxLife;
+    p.material.opacity = f * f;
+    p.position.x += p.userData.vx * dt;
+    p.position.y += p.userData.vy * dt;
+    p.userData.vx *= 0.92;
+    p.userData.vy *= 0.92;
+    p.rotation.z += 5 * dt;
+  }
+}
+
+// ─── SCREEN SHAKE ─────────────────────────────────────────────────────────────
+function addShake(amt) {
+  GS.shake = Math.max(GS.shake, amt);
+}
+
+function updateShake() {
+  if (GS.shake > 0.01) {
+    GS.shake *= 0.82;
+    GS.shakeX = (Math.random() - 0.5) * 2 * GS.shake;
+    GS.shakeY = (Math.random() - 0.5) * 2 * GS.shake;
+  } else {
+    GS.shake = 0;
+    GS.shakeX = 0;
+    GS.shakeY = 0;
+  }
+  camera.position.x = GS.shakeX;
+  camera.position.y = GS.shakeY;
+}
+
+// ─── UPGRADES ─────────────────────────────────────────────────────────────────
+var ALL_UPGRADES = [
+  { id: 'multishot', name: 'MULTI-SHOT', desc: '+2 bullets per volley (max 5)',
+    apply: function() { GS.bulletCount = Math.min(5, GS.bulletCount + 2); } },
+  { id: 'rapidfire', name: 'RAPID FIRE', desc: 'Fire rate x0.6 (min 0.12s)',
+    apply: function() { GS.fireRate = Math.max(0.12, GS.fireRate * 0.6); } },
+  { id: 'pierce', name: 'PIERCE', desc: 'Bullets pass through up to 2 enemies',
+    apply: function() { GS.pierce = Math.min(GS.pierce + 2, 4); } },
+  { id: 'bigshot', name: 'BIG SHOT', desc: 'Bullet size x1.6, 2x damage',
+    apply: function() { GS.bsize = Math.min(3.0, GS.bsize * 1.6); GS.bdamage = GS.bdamage * 2; } },
+  { id: 'overdrive', name: 'OVERDRIVE', desc: 'Move speed +25%',
+    apply: function() { GS.moveSpeed *= 1.25; } },
+  { id: 'shield', name: 'SHIELD', desc: 'Block next 3 hits',
+    apply: function() { GS.shieldHits += 3; shieldMesh.visible = GS.shieldHits > 0; } },
+  { id: 'nova', name: 'NOVA', desc: 'AOE explosion on kill (3.5 unit radius)',
+    apply: function() { GS.nova = true; } },
+  { id: 'heal', name: 'HEAL +1', desc: 'Restore 1 HP',
+    apply: function() { GS.hp = Math.min(GS.maxHp, GS.hp + 1); } }
+];
+
+function getRandomUpgrades(n) {
+  var pool = ALL_UPGRADES.slice();
+  var chosen = [];
+  while (chosen.length < n && pool.length > 0) {
+    var idx = Math.floor(Math.random() * pool.length);
+    chosen.push(pool.splice(idx, 1)[0]);
+  }
+  return chosen;
+}
+
+function showLevelUp() {
+  GS.paused = true;
+  // Flash + particle burst on level up
+  triggerFlash(0.35);
+  spawnParticles(playerGroup.position.x, playerGroup.position.y, 0x00ffff, 20);
+  addShake(0.5);
+
+  var choices = getRandomUpgrades(3);
+  var container = document.getElementById('upgrade-cards');
+  container.innerHTML = '';
+  choices.forEach(function(upg) {
+    var card = document.createElement('div');
+    card.className = 'upgrade-card';
+    card.innerHTML = '<div class="uname">' + upg.name + '</div><div class="udesc">' + upg.desc + '</div>';
+    card.addEventListener('click', function() {
+      upg.apply();
+      document.getElementById('levelup-overlay').classList.remove('active');
+      GS.paused = false;
+    });
+    container.appendChild(card);
+  });
+  document.getElementById('levelup-overlay').classList.add('active');
+}
+
+// ─── FIRE ─────────────────────────────────────────────────────────────────────
+function fire() {
+  var count = GS.bulletCount;
+  var spread = (count - 1) * 0.35;
+  for (var k = 0; k < count; k++) {
+    var b = null;
+    for (var i = 0; i < pBullets.length; i++) {
+      if (!pBullets[i].userData.active) { b = pBullets[i]; break; }
+    }
+    if (!b) break;
+    b.userData.active = true;
+    b.userData.pierceLeft = GS.pierce;
+    b.visible = true;
+    var offsetX = count > 1 ? -spread / 2 + k * (spread / (count - 1)) : 0;
+    b.position.set(playerGroup.position.x + offsetX, playerGroup.position.y + 0.8, 0.3);
+    b.scale.set(GS.bsize, GS.bsize, GS.bsize);
+    b.userData.vx = offsetX * 0.5;
+    b.userData.vy = 14;
+  }
+}
+
+// ─── HIT ENEMY ────────────────────────────────────────────────────────────────
+function hitEnemy(e, dmg) {
+  e.userData.hp -= dmg;
+  addShake(0.18);
+  spawnParticles(e.position.x, e.position.y, e.children[0].material.color.getHex(), 4);
+  spawnFloat('-' + dmg, e.position.x, e.position.y, '#ff4');
+  if (e.userData.hp <= 0) {
+    killEnemy(e);
+  }
+}
+
+// ─── KILL ENEMY ───────────────────────────────────────────────────────────────
+function killEnemy(e) {
+  if (!e.userData.active) return;
+  e.visible = false;
+  e.userData.active = false;
+  GS.kills++;
+  var col = e.children[0].material.color.getHex();
+  // Big burst + ring
+  spawnParticles(e.position.x, e.position.y, col, 16);
+  spawnKillRing(e.position.x, e.position.y, col, 12);
+  // Big float score
+  spawnFloat('+' + e.userData.points, e.position.x, e.position.y, '#0ff', true);
+  addShake(0.55);
+  pulseScore();
+  if (GS.nova) {
+    var ex = e.position.x, ey = e.position.y;
+    for (var i = 0; i < enemies.length; i++) {
+      var ne = enemies[i];
+      if (!ne.userData.active) continue;
+      var dx = ne.position.x - ex, dy = ne.position.y - ey;
+      if (Math.sqrt(dx * dx + dy * dy) < 3.5) {
+        hitEnemy(ne, 1);
+      }
+    }
+  }
+}
+
+// ─── HIT PLAYER ───────────────────────────────────────────────────────────────
+function hitPlayer(dmg, label) {
+  if (GS.invincible) return;
+  if (GS.shieldHits > 0) {
+    GS.shieldHits--;
+    shieldMesh.visible = GS.shieldHits > 0;
+    spawnFloat('BLOCK!', playerGroup.position.x, playerGroup.position.y + 1, '#88f');
+    addShake(0.3);
+    return;
+  }
+  GS.hp -= dmg;
+  addShake(1.2);
+  spawnParticles(playerGroup.position.x, playerGroup.position.y, 0x00ccff, 10);
+  spawnFloat(label || '-1 HP', playerGroup.position.x, playerGroup.position.y + 1, '#f44', true);
+  triggerFlash(0.15);
+  GS.invincible = true;
+  GS.invincibleTimer = 1.5;
+  if (GS.hp <= 0) {
+    GS.hp = 0;
+    die();
+  }
+  updateHUD();
+}
+
+// ─── DIE ─────────────────────────────────────────────────────────────────────
+function die() {
+  GS.running = false;
+  var finalDist = Math.floor(GS.distance);
+  document.getElementById('go-dist').textContent = finalDist + 'm';
+  document.getElementById('go-kills').textContent = GS.kills + ' KILLS';
+
+  // High score tracking (localStorage)
+  var prevBest = 0;
+  try {
+    prevBest = parseInt(localStorage.getItem('voidrun_best') || '0', 10);
+  } catch (_e) {
+    console.warn('[WARN] localStorage read:', _e);
+  }
+  var isNewBest = finalDist > prevBest;
+  if (isNewBest) {
+    try {
+      localStorage.setItem('voidrun_best', String(finalDist));
+    } catch (_e) {
+      console.warn('[WARN] localStorage write:', _e);
+    }
+    prevBest = finalDist;
+  }
+  document.getElementById('go-best').textContent = 'BEST: ' + prevBest + 'm';
+  document.getElementById('go-new-record').style.display = isNewBest ? 'block' : 'none';
+
+  document.getElementById('gameover-overlay').classList.add('active');
+  triggerFlash(0.5);
+  addShake(2.0);
+
+  // Report score to Telegram
+  if (tg) {
+    try {
+      tg.sendData(JSON.stringify({ score: finalDist, kills: GS.kills, level: GS.level }));
+    } catch (_e) {
+      console.warn('[WARN] tg.sendData:', _e);
+    }
+  }
+}
+
+// ─── SPAWN ENEMY ─────────────────────────────────────────────────────────────
+function spawnEnemy() {
+  var e = null;
+  for (var i = 0; i < enemies.length; i++) {
+    if (!enemies[i].userData.active) { e = enemies[i]; break; }
+  }
+  if (!e) return;
+
+  var diff = 1 + GS.distance / 3000;
+  var r = Math.random();
+  var type, hp, speed, points;
+  if (r < 0.5) {
+    type = 'walker'; hp = 1; speed = 4 * diff; points = 10;
+    e.children[0].material.color.set(0xff2222);
+    e.children[0].material.emissive.set(0x220000);
+    e.scale.set(1, 1, 1);
+  } else if (r < 0.8) {
+    type = 'shooter'; hp = 2; speed = 2 * diff; points = 20;
+    e.children[0].material.color.set(0xff8800);
+    e.children[0].material.emissive.set(0x221100);
+    e.scale.set(0.9, 0.9, 0.9);
+  } else {
+    type = 'tank'; hp = 5; speed = 2.5 * diff; points = 50;
+    e.children[0].material.color.set(0x9933ff);
+    e.children[0].material.emissive.set(0x220044);
+    e.scale.set(1.5, 1.5, 1.5);
+  }
+
+  e.userData.active = true;
+  e.userData.type = type;
+  e.userData.hp = hp;
+  e.userData.maxHp = hp;
+  e.userData.speed = speed;
+  e.userData.points = points;
+  e.userData.vx = (Math.random() - 0.5) * 2.5;
+  e.userData.shootTimer = type === 'shooter' ? 1.0 + Math.random() : 0;
+  e.userData.zigDir = Math.random() < 0.5 ? 1 : -1;
+  e.userData.zigTimer = 0.5 + Math.random() * 0.8;
+  e.position.set(
+    (Math.random() - 0.5) * (VW - 2),
+    VH / 2 + 2,
+    0.2
+  );
+  e.visible = true;
+}
+
+// ─── SPAWN PICKUP ────────────────────────────────────────────────────────────
+var pickupTimer = 0;
+function trySpawnPickup(dt) {
+  if (GS.hp >= GS.maxHp) return;
+  pickupTimer += dt;
+  if (pickupTimer >= 1.0) {
+    pickupTimer = 0;
+    if (Math.random() < 0.08) {
+      for (var i = 0; i < pickups.length; i++) {
+        if (!pickups[i].userData.active) {
+          pickups[i].userData.active = true;
+          pickups[i].visible = true;
+          pickups[i].position.set(
+            (Math.random() - 0.5) * (VW - 2),
+            VH / 2 + 1,
+            0.3
+          );
+          break;
+        }
+      }
+    }
+  }
+}
+
+// ─── ENEMY BULLET FIRE ───────────────────────────────────────────────────────
+function enemyFire(e) {
+  var b = null;
+  for (var i = 0; i < eBullets.length; i++) {
+    if (!eBullets[i].userData.active) { b = eBullets[i]; break; }
+  }
+  if (!b) return;
+  b.userData.active = true;
+  b.visible = true;
+  var dx = playerGroup.position.x - e.position.x;
+  var dy = playerGroup.position.y - e.position.y;
+  var len = Math.sqrt(dx * dx + dy * dy) || 1;
+  var spd = 7;
+  b.userData.vx = (dx / len) * spd;
+  b.userData.vy = (dy / len) * spd;
+  b.position.set(e.position.x, e.position.y - 0.5, 0.3);
+}
+
+// ─── RESTART ─────────────────────────────────────────────────────────────────
+function restart() {
+  GS.running = true;
+  GS.paused = false;
+  GS.distance = 0;
+  GS.kills = 0;
+  GS.hp = 5;
+  GS.maxHp = 5;
+  GS.level = 1;
+  GS.nextLevelDist = 500;
+  GS.speedMult = 1;
+  GS.fireRate = 0.35;
+  GS.fireCooldown = 0;
+  GS.bulletCount = 1;
+  GS.pierce = 0;
+  GS.bsize = 1.0;
+  GS.bdamage = 1;
+  GS.shieldHits = 0;
+  GS.nova = false;
+  GS.invincible = false;
+  GS.invincibleTimer = 0;
+  GS.blinkTimer = 0;
+  GS.shake = 0;
+  GS.shakeX = 0;
+  GS.shakeY = 0;
+  GS.spawnTimer = 0;
+  GS.spawnInterval = 1.2;
+  GS.moveSpeed = 5.5;
+  GS.scorePulseTimer = 0;
+
+  playerGroup.position.set(0, PLAYER_Y, 0.5);
+  playerMesh.visible = true;
+  shieldMesh.visible = false;
+
+  for (var i = 0; i < pBullets.length; i++) { pBullets[i].userData.active = false; pBullets[i].visible = false; }
+  for (var i = 0; i < eBullets.length; i++) { eBullets[i].userData.active = false; eBullets[i].visible = false; }
+  for (var i = 0; i < enemies.length; i++) { enemies[i].userData.active = false; enemies[i].visible = false; }
+  for (var i = 0; i < pickups.length; i++) { pickups[i].userData.active = false; pickups[i].visible = false; }
+  for (var i = 0; i < particles.length; i++) { particles[i].userData.active = false; particles[i].visible = false; }
+  for (var i = 0; i < ringParts.length; i++) { ringParts[i].userData.active = false; ringParts[i].visible = false; }
+
+  floatNums.length = 0;
+  activeTouches = {};
+  touchLeft = false; touchRight = false;
+  pickupTimer = 0;
+  flashAlpha = 0;
+  idleTime = 0;
+  flashEl.style.display = 'none';
+  elScore.classList.remove('pulse');
+
+  for (var t = 0; t < TRAIL_LEN; t++) {
+    trailPositions[t] = { x: 0, y: PLAYER_Y };
+    trailMeshes[t].position.set(0, PLAYER_Y, 0.4 - t * 0.05);
+    trailMeshes[t].material.opacity = 0;
+  }
+  tileOffsetY = 0;
+
+  document.getElementById('gameover-overlay').classList.remove('active');
+  document.getElementById('levelup-overlay').classList.remove('active');
+  updateHUD();
+}
+
+// ─── RESIZE ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', function() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  aspect = W / H;
+  VW = VH * aspect;
+  renderer.setSize(W, H);
+  fCanvas.width = W;
+  fCanvas.height = H;
+  camera.left = -VW / 2;
+  camera.right = VW / 2;
+  camera.top = VH / 2;
+  camera.bottom = -VH / 2;
+  camera.updateProjectionMatrix();
+});
+
+document.getElementById('restart-btn').addEventListener('click', function() {
+  restart();
+});
+
+// ─── MAIN UPDATE ─────────────────────────────────────────────────────────────
+var lastTime = null;
+var idleTime = 0; // tracks seconds since last lateral movement — drives idle bob
+
+function update(dt) {
+  if (!GS.running || GS.paused) return;
+
+  var isLeft = touchLeft || mouseLeft;
+  var isRight = touchRight || mouseRight;
+
+  var scrollSpeed = 10 * GS.speedMult * (1 + GS.distance / 6000);
+  GS.distance += scrollSpeed * dt * 0.5;
+
+  if (GS.distance >= GS.nextLevelDist) {
+    GS.level++;
+    GS.nextLevelDist += 500;
+    showLevelUp();
+    return;
+  }
+
+  // Score pulse decay
+  if (GS.scorePulseTimer > 0) {
+    GS.scorePulseTimer -= dt;
+    if (GS.scorePulseTimer <= 0) {
+      elScore.classList.remove('pulse');
+    }
+  }
+
+  // Player movement
+  var px = playerGroup.position.x;
+  var moving = (isLeft && !isRight) || (isRight && !isLeft);
+  if (isLeft && !isRight) {
+    px -= GS.moveSpeed * dt;
+    playerMesh.rotation.z = Math.min(0.35, playerMesh.rotation.z + 6 * dt);
+    idleTime = 0;
+  } else if (isRight && !isLeft) {
+    px += GS.moveSpeed * dt;
+    playerMesh.rotation.z = Math.max(-0.35, playerMesh.rotation.z - 6 * dt);
+    idleTime = 0;
+  } else {
+    playerMesh.rotation.z *= 0.85;
+    idleTime += dt;
+  }
+  px = Math.max(-VW / 2 + 0.8, Math.min(VW / 2 - 0.8, px));
+  playerGroup.position.x = px;
+
+  // Idle bob: subtle Y oscillation when not moving (0.12 unit amplitude, 1.6 Hz)
+  if (!moving) {
+    playerGroup.position.y = PLAYER_Y + Math.sin(idleTime * Math.PI * 1.6) * 0.12;
+  } else {
+    playerGroup.position.y = PLAYER_Y;
+  }
+
+  // Trail update
+  trailPositions.unshift({ x: px, y: PLAYER_Y });
+  if (trailPositions.length > TRAIL_LEN) trailPositions.pop();
+  for (var t = 0; t < trailPositions.length; t++) {
+    var s = 0.9 - t * 0.1;
+    trailMeshes[t].position.set(trailPositions[t].x, trailPositions[t].y, 0.4 - t * 0.05);
+    trailMeshes[t].scale.set(s, s, s);
+    trailMeshes[t].material.opacity = (0.35 - t * 0.04) * (GS.invincible ? 0.5 : 1);
+    trailMeshes[t].rotation.z = playerMesh.rotation.z * (1 - t * 0.15);
+  }
+
+  if (GS.invincible) {
+    GS.invincibleTimer -= dt;
+    GS.blinkTimer += dt;
+    playerMesh.visible = Math.floor(GS.blinkTimer * 8) % 2 === 0;
+    if (GS.invincibleTimer <= 0) {
+      GS.invincible = false;
+      playerMesh.visible = true;
+    }
+  }
+
+  GS.fireCooldown -= dt;
+  if (GS.fireCooldown <= 0) {
+    fire();
+    GS.fireCooldown = GS.fireRate;
+  }
+
+  GS.spawnTimer -= dt;
+  if (GS.spawnTimer <= 0) {
+    var diff = 1 + GS.distance / 3000;
+    GS.spawnInterval = Math.max(0.4, 1.2 / diff);
+    spawnEnemy();
+    GS.spawnTimer = GS.spawnInterval * (0.7 + Math.random() * 0.6);
+  }
+
+  // Update enemies
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (!e.userData.active) continue;
+    e.position.y -= scrollSpeed * dt;
+
+    var type = e.userData.type;
+    if (type === 'walker') {
+      e.userData.zigTimer -= dt;
+      if (e.userData.zigTimer <= 0) {
+        e.userData.zigDir *= -1;
+        e.userData.zigTimer = 0.4 + Math.random() * 0.6;
+      }
+      e.position.x += e.userData.zigDir * e.userData.speed * dt;
+      e.children[0].rotation.y += 2 * dt;
+      e.children[0].rotation.z += dt;
+    } else if (type === 'shooter') {
+      e.position.x += e.userData.vx * dt;
+      e.children[0].rotation.x += 1.5 * dt;
+      e.children[0].rotation.y += dt;
+      e.userData.shootTimer -= dt;
+      if (e.userData.shootTimer <= 0) {
+        enemyFire(e);
+        e.userData.shootTimer = 2.2;
+      }
+    } else if (type === 'tank') {
+      e.children[0].rotation.x += 0.8 * dt;
+      e.children[0].rotation.z += 0.5 * dt;
+    }
+
+    if (e.position.x < -VW / 2 + 0.5) { e.position.x = -VW / 2 + 0.5; e.userData.zigDir = 1; e.userData.vx = Math.abs(e.userData.vx); }
+    if (e.position.x > VW / 2 - 0.5) { e.position.x = VW / 2 - 0.5; e.userData.zigDir = -1; e.userData.vx = -Math.abs(e.userData.vx); }
+
+    if (e.position.y < -VH / 2 - 2) {
+      e.userData.active = false;
+      e.visible = false;
+      hitPlayer(1, 'MISS!');
+      spawnFloat('MISS!', 0, PLAYER_Y + 1.5, '#f80');
+      continue;
+    }
+
+    var rdx = playerGroup.position.x - e.position.x;
+    var rdy = playerGroup.position.y - e.position.y;
+    if (Math.sqrt(rdx * rdx + rdy * rdy) < 0.9 + e.scale.x * 0.5) {
+      hitPlayer(1, '-1 HP');
+      e.userData.active = false;
+      e.visible = false;
+      spawnParticles(e.position.x, e.position.y, e.children[0].material.color.getHex(), 8);
+    }
+  }
+
+  // Update player bullets
+  for (var i = 0; i < pBullets.length; i++) {
+    var b = pBullets[i];
+    if (!b.userData.active) continue;
+    b.position.y += b.userData.vy * dt;
+    b.position.x += (b.userData.vx || 0) * dt;
+
+    if (b.position.y > VH / 2 + 1) {
+      b.userData.active = false;
+      b.visible = false;
+      continue;
+    }
+
+    for (var j = 0; j < enemies.length; j++) {
+      var e = enemies[j];
+      if (!e.userData.active) continue;
+      var hitR = 0.9 * e.scale.x + 0.25 * GS.bsize;
+      if (b.position.distanceTo(e.position) < hitR) {
+        hitEnemy(e, GS.bdamage);
+        if (b.userData.pierceLeft > 0) {
+          b.userData.pierceLeft--;
+        } else {
+          spawnParticles(b.position.x, b.position.y, 0xffff00, 4);
+          b.userData.active = false;
+          b.visible = false;
+          break;
+        }
+      }
+    }
+  }
+
+  // Update enemy bullets
+  for (var i = 0; i < eBullets.length; i++) {
+    var b = eBullets[i];
+    if (!b.userData.active) continue;
+    b.position.x += b.userData.vx * dt;
+    b.position.y += b.userData.vy * dt;
+    b.rotation.z += 4 * dt;
+
+    if (b.position.y < -VH / 2 - 1 || b.position.y > VH / 2 + 1 ||
+        b.position.x < -VW / 2 - 1 || b.position.x > VW / 2 + 1) {
+      b.userData.active = false;
+      b.visible = false;
+      continue;
+    }
+
+    var ebdx = b.position.x - playerGroup.position.x;
+    var ebdy = b.position.y - playerGroup.position.y;
+    if (Math.sqrt(ebdx * ebdx + ebdy * ebdy) < 0.7) {
+      hitPlayer(1, '-1 HP');
+      b.userData.active = false;
+      b.visible = false;
+    }
+  }
+
+  // Update pickups
+  trySpawnPickup(dt);
+  for (var i = 0; i < pickups.length; i++) {
+    var p = pickups[i];
+    if (!p.userData.active) continue;
+    p.position.y -= scrollSpeed * dt;
+    p.rotation.y += 2 * dt;
+    p.rotation.x += dt;
+
+    if (p.position.y < -VH / 2 - 1) {
+      p.userData.active = false;
+      p.visible = false;
+      continue;
+    }
+
+    var pdx = p.position.x - playerGroup.position.x;
+    var pdy = p.position.y - playerGroup.position.y;
+    if (Math.sqrt(pdx * pdx + pdy * pdy) < 0.8) {
+      GS.hp = Math.min(GS.maxHp, GS.hp + 1);
+      spawnFloat('+1 HP', p.position.x, p.position.y, '#f8a', true);
+      p.userData.active = false;
+      p.visible = false;
+      updateHUD();
+    }
+  }
+
+  // Scroll tiles
+  tileOffsetY -= scrollSpeed * dt;
+  if (tileOffsetY <= -TILE_SIZE) tileOffsetY += TILE_SIZE;
+  for (var k = 0; k < tiles.length; k++) {
+    var row = Math.floor(k / TCOLS);
+    var col = k % TCOLS;
+    tiles[k].mesh.position.x = (col - Math.floor(TCOLS / 2)) * TILE_SIZE;
+    tiles[k].mesh.position.y = (row - Math.floor(TROWS / 2)) * TILE_SIZE + tileOffsetY;
+  }
+
+  updateParticles(dt);
+  updateShake();
+  updateFlash(dt);
+  updateHUD();
+}
+
+// ─── RENDER LOOP ─────────────────────────────────────────────────────────────
+var lastTime = null;
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (lastTime === null) { lastTime = now; }
+  var dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  update(dt);
+  updateFloats(dt);
+  renderer.render(scene, camera);
+}
+
+// ─── START ────────────────────────────────────────────────────────────────────
+restart();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
