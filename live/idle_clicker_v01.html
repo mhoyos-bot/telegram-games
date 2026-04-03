@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Spark Clicker</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{overflow:hidden;touch-action:none;background:#080810;font-family:'Courier New',monospace;}
+#c{display:block;position:fixed;top:0;left:0;}
+#ui{position:fixed;top:0;right:0;width:190px;height:100vh;background:rgba(8,8,16,0.92);border-left:1px solid #14f19530;display:flex;flex-direction:column;padding:8px;overflow-y:auto;z-index:10;}
+#hdr{color:#14f195;font-size:20px;font-weight:bold;text-align:center;padding:8px 0 4px;}
+#ps{color:#888;font-size:11px;text-align:center;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid #14f19520;}
+#genlist{}
+.gen{margin-top:5px;padding:6px 7px;border:1px solid #222;border-radius:4px;cursor:pointer;position:relative;transition:border-color .2s,background .2s;}
+.gen:hover:not(.locked){border-color:#14f195;background:rgba(20,241,149,0.05);}
+.gen.locked{opacity:0.25;cursor:default;}
+.gen.affordable{border-color:#14f19550;}
+.gcnt{position:absolute;right:7px;top:6px;color:#14f195;font-size:15px;font-weight:bold;}
+.gname{color:#ddd;font-size:11px;}
+.grate{color:#14f19590;font-size:10px;margin-top:1px;}
+.gcost{color:#ffaa44;font-size:10px;margin-top:1px;}
+#upgwrap{margin-top:8px;border-top:1px solid #222;padding-top:6px;}
+#upgtitle{color:#555;font-size:10px;letter-spacing:1px;margin-bottom:4px;}
+.upg{margin-top:4px;padding:5px 7px;border:1px solid #222;border-radius:3px;cursor:pointer;transition:border-color .2s;}
+.upg:hover:not(.done){border-color:#ffaa44;}
+.upg.done{opacity:0.35;cursor:default;}
+.uname{color:#ccc;font-size:10px;}
+.udesc{color:#555;font-size:9px;}
+.ucost{color:#ffaa44;font-size:9px;margin-top:1px;}
+#toast{position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);background:#000;border:1px solid #14f195;color:#14f195;padding:10px 18px;border-radius:6px;font-size:13px;pointer-events:none;opacity:0;transition:opacity .4s;z-index:20;}
+#clickhint{position:fixed;bottom:20px;left:calc(50% - 95px);color:#14f19550;font-size:11px;pointer-events:none;transition:opacity 1s;}
+</style>
+</head><body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="hdr">0 ⚡</div>
+  <div id="ps">0.0 /s</div>
+  <div id="genlist"></div>
+  <div id="upgwrap">
+    <div id="upgtitle">UPGRADES</div>
+    <div id="upglist"></div>
+  </div>
+</div>
+<div id="toast"></div>
+<div id="clickhint">tap the orb</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Telegram bridge
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const haptic = (t='light') => tg?.HapticFeedback?.impactOccurred(t);
+
+// Viewport (leave room for UI panel)
+const CW = () => window.innerWidth - 190;
+const CH = () => window.innerHeight;
+
+// Renderer
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(CW(), CH());
+renderer.shadowMap.enabled = false;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, CW()/CH(), 0.1, 100);
+camera.position.set(0, 0, 9);
+
+// Lights
+scene.add(new THREE.AmbientLight(0x112233, 2));
+const dLight = new THREE.DirectionalLight(0x14f195, 3);
+dLight.position.set(4, 6, 4);
+scene.add(dLight);
+const fillLight = new THREE.PointLight(0x3344ff, 1.5, 20);
+fillLight.position.set(-4, -3, 3);
+scene.add(fillLight);
+
+// --- ORB ---
+const orbGeo = new THREE.IcosahedronGeometry(1.3, 2);
+const orbMat = new THREE.MeshToonMaterial({color:0x14f195, emissive:0x052a1a, emissiveIntensity:0.5});
+const orb = new THREE.Mesh(orbGeo, orbMat);
+scene.add(orb);
+
+// Wireframe shell
+const wireGeo = new THREE.IcosahedronGeometry(1.5, 1);
+const wireMat = new THREE.MeshBasicMaterial({color:0x14f195, wireframe:true, transparent:true, opacity:0.08});
+const wire = new THREE.Mesh(wireGeo, wireMat);
+scene.add(wire);
+
+// Inner crystal
+const innerGeo = new THREE.OctahedronGeometry(0.7, 0);
+const innerMat = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.12});
+const inner = new THREE.Mesh(innerGeo, innerMat);
+scene.add(inner);
+
+// --- PARTICLES (pool) ---
+const PMAX = 30;
+const pPool = [];
+const pGeo = new THREE.SphereGeometry(0.055, 4, 3);
+const pMat = new THREE.MeshBasicMaterial({color:0x14f195, transparent:true});
+for (let i = 0; i < PMAX; i++) {
+  const m = new THREE.Mesh(pGeo, pMat.clone());
+  m.visible = false;
+  m._v = new THREE.Vector3();
+  m._life = 0;
+  scene.add(m);
+  pPool.push(m);
+}
+let pHead = 0;
+
+function burst(n) {
+  for (let i = 0; i < n; i++) {
+    const p = pPool[pHead++ % PMAX];
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.random() * Math.PI;
+    const spd = 2.5 + Math.random() * 4;
+    p.position.set(0, 0, 0);
+    p._v.set(
+      Math.sin(ph)*Math.cos(th)*spd,
+      Math.sin(ph)*Math.sin(th)*spd,
+      Math.cos(ph)*spd
+    );
+    p._life = 1;
+    p.visible = true;
+    p.material.opacity = 1;
+    p.material.color.setHex(Math.random() > 0.7 ? 0xffcc44 : 0x14f195);
+  }
+}
+
+// --- GENERATOR RING VISUALS ---
+const GEN_PALETTE = [0x4499ff, 0xff6644, 0xff44cc, 0x88ff44, 0xaa44ff];
+const RING_GEO = new THREE.OctahedronGeometry(0.3, 0);
+const genMeshes = [];
+for (let i = 0; i < 5; i++) {
+  const m = new THREE.Mesh(RING_GEO, new THREE.MeshToonMaterial({
+    color: GEN_PALETTE[i], emissive: GEN_PALETTE[i], emissiveIntensity: 0.3
+  }));
+  m.visible = false;
+  m._ang = (i / 5) * Math.PI * 2;
+  m._spd = 0.25 + i * 0.08;
+  m._r = 3.2 + i * 0.3;
+  scene.add(m);
+  genMeshes.push(m);
+}
+
+// Stars background
+const starGeo = new THREE.BufferGeometry();
+const starPos = new Float32Array(600);
+for (let i = 0; i < 600; i++) starPos[i] = (Math.random() - 0.5) * 60;
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({color:0x445566, size:0.08}));
+scene.add(stars);
+
+// --- ECONOMY ---
+const GENS = [
+  {name:'Spark Mote',    emoji:'🔵', base:10,     rate:0.1,  unlock:0,      count:0, mult:1},
+  {name:'Ember Core',    emoji:'🔶', base:120,    rate:0.5,  unlock:50,     count:0, mult:1},
+  {name:'Flame Engine',  emoji:'🔴', base:1300,   rate:3,    unlock:500,    count:0, mult:1},
+  {name:'Arc Reactor',   emoji:'🟣', base:14000,  rate:15,   unlock:5000,   count:0, mult:1},
+  {name:'Void Harvester',emoji:'⭐', base:150000, rate:100,  unlock:50000,  count:0, mult:1},
+];
+
+const UPGRADES = [
+  {name:'Double Click',   desc:'Click power ×2',  cost:50,     done:false, fn:()=>{ clickPow*=2; }},
+  {name:'Mote Frenzy',    desc:'Motes ×3',        cost:400,    done:false, fn:()=>{ GENS[0].mult*=3; }},
+  {name:'Ember Surge',    desc:'Embers ×3',       cost:4000,   done:false, fn:()=>{ GENS[1].mult*=3; }},
+  {name:'Click Nova',     desc:'Click power ×5',  cost:12000,  done:false, fn:()=>{ clickPow*=5; }},
+  {name:'Flame Turbo',    desc:'Flames ×3',       cost:35000,  done:false, fn:()=>{ GENS[2].mult*=3; }},
+  {name:'Arc Storm',      desc:'Arc ×3',          cost:350000, done:false, fn:()=>{ GENS[3].mult*=3; }},
+  {name:'Void Cascade',   desc:'All ×2',          cost:2000000,done:false, fn:()=>{ GENS.forEach(g=>g.mult*=2); }},
+];
+
+let sparks = 0;
+let totalEarned = 0;
+let clickPow = 1;
+let lastTick = performance.now();
+let orbFlash = 0;
+const shown = new Set();
+let hintAlpha = 1;
+
+function genCost(g) {
+  return Math.floor(g.base * Math.pow(1.15, g.count));
+}
+function totalPS() {
+  return GENS.reduce((s, g) => s + g.rate * g.count * g.mult, 0);
+}
+function fmt(n) {
+  if (n < 1e3)  return Math.floor(n)+'';
+  if (n < 1e6)  return (n/1e3).toFixed(1)+'K';
+  if (n < 1e9)  return (n/1e6).toFixed(2)+'M';
+  if (n < 1e12) return (n/1e9).toFixed(2)+'B';
+  return (n/1e12).toFixed(2)+'T';
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.opacity = 1;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.style.opacity = 0, 2200);
+}
+
+// --- UI RENDER ---
+let lastUITick = 0;
+function renderUI() {
+  document.getElementById('hdr').textContent = fmt(sparks) + ' ⚡';
+  document.getElementById('ps').textContent = fmt(totalPS()) + ' /s';
+
+  const gl = document.getElementById('genlist');
+  gl.innerHTML = '';
+  GENS.forEach((g, i) => {
+    const unlocked = totalEarned >= g.unlock || sparks >= g.unlock;
+    const cost = genCost(g);
+    const canBuy = sparks >= cost;
+    const div = document.createElement('div');
+    div.className = 'gen' + (unlocked ? (canBuy ? ' affordable' : '') : ' locked');
+    div.innerHTML =
+      `<span class="gcnt">${g.count}</span>` +
+      `<div class="gname">${g.emoji} ${g.name}</div>` +
+      `<div class="grate">${(g.rate * g.mult).toFixed(1)}/s ea</div>` +
+      `<div class="gcost">⚡${fmt(cost)}</div>`;
+    if (unlocked) div.addEventListener('pointerdown', e => { e.stopPropagation(); buyGen(i); });
+    gl.appendChild(div);
+  });
+
+  const ul = document.getElementById('upglist');
+  ul.innerHTML = '';
+  UPGRADES.forEach((u, i) => {
+    const div = document.createElement('div');
+    div.className = 'upg' + (u.done ? ' done' : '');
+    div.innerHTML =
+      `<div class="uname">${u.name}</div>` +
+      `<div class="udesc">${u.desc}</div>` +
+      `<div class="ucost">${u.done ? '✓ done' : '⚡'+fmt(u.cost)}</div>`;
+    if (!u.done) div.addEventListener('pointerdown', e => { e.stopPropagation(); buyUpgrade(i); });
+    ul.appendChild(div);
+  });
+}
+
+function buyGen(i) {
+  const g = GENS[i];
+  const cost = genCost(g);
+  if (sparks < cost) return;
+  sparks -= cost;
+  g.count++;
+  genMeshes[i].visible = true;
+  haptic('light');
+  renderUI();
+}
+
+function buyUpgrade(i) {
+  const u = UPGRADES[i];
+  if (u.done || sparks < u.cost) return;
+  sparks -= u.cost;
+  u.fn();
+  u.done = true;
+  haptic('medium');
+  toast('✨ ' + u.name + ' activated!');
+  renderUI();
+}
+
+function checkMilestones() {
+  GENS.forEach((g, i) => {
+    if (!shown.has('u'+i) && totalEarned >= g.unlock && g.unlock > 0) {
+      shown.add('u'+i);
+      toast('🔓 Unlocked: ' + g.name);
+    }
+  });
+  const milestones = [100, 1000, 10000, 100000, 1000000];
+  milestones.forEach(m => {
+    if (!shown.has('m'+m) && totalEarned >= m) {
+      shown.add('m'+m);
+      toast('⚡ ' + fmt(m) + ' total sparks!');
+    }
+  });
+}
+
+// --- INPUT ---
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  sparks += clickPow;
+  totalEarned += clickPow;
+  burst(7);
+  orbFlash = 1;
+  haptic('medium');
+  if (hintAlpha > 0) {
+    hintAlpha = 0;
+    document.getElementById('clickhint').style.opacity = 0;
+  }
+  checkMilestones();
+  renderUI();
+});
+
+// --- LOOP ---
+let t = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - lastTick) / 1000, 0.1);
+  lastTick = now;
+  t += dt;
+
+  // Passive income
+  const income = totalPS() * dt;
+  sparks += income;
+  totalEarned += income;
+
+  // Orb animation
+  orb.rotation.y = t * 0.35;
+  orb.rotation.x = t * 0.12;
+  wire.rotation.y = -t * 0.55;
+  wire.rotation.z = t * 0.22;
+  inner.rotation.y = t * 0.8;
+  inner.rotation.x = -t * 0.5;
+  const pulse = 1 + Math.sin(t * 1.8) * 0.025;
+  orb.scale.setScalar(pulse);
+  wire.scale.setScalar(pulse * 1.02);
+
+  // Flash decay
+  if (orbFlash > 0) {
+    orbFlash = Math.max(0, orbFlash - dt * 8);
+    orbMat.emissiveIntensity = 0.5 + orbFlash * 1.5;
+  }
+
+  // Generator orbit
+  genMeshes.forEach((m, i) => {
+    if (!m.visible) return;
+    m._ang += dt * m._spd;
+    const y = Math.sin(m._ang * 0.6 + i) * 0.7;
+    m.position.set(
+      Math.cos(m._ang) * m._r,
+      y,
+      Math.sin(m._ang) * m._r * 0.55
+    );
+    m.rotation.y = t * (1 + i * 0.25);
+    m.rotation.z = t * 0.4;
+    const cnt = GENS[i].count;
+    m.scale.setScalar(0.8 + Math.min(cnt, 25) * 0.04);
+  });
+
+  // Stars slow rotate
+  stars.rotation.y = t * 0.01;
+
+  // Particles
+  pPool.forEach(p => {
+    if (!p.visible) return;
+    p._life -= dt * 2.2;
+    if (p._life <= 0) { p.visible = false; return; }
+    p.position.addScaledVector(p._v, dt);
+    p._v.multiplyScalar(0.9);
+    p.material.opacity = p._life;
+  });
+
+  // UI throttle ~12fps
+  if (now - lastUITick > 80) {
+    lastUITick = now;
+    checkMilestones();
+    renderUI();
+  }
+
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+  renderer.setSize(CW(), CH());
+  camera.aspect = CW() / CH();
+  camera.updateProjectionMatrix();
+});
+
+renderUI();
+requestAnimationFrame(loop);
+</script>
+</body></html>

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>KING OF THE HILL</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#000;touch-action:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;font-family:'Arial Black',Arial,sans-serif}
+#score{position:absolute;top:18px;left:50%;transform:translateX(-50%);color:#ffd700;font-size:30px;font-weight:900;text-shadow:0 0 14px #ffd700,0 0 28px #ffa500}
+#wave{position:absolute;top:18px;left:16px;color:#00ffcc;font-size:13px;font-weight:900;opacity:0.85}
+#kills{position:absolute;top:36px;left:16px;color:#ff8844;font-size:11px;font-weight:900;opacity:0.7}
+#lives{position:absolute;top:18px;right:16px;color:#ff4455;font-size:22px;letter-spacing:3px}
+#king-label{position:absolute;top:58px;left:50%;transform:translateX(-50%);color:#ffd700;font-size:15px;font-weight:900;letter-spacing:3px;opacity:0;text-shadow:0 0 10px #ffd700;transition:opacity 0.3s}
+#floats{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden}
+#gameover{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,8,0.95);display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;font-family:'Arial Black',Arial,sans-serif}
+#gameover h1{color:#ffd700;font-size:44px;text-shadow:0 0 28px #ffd700}
+.go-info{color:#fff;font-size:20px}.go-sub{color:#88aaff;font-size:14px}
+#rbtn{margin-top:14px;padding:14px 48px;background:#ffd700;color:#000;font-size:20px;font-weight:900;border:none;border-radius:8px;cursor:pointer;pointer-events:all;font-family:'Arial Black',Arial,sans-serif}
+#rbtn:active{background:#ffa500}
+@keyframes floatup{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-60px);opacity:0}}
+</style>
+</head>
+<body>
+<!-- KING OF THE HILL | ga_king_of_hill_20260328_1105 | STD-025 STD-030 STD-031 | ~460 lines -->
+<div id="ui">
+  <div id="score">0</div>
+  <div id="wave">WAVE 1</div>
+  <div id="kills">0 kills</div>
+  <div id="lives">&#9829;&#9829;&#9829;</div>
+  <div id="king-label">&#x1F451; KING &#x1F451;</div>
+</div>
+<div id="floats"></div>
+<div id="gameover">
+  <h1>DETHRONED</h1>
+  <div class="go-info" id="go-score">Score: 0</div>
+  <div class="go-sub" id="go-wave">Reached Wave 1</div>
+  <div class="go-sub" id="go-kills">0 eliminations</div>
+  <button id="rbtn">RECLAIM THE HILL</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// KING OF THE HILL | ga_king_of_hill_20260328_1105
+// STD-025: Three.js r128 CDN | STD-030: all exceptions logged | STD-031: ~460 lines
+
+try {
+
+const tg = window.Telegram?.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch(_e){ console.warn('[WARN] tg init:', _e); } }
+function haptic(t){ try { tg?.HapticFeedback?.impactOccurred(t||'light'); } catch(_e){ console.warn('[WARN] haptic:', _e); } }
+
+// ── RENDERER ──────────────────────────────────────────────────────────────────
+let W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(W, H);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x030508);
+const camera = new THREE.OrthographicCamera(-W/2, W/2, H/2, -H/2, -100, 100);
+camera.position.z = 10;
+
+// ── GEOMETRY HELPERS ─────────────────────────────────────────────────────────
+function makeCircle(r, segs, color, emissive, emissiveI){
+  const g = new THREE.CircleGeometry(r, segs||32);
+  const m = new THREE.MeshStandardMaterial({color, emissive: emissive||color, emissiveIntensity: emissiveI||0.4});
+  return new THREE.Mesh(g, m);
+}
+function makeRing(ri, ro, color, emissiveI){
+  const g = new THREE.RingGeometry(ri, ro, 48);
+  const m = new THREE.MeshStandardMaterial({color, emissive:color, emissiveIntensity: emissiveI||0.6, side:THREE.DoubleSide});
+  return new THREE.Mesh(g, m);
+}
+
+// ── LIGHTING ─────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const ptLight = new THREE.PointLight(0xffd700, 1.2, 400);
+ptLight.position.set(0, 0, 50);
+scene.add(ptLight);
+
+// ── ARENA DIMENSIONS ─────────────────────────────────────────────────────────
+function getArenaR(){ return Math.min(W, H) * 0.44; }
+function getHillR(){ return Math.min(W, H) * 0.14; }
+
+// ── FLOOR / ARENA ────────────────────────────────────────────────────────────
+let arenaFloor, arenaRing, hillGlow, hillRing, crownMesh;
+
+function buildArena(){
+  const AR = getArenaR(), HR = getHillR();
+  if(arenaFloor){ scene.remove(arenaFloor); arenaFloor.geometry.dispose(); }
+  if(arenaRing){ scene.remove(arenaRing); arenaRing.geometry.dispose(); }
+  if(hillGlow){ scene.remove(hillGlow); hillGlow.geometry.dispose(); }
+  if(hillRing){ scene.remove(hillRing); hillRing.geometry.dispose(); }
+
+  arenaFloor = makeCircle(AR, 64, 0x0a0e18, 0x0a0e18, 0.0);
+  arenaFloor.position.z = -2;
+  scene.add(arenaFloor);
+
+  arenaRing = makeRing(AR - 4, AR + 4, 0x2244aa, 0.8);
+  arenaRing.position.z = -1;
+  scene.add(arenaRing);
+
+  hillGlow = makeCircle(HR, 48, 0x221100, 0x332200, 0.0);
+  hillGlow.position.z = -1;
+  scene.add(hillGlow);
+
+  hillRing = makeRing(HR - 3, HR + 3, 0xffd700, 1.0);
+  hillRing.position.z = 0;
+  scene.add(hillRing);
+
+  // Crown indicator above hill (drawn as simple lines via LineLoop)
+  const crownPts = [
+    new THREE.Vector3(-12,  0, 0), new THREE.Vector3(-12, 14, 0),
+    new THREE.Vector3(-6,   6, 0), new THREE.Vector3( 0,  16, 0),
+    new THREE.Vector3( 6,   6, 0), new THREE.Vector3( 12, 14, 0),
+    new THREE.Vector3( 12,  0, 0)
+  ];
+  const crownG = new THREE.BufferGeometry().setFromPoints(crownPts);
+  const crownM = new THREE.LineBasicMaterial({color:0xffd700});
+  if(crownMesh){ scene.remove(crownMesh); crownMesh.geometry.dispose(); }
+  crownMesh = new THREE.Line(crownG, crownM);
+  crownMesh.position.z = 1;
+  scene.add(crownMesh);
+}
+
+buildArena();
+
+// ── PARTICLES ────────────────────────────────────────────────────────────────
+const particles = [];
+function spawnParticles(x, y, color, count, speed){
+  for(let i=0; i<(count||8); i++){
+    const r = (Math.random()*0.5+0.5)*(speed||120);
+    const ang = Math.random()*Math.PI*2;
+    const mesh = makeCircle(Math.random()*4+2, 6, color||0xffd700, color||0xffd700, 1.0);
+    mesh.position.set(x, y, 2);
+    scene.add(mesh);
+    particles.push({mesh, vx: Math.cos(ang)*r, vy: Math.sin(ang)*r, life:0.6+Math.random()*0.4, age:0});
+  }
+}
+function updateParticles(dt){
+  for(let i=particles.length-1; i>=0; i--){
+    const p = particles[i];
+    p.age += dt;
+    if(p.age >= p.life){ scene.remove(p.mesh); p.mesh.geometry.dispose(); particles.splice(i,1); continue; }
+    const t = p.age/p.life;
+    p.mesh.position.x += p.vx*dt;
+    p.mesh.position.y += p.vy*dt;
+    p.vx *= 0.92; p.vy *= 0.92;
+    p.mesh.material.opacity = 1-t;
+    p.mesh.material.transparent = true;
+  }
+}
+
+// ── FLOAT TEXT ───────────────────────────────────────────────────────────────
+function floatText(txt, cx, cy, color){
+  try {
+    const el = document.createElement('div');
+    el.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;transform:translate(-50%,-50%);color:${color||'#ffd700'};font-family:'Arial Black',Arial,sans-serif;font-size:18px;font-weight:900;pointer-events:none;animation:floatup 0.8s ease-out forwards;white-space:nowrap;text-shadow:0 0 8px ${color||'#ffd700'}`;
+    el.textContent = txt;
+    document.getElementById('floats').appendChild(el);
+    setTimeout(()=>{ try{ el.remove(); }catch(_e){ console.warn('[WARN] floatText remove:', _e); } }, 900);
+  } catch(_e){ console.warn('[WARN] floatText:', _e); }
+}
+
+// ── WORLD -> SCREEN CONVERSION ───────────────────────────────────────────────
+function worldToScreen(wx, wy){ return { x: wx + W/2, y: H/2 - wy }; }
+function screenToWorld(sx, sy){ return { x: sx - W/2, y: H/2 - sy }; }
+
+// ── GAME STATE ───────────────────────────────────────────────────────────────
+let score=0, lives=3, wave=1, totalKills=0, waveKills=0;
+const KILLS_PER_WAVE = 8;
+let gameOver=false, invinceTimer=0;
+
+// Screen shake
+let shakeTimer=0, shakeStr=0;
+let camOffX=0, camOffY=0;
+
+// ── PLAYER ───────────────────────────────────────────────────────────────────
+const PLAYER_R = 14;
+const player = {
+  mesh: makeCircle(PLAYER_R, 24, 0x00ddff, 0x00eeff, 1.0),
+  ring: makeRing(PLAYER_R+2, PLAYER_R+5, 0x00eeff, 0.8),
+  x:0, y:0, vx:0, vy:0,
+  tx:0, ty:0,
+  speed: 200
+};
+player.mesh.position.z = 3;
+player.ring.position.z = 4;
+scene.add(player.mesh);
+scene.add(player.ring);
+
+// ── ENEMIES ──────────────────────────────────────────────────────────────────
+const ENEMY_R = 12;
+const enemies = [];
+
+function enemySpeed(){ return 80 + wave * 8; }
+
+function spawnEnemy(){
+  try {
+    const AR = getArenaR();
+    const ang = Math.random()*Math.PI*2;
+    const ex = Math.cos(ang)*(AR-10);
+    const ey = Math.sin(ang)*(AR-10);
+
+    const mesh = makeCircle(ENEMY_R, 20, 0xdd2200, 0xff3311, 0.7);
+    mesh.position.set(ex, ey, 3);
+
+    // Eye dot
+    const eyeG = new THREE.CircleGeometry(3, 8);
+    const eyeM = new THREE.MeshBasicMaterial({color:0xffffff});
+    const eye = new THREE.Mesh(eyeG, eyeM);
+    eye.position.set(3, 2, 0.1);
+    mesh.add(eye);
+
+    scene.add(mesh);
+    enemies.push({mesh, x:ex, y:ey, vx:0, vy:0, hp:1});
+  } catch(_e){ console.warn('[WARN] spawnEnemy:', _e); }
+}
+
+// ── SPAWN TIMER ──────────────────────────────────────────────────────────────
+let spawnTimer = 1.5;  // first spawn in 1.5s
+let spawnInterval = 2.5;
+
+function getSpawnInterval(){ return Math.max(0.6, 2.5 - wave*0.15); }
+
+// ── HIT / LIVES / GAMEOVER ───────────────────────────────────────────────────
+function hitPlayer(){
+  if(invinceTimer>0) return;
+  lives--;
+  invinceTimer = 1.2;
+  shakeTimer = 0.25; shakeStr = 12;
+  haptic('heavy');
+  updateLivesUI();
+  if(lives<=0){ triggerGameOver(); }
+}
+
+function updateLivesUI(){
+  const el = document.getElementById('lives');
+  if(!el) return;
+  el.textContent = '\u2665'.repeat(Math.max(0,lives));
+}
+
+function triggerGameOver(){
+  gameOver = true;
+  try {
+    document.getElementById('go-score').textContent = 'Score: '+score;
+    document.getElementById('go-wave').textContent = 'Reached Wave '+wave;
+    document.getElementById('go-kills').textContent = totalKills+' eliminations';
+    document.getElementById('gameover').style.display = 'flex';
+  } catch(_e){ console.warn('[WARN] gameover UI:', _e); }
+}
+
+// ── SCORE TICK ───────────────────────────────────────────────────────────────
+let scoreTick = 0;
+const SCORE_TICK_INTERVAL = 0.1;
+function isOnHill(){ return Math.hypot(player.x, player.y) < getHillR(); }
+
+// ── INPUT ────────────────────────────────────────────────────────────────────
+let tapTarget = null;
+
+function handlePointer(ex, ey){
+  if(gameOver) return;
+  const w = screenToWorld(ex, ey);
+  // Clamp to arena
+  const AR = getArenaR();
+  const dist = Math.hypot(w.x, w.y);
+  if(dist > AR-PLAYER_R){
+    const sc = (AR-PLAYER_R)/dist;
+    w.x *= sc; w.y *= sc;
+  }
+  tapTarget = {x:w.x, y:w.y};
+}
+
+renderer.domElement.addEventListener('pointerdown', e=>{
+  try { handlePointer(e.clientX, e.clientY); } catch(_e){ console.warn('[WARN] pointerdown:', _e); }
+});
+renderer.domElement.addEventListener('pointermove', e=>{
+  try { if(e.buttons>0) handlePointer(e.clientX, e.clientY); } catch(_e){ console.warn('[WARN] pointermove:', _e); }
+});
+
+document.getElementById('rbtn').addEventListener('click', ()=>{
+  try { resetGame(); } catch(_e){ console.warn('[WARN] rbtn click:', _e); }
+});
+
+// ── RESET ────────────────────────────────────────────────────────────────────
+function resetGame(){
+  try {
+    // Remove all enemies
+    for(const en of enemies){ scene.remove(en.mesh); en.mesh.geometry.dispose(); }
+    enemies.length = 0;
+    // Remove all particles
+    for(const p of particles){ scene.remove(p.mesh); p.mesh.geometry.dispose(); }
+    particles.length = 0;
+
+    score=0; lives=3; wave=1; totalKills=0; waveKills=0;
+    gameOver=false; invinceTimer=0; shakeTimer=0; shakeStr=0;
+    spawnTimer=1.5; spawnInterval=getSpawnInterval();
+    scoreTick=0; tapTarget=null;
+
+    player.x=0; player.y=0; player.vx=0; player.vy=0; player.tx=0; player.ty=0;
+    player.mesh.position.set(0,0,3);
+    player.ring.position.set(0,0,4);
+
+    document.getElementById('gameover').style.display = 'none';
+    document.getElementById('score').textContent = '0';
+    document.getElementById('wave').textContent = 'WAVE 1';
+    document.getElementById('kills').textContent = '0 kills';
+    updateLivesUI();
+  } catch(_e){ console.warn('[WARN] resetGame:', _e); }
+}
+
+// ── ENEMY ELIMINATION ────────────────────────────────────────────────────────
+function killEnemy(i, px, py){
+  try {
+    const en = enemies[i];
+    spawnParticles(en.x, en.y, 0xff5500, 10, 160);
+    const sc = worldToScreen(en.x, en.y);
+    floatText('+50', sc.x, sc.y, '#ff8844');
+    score += 50;
+    totalKills++;
+    waveKills++;
+    document.getElementById('kills').textContent = totalKills+' kills';
+    haptic('medium');
+
+    // Wave advance
+    if(waveKills >= KILLS_PER_WAVE){
+      wave++;
+      waveKills = 0;
+      spawnInterval = getSpawnInterval();
+      document.getElementById('wave').textContent = 'WAVE '+wave;
+      const sc2 = worldToScreen(0, getHillR()+20);
+      floatText('WAVE '+wave+'!', sc2.x, sc2.y, '#00ffcc');
+    }
+
+    scene.remove(en.mesh);
+    en.mesh.geometry.dispose();
+    enemies.splice(i,1);
+  } catch(_e){ console.warn('[WARN] killEnemy:', _e); }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────────
+let lastT = null;
+
+function update(ts){
+  try {
+    if(gameOver){ renderer.render(scene, camera); requestAnimationFrame(update); return; }
+    if(lastT===null){ lastT=ts; requestAnimationFrame(update); return; }
+    const dt = Math.min((ts-lastT)/1000, 0.05);
+    lastT = ts;
+
+    const AR = getArenaR(), HR = getHillR();
+
+    // ── invincibility flash ──
+    if(invinceTimer>0){
+      invinceTimer -= dt;
+      player.mesh.material.opacity = (Math.floor(invinceTimer*10)%2===0) ? 0.35 : 1.0;
+      player.mesh.material.transparent = true;
+    } else {
+      player.mesh.material.opacity = 1.0;
+    }
+
+    // ── screen shake ──
+    if(shakeTimer>0){
+      shakeTimer -= dt;
+      camOffX = (Math.random()-0.5)*shakeStr*2;
+      camOffY = (Math.random()-0.5)*shakeStr*2;
+    } else {
+      camOffX *= 0.8; camOffY *= 0.8;
+    }
+    camera.position.x = camOffX;
+    camera.position.y = camOffY;
+
+    // ── player movement ──
+    if(tapTarget){
+      const dx = tapTarget.x - player.x;
+      const dy = tapTarget.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      if(dist < 4){ tapTarget=null; player.vx=0; player.vy=0; }
+      else {
+        const spd = Math.min(player.speed, dist*8);
+        player.vx = (dx/dist)*spd;
+        player.vy = (dy/dist)*spd;
+      }
+    } else { player.vx *= 0.85; player.vy *= 0.85; }
+
+    player.x += player.vx*dt;
+    player.y += player.vy*dt;
+
+    // Clamp to arena
+    const pdist = Math.hypot(player.x, player.y);
+    if(pdist > AR-PLAYER_R){
+      const sc = (AR-PLAYER_R)/pdist;
+      player.x *= sc; player.y *= sc;
+      player.vx = 0; player.vy = 0;
+    }
+    player.mesh.position.set(player.x, player.y, 3);
+    player.ring.position.set(player.x, player.y, 4);
+
+    // ── score on hill ──
+    const onHill = isOnHill();
+    document.getElementById('king-label').style.opacity = onHill ? '1' : '0';
+    crownMesh.position.y = HR + 20;
+    crownMesh.material.opacity = onHill ? 1.0 : 0.3;
+    crownMesh.material.transparent = true;
+
+    if(onHill){
+      scoreTick += dt;
+      if(scoreTick >= SCORE_TICK_INTERVAL){
+        scoreTick = 0;
+        score += 1;
+      }
+    } else { scoreTick = 0; }
+    document.getElementById('score').textContent = score;
+
+    // ── hill ring pulse ──
+    const pulse = 0.85 + 0.15*Math.sin(ts*0.003);
+    hillRing.material.emissiveIntensity = pulse * 1.2;
+    hillRing.scale.setScalar(pulse*0.08 + 0.96);
+    ptLight.intensity = onHill ? 2.0 : 1.2;
+
+    // ── spawn enemies ──
+    spawnTimer -= dt;
+    if(spawnTimer <= 0){
+      spawnEnemy();
+      spawnTimer = spawnInterval;
+    }
+
+    // ── update enemies ──
+    const espd = enemySpeed();
+    for(let i=enemies.length-1; i>=0; i--){
+      try {
+        const en = enemies[i];
+        // Rush toward hill (0,0)
+        const ex2 = -en.x, ey2 = -en.y;
+        const eDist = Math.hypot(ex2, ey2);
+        if(eDist > 1){
+          en.vx += (ex2/eDist)*espd*dt*4;
+          en.vy += (ey2/eDist)*espd*dt*4;
+        }
+        // Damp
+        const eSpd = Math.hypot(en.vx, en.vy);
+        if(eSpd > espd){ en.vx = (en.vx/eSpd)*espd; en.vy = (en.vy/eSpd)*espd; }
+
+        en.x += en.vx*dt;
+        en.y += en.vy*dt;
+
+        // Push-bump from player movement
+        const pex = en.x - player.x;
+        const pey = en.y - player.y;
+        const peDist = Math.hypot(pex, pey);
+        const touchR = PLAYER_R + ENEMY_R;
+        if(peDist < touchR){
+          // Player moving fast = knockback
+          const playerSpd = Math.hypot(player.vx, player.vy);
+          if(playerSpd > 80){
+            // Knockback enemy away from player
+            const nx = pex/(peDist||1), ny = pey/(peDist||1);
+            const kb = 320;
+            en.vx += nx*kb; en.vy += ny*kb;
+            spawnParticles(en.x, en.y, 0xff6600, 5, 100);
+            haptic('light');
+          } else {
+            // Enemy hits player
+            hitPlayer();
+            // Separate
+            if(peDist < touchR){
+              const nx = pex/(peDist||1), ny = pey/(peDist||1);
+              const overlap = touchR - peDist;
+              en.x += nx*overlap*0.5;
+              en.y += ny*overlap*0.5;
+              player.x -= nx*overlap*0.5;
+              player.y -= ny*overlap*0.5;
+            }
+          }
+        }
+
+        // Check if knocked to boundary
+        const eBoundDist = Math.hypot(en.x, en.y);
+        if(eBoundDist >= AR - ENEMY_R * 0.5){
+          killEnemy(i, en.x, en.y);
+          continue;
+        }
+
+        // Keep within arena (soft bounce)
+        if(eBoundDist > AR - ENEMY_R){
+          const sc = (AR - ENEMY_R)/eBoundDist;
+          en.x *= sc; en.y *= sc;
+          en.vx *= -0.3; en.vy *= -0.3;
+        }
+
+        en.mesh.position.set(en.x, en.y, 3);
+        // Rotate enemy to face hill
+        en.mesh.rotation.z = Math.atan2(-en.y, -en.x) - Math.PI/2;
+      } catch(_ei){ console.warn('[WARN] enemy update:', _ei); }
+    }
+
+    updateParticles(dt);
+    renderer.render(scene, camera);
+  } catch(_e){ console.warn('[WARN] update loop:', _e); }
+  requestAnimationFrame(update);
+}
+
+// ── RESIZE ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', ()=>{
+  try {
+    W = window.innerWidth; H = window.innerHeight;
+    renderer.setSize(W, H);
+    camera.left=-W/2; camera.right=W/2; camera.top=H/2; camera.bottom=-H/2;
+    camera.updateProjectionMatrix();
+    buildArena();
+  } catch(_e){ console.warn('[WARN] resize:', _e); }
+});
+
+// ── START ─────────────────────────────────────────────────────────────────────
+requestAnimationFrame(update);
+
+} catch(_e){ console.error('[ERROR] boot:', _e); }
+</script>
+</body>
+</html>

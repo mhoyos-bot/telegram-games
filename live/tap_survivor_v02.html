@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ARENA SURGE</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#08060f;
+  overflow:hidden;
+  touch-action:none;
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  color:#e0e8ff;
+  -webkit-user-select:none;
+  user-select:none;
+  -webkit-tap-highlight-color:transparent;
+}
+#c { position:fixed; top:0; left:0; width:100%; height:100%; z-index:1; display:block; }
+#overlay-canvas { position:fixed; top:0; left:0; width:100%; height:100%; z-index:2; pointer-events:none; }
+
+/* HUD */
+#hud { position:fixed; top:0; left:0; right:0; z-index:10; pointer-events:none; padding:14px 18px; display:flex; justify-content:space-between; align-items:flex-start; }
+.hud-block { display:flex; flex-direction:column; gap:3px; }
+.hud-block.right { align-items:flex-end; }
+.hud-label { font-size:9px; text-transform:uppercase; letter-spacing:2px; color:#445; line-height:1; }
+.hud-value { font-size:24px; font-weight:800; line-height:1; }
+#score-val { color:#00ffcc; text-shadow:0 0 14px rgba(0,255,204,0.5); }
+#wave-val { color:#ff4488; text-shadow:0 0 14px rgba(255,68,136,0.5); }
+#level-val { color:#ffcc00; text-shadow:0 0 14px rgba(255,204,0,0.4); }
+#combo-hud { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:10; pointer-events:none; text-align:center; opacity:0; transition:opacity 0.2s; }
+#combo-hud.show { opacity:1; }
+#combo-text { font-size:32px; font-weight:900; color:#ff9900; text-shadow:0 0 20px rgba(255,153,0,0.8); letter-spacing:3px; }
+#combo-label { font-size:11px; color:#ff6600; letter-spacing:2px; }
+
+/* HP bar */
+#hp-wrap { position:fixed; bottom:20px; left:18px; right:18px; z-index:10; pointer-events:none; }
+#hp-bg { height:8px; background:rgba(255,255,255,0.07); border-radius:4px; overflow:hidden; }
+#hp-fill { height:100%; width:100%; background:linear-gradient(90deg,#ff2255,#ff6699); border-radius:4px; transition:width 0.25s ease; transform-origin:left; }
+#hp-fill.flash { animation:hp-flash 0.12s ease; }
+@keyframes hp-flash { 0%,100%{filter:brightness(1)} 50%{filter:brightness(4) saturate(0)} }
+#xp-bg { height:4px; background:rgba(255,255,255,0.05); border-radius:2px; overflow:hidden; margin-top:4px; }
+#xp-fill { height:100%; width:0%; background:linear-gradient(90deg,#4488ff,#88aaff); border-radius:2px; transition:width 0.15s ease; }
+
+/* XP level label */
+#level-ring { position:fixed; bottom:48px; left:18px; z-index:10; pointer-events:none; font-size:11px; color:#4488ff; letter-spacing:1px; }
+
+/* FPS */
+#fps { position:fixed; bottom:40px; right:18px; z-index:10; font-size:10px; color:#334; pointer-events:none; font-family:monospace; }
+
+/* Flash overlay */
+#flash { position:fixed; top:0; left:0; width:100%; height:100%; z-index:20; pointer-events:none; background:#fff; opacity:0; }
+
+/* Shake wrapper */
+#shake { position:fixed; top:0; left:0; width:100%; height:100%; z-index:0; }
+
+/* SCREENS */
+.screen { position:fixed; top:0; left:0; width:100%; height:100%; z-index:30; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px; }
+#start-screen { background:rgba(8,6,15,0.9); backdrop-filter:blur(4px); }
+#start-screen h1 { font-size:42px; font-weight:900; letter-spacing:6px; color:#00ffcc; text-shadow:0 0 30px rgba(0,255,204,0.7),0 0 60px rgba(0,255,204,0.3); margin-bottom:8px; }
+#start-screen .subtitle { font-size:13px; color:#556688; letter-spacing:3px; margin-bottom:40px; }
+.tap-btn { background:linear-gradient(135deg,#00ffcc22,#00ffcc11); border:2px solid #00ffcc44; padding:16px 40px; border-radius:40px; font-size:18px; font-weight:700; color:#00ffcc; letter-spacing:3px; cursor:pointer; text-transform:uppercase; transition:all 0.2s; -webkit-tap-highlight-color:transparent; box-shadow:0 0 30px rgba(0,255,204,0.2); }
+.tap-btn:active { transform:scale(0.96); }
+.start-hint { font-size:11px; color:#334455; letter-spacing:2px; margin-top:20px; }
+
+/* UPGRADE SCREEN */
+#upgrade-screen { background:rgba(8,6,15,0.92); backdrop-filter:blur(6px); display:none; }
+#upgrade-screen h2 { font-size:22px; font-weight:800; color:#ffcc00; letter-spacing:4px; margin-bottom:6px; }
+#upgrade-screen .lvl-badge { font-size:13px; color:#ff9900; letter-spacing:2px; margin-bottom:28px; }
+#upgrade-options { display:flex; flex-direction:column; gap:14px; width:100%; max-width:360px; }
+.upgrade-card { background:linear-gradient(135deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02)); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:18px 20px; cursor:pointer; text-align:left; transition:all 0.2s; -webkit-tap-highlight-color:transparent; }
+.upgrade-card:active { transform:scale(0.97); border-color:rgba(255,255,255,0.35); background:rgba(255,255,255,0.1); }
+.upgrade-card .u-icon { font-size:26px; margin-bottom:6px; }
+.upgrade-card .u-name { font-size:16px; font-weight:700; color:#e0e8ff; letter-spacing:1px; }
+.upgrade-card .u-desc { font-size:12px; color:#556; margin-top:3px; letter-spacing:0.5px; }
+
+/* GAME OVER */
+#gameover-screen { background:rgba(8,6,15,0.93); backdrop-filter:blur(4px); display:none; }
+#gameover-screen h2 { font-size:36px; font-weight:900; letter-spacing:5px; color:#ff2255; text-shadow:0 0 20px rgba(255,34,85,0.6); margin-bottom:6px; }
+#final-score { font-size:48px; font-weight:900; color:#00ffcc; text-shadow:0 0 20px rgba(0,255,204,0.5); margin:12px 0; }
+#final-wave { font-size:14px; color:#445566; letter-spacing:3px; margin-bottom:30px; }
+</style>
+</head>
+<body>
+<div id="shake">
+  <canvas id="c"></canvas>
+  <canvas id="overlay-canvas"></canvas>
+</div>
+<div id="flash"></div>
+
+<!-- HUD -->
+<div id="hud">
+  <div class="hud-block">
+    <div class="hud-label">Score</div>
+    <div class="hud-value" id="score-val">0</div>
+  </div>
+  <div class="hud-block right">
+    <div style="display:flex;gap:18px;align-items:flex-start">
+      <div class="hud-block right">
+        <div class="hud-label">Wave</div>
+        <div class="hud-value" id="wave-val">1</div>
+      </div>
+      <div class="hud-block right">
+        <div class="hud-label">Lvl</div>
+        <div class="hud-value" id="level-val">1</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="combo-hud"><div id="combo-text">x3</div><div id="combo-label">COMBO</div></div>
+<div id="level-ring">XP</div>
+<div id="hp-wrap">
+  <div id="hp-bg"><div id="hp-fill"></div></div>
+  <div id="xp-bg"><div id="xp-fill"></div></div>
+</div>
+<div id="fps"></div>
+
+<!-- SCREENS -->
+<div id="start-screen" class="screen">
+  <h1>ARENA SURGE</h1>
+  <div class="subtitle">ROGUELIKE RUN</div>
+  <div class="tap-btn" id="start-btn">TAP TO START</div>
+  <div class="start-hint">Drag to move · Auto-fire · Collect XP · Level Up</div>
+</div>
+
+<div id="upgrade-screen" class="screen">
+  <h2>LEVEL UP</h2>
+  <div class="lvl-badge" id="lvl-badge">CHOOSE AN UPGRADE</div>
+  <div id="upgrade-options"></div>
+</div>
+
+<div id="gameover-screen" class="screen">
+  <h2>SURGE OVER</h2>
+  <div id="final-score">0</div>
+  <div id="final-wave">WAVE 1 · LEVEL 1</div>
+  <div class="tap-btn" id="retry-btn">PLAY AGAIN</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ─── TELEGRAM HAPTICS ─────────────────────────────────────────────────────────
+const tg = window.Telegram?.WebApp;
+if (tg) tg.expand();
+function hapticImpact(s='medium') { try { tg?.HapticFeedback?.impactOccurred(s); } catch(_e){} }
+function hapticNotify(t='success') { try { tg?.HapticFeedback?.notificationOccurred(t); } catch(_e){} }
+
+// ─── RENDERER SETUP ───────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x08060f);
+
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+const aspect = () => W() / H();
+
+// Orthographic camera — top-down view
+const VIEW_SIZE = 14;
+let cam;
+function buildCamera() {
+  const a = aspect();
+  cam = new THREE.OrthographicCamera(-VIEW_SIZE*a, VIEW_SIZE*a, VIEW_SIZE, -VIEW_SIZE, 0.1, 100);
+  cam.position.set(0, 20, 0);
+  cam.lookAt(0, 0, 0);
+}
+buildCamera();
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08060f, 0.07);
+
+// Lights
+const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+const dirLight = new THREE.DirectionalLight(0x8899ff, 1.2);
+dirLight.position.set(0, 10, 5);
+scene.add(ambient, dirLight);
+
+// Overlay 2D canvas (floating text, particles)
+const oc = document.getElementById('overlay-canvas');
+const octx = oc.getContext('2d');
+function resizeOverlay() { oc.width = W(); oc.height = H(); }
+resizeOverlay();
+
+// ─── ARENA GEOMETRY ───────────────────────────────────────────────────────────
+const ARENA_R = 10;
+const arenaGeo = new THREE.CircleGeometry(ARENA_R, 64);
+const arenaMat = new THREE.MeshBasicMaterial({ color:0x0d0a1a, side:THREE.DoubleSide });
+const arenaFloor = new THREE.Mesh(arenaGeo, arenaMat);
+arenaFloor.rotation.x = -Math.PI/2;
+scene.add(arenaFloor);
+
+// Arena border ring
+const ringGeo = new THREE.RingGeometry(ARENA_R-0.05, ARENA_R+0.18, 64);
+const ringMat = new THREE.MeshBasicMaterial({ color:0x334466, side:THREE.DoubleSide });
+const ring = new THREE.Mesh(ringGeo, ringMat);
+ring.rotation.x = -Math.PI/2;
+ring.position.y = 0.01;
+scene.add(ring);
+
+// Grid dots on floor (4x4 grid, subtle)
+const dotGeo = new THREE.CircleGeometry(0.06, 6);
+const dotMat = new THREE.MeshBasicMaterial({ color:0x1a1630 });
+for (let x=-8; x<=8; x+=2) {
+  for (let z=-8; z<=8; z+=2) {
+    if (x*x+z*z < ARENA_R*ARENA_R) {
+      const d = new THREE.Mesh(dotGeo, dotMat);
+      d.rotation.x = -Math.PI/2;
+      d.position.set(x, 0.005, z);
+      scene.add(d);
+    }
+  }
+}
+
+// ─── GAME STATE ───────────────────────────────────────────────────────────────
+const GS = {
+  state: 'start',   // start | playing | upgrade | gameover
+  score: 0,
+  wave: 1,
+  level: 1,
+  xp: 0,
+  xpNeeded: 10,
+  hp: 100,
+  maxHp: 100,
+  combo: 0,
+  comboTimer: 0,
+  waveTimer: 0,
+  waveInterval: 12,
+  enemiesLeft: 0,
+  enemiesInWave: 0,
+  spawnBurst: 0,
+  // upgrades applied
+  upgrades: { damage:1, fireRate:1, bulletCount:1, speed:1, pierce:false, regen:0 },
+  fireTimer: 0,
+};
+
+// ─── PLAYER ───────────────────────────────────────────────────────────────────
+const playerGeo = new THREE.BoxGeometry(0.7, 0.4, 0.7);
+const playerMat = new THREE.MeshPhongMaterial({ color:0x00ffcc, emissive:0x00aa88, shininess:80 });
+const playerMesh = new THREE.Mesh(playerGeo, playerMat);
+playerMesh.position.set(0, 0.2, 0);
+scene.add(playerMesh);
+
+// Player glow ring
+const glowGeo = new THREE.RingGeometry(0.5, 0.65, 32);
+const glowMat = new THREE.MeshBasicMaterial({ color:0x00ffcc, transparent:true, opacity:0.25, side:THREE.DoubleSide });
+const glowRing = new THREE.Mesh(glowGeo, glowMat);
+glowRing.rotation.x = -Math.PI/2;
+glowRing.position.y = 0.02;
+scene.add(glowRing);
+
+const player = { x:0, z:0, vx:0, vz:0, targetX:0, targetZ:0, speed:6, invTimer:0 };
+
+// ─── ENEMY INSTANCED MESH ─────────────────────────────────────────────────────
+const MAX_ENEMIES = 60;
+const enemyGeo = new THREE.ConeGeometry(0.45, 0.85, 6);
+enemyGeo.rotateX(Math.PI/2); // point forward
+const enemyMat = new THREE.MeshPhongMaterial({ color:0xff3366, emissive:0x880022 });
+const enemyIM = new THREE.InstancedMesh(enemyGeo, enemyMat, MAX_ENEMIES);
+enemyIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+enemyIM.count = 0;
+scene.add(enemyIM);
+
+// Elite enemy variant (different color)
+const eliteGeo = new THREE.OctahedronGeometry(0.55, 0);
+const eliteMat = new THREE.MeshPhongMaterial({ color:0xff8800, emissive:0x882200 });
+const eliteIM = new THREE.InstancedMesh(eliteGeo, eliteMat, 20);
+eliteIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+eliteIM.count = 0;
+scene.add(eliteIM);
+
+// Enemy data arrays
+const enemies = [];
+for (let i=0; i<MAX_ENEMIES; i++) {
+  enemies.push({ active:false, x:0, z:0, hp:1, maxHp:1, speed:0, elite:false, idx:0, angle:0, hitTimer:0 });
+}
+
+// ─── BULLET INSTANCED MESH ────────────────────────────────────────────────────
+const MAX_BULLETS = 120;
+const bulletGeo = new THREE.SphereGeometry(0.18, 6, 4);
+const bulletMat = new THREE.MeshPhongMaterial({ color:0x88ffcc, emissive:0x44aa88 });
+const bulletIM = new THREE.InstancedMesh(bulletGeo, bulletMat, MAX_BULLETS);
+bulletIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+bulletIM.count = 0;
+scene.add(bulletIM);
+
+const bullets = [];
+for (let i=0; i<MAX_BULLETS; i++) {
+  bullets.push({ active:false, x:0, z:0, vx:0, vz:0, life:0, pierce:0 });
+}
+
+// ─── XP GEM INSTANCED MESH ────────────────────────────────────────────────────
+const MAX_GEMS = 60;
+const gemGeo = new THREE.OctahedronGeometry(0.2, 0);
+const gemMat = new THREE.MeshPhongMaterial({ color:0x4488ff, emissive:0x2244aa });
+const gemIM = new THREE.InstancedMesh(gemGeo, gemMat, MAX_GEMS);
+gemIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+gemIM.count = 0;
+scene.add(gemIM);
+
+const gems = [];
+for (let i=0; i<MAX_GEMS; i++) {
+  gems.push({ active:false, x:0, z:0, val:1, bob:0 });
+}
+
+// ─── PARTICLE SYSTEM (2D canvas overlay) ──────────────────────────────────────
+const particles = [];
+function spawnParticles(wx, wz, count, color, spread=1.2, life=0.6) {
+  // Convert world to screen
+  const { sx, sy } = worldToScreen(wx, wz);
+  for (let i=0; i<count; i++) {
+    const a = Math.random()*Math.PI*2;
+    const spd = (0.3+Math.random()*0.7)*spread*180;
+    particles.push({ x:sx, y:sy, vx:Math.cos(a)*spd, vy:Math.sin(a)*spd*0.5, life, maxLife:life, r:3+Math.random()*4, color });
+  }
+}
+
+function worldToScreen(wx, wz) {
+  const a = aspect();
+  const sx = ((wx / (VIEW_SIZE*a)) * 0.5 + 0.5) * W();
+  const sy = ((wz / VIEW_SIZE) * 0.5 + 0.5) * H();
+  return { sx, sy };
+}
+
+// ─── FLOATING TEXT ────────────────────────────────────────────────────────────
+const floats = [];
+function spawnFloat(wx, wz, text, color='#00ffcc') {
+  const { sx, sy } = worldToScreen(wx, wz);
+  floats.push({ x:sx, y:sy, text, color, life:0.9, maxLife:0.9, vy:-60 });
+}
+
+// ─── SCREEN SHAKE ─────────────────────────────────────────────────────────────
+let shakeX=0, shakeY=0, shakeMag=0, shakeDecay=0;
+function shake(mag, decay=12) { shakeMag=Math.max(shakeMag,mag); shakeDecay=decay; }
+const shakeEl = document.getElementById('shake');
+
+// ─── FLASH ────────────────────────────────────────────────────────────────────
+const flashEl = document.getElementById('flash');
+let flashTimer=0;
+function flash(color='#fff', dur=0.12) {
+  flashEl.style.background = color;
+  flashEl.style.opacity = '0.35';
+  flashTimer = dur;
+}
+
+// ─── INPUT ────────────────────────────────────────────────────────────────────
+const pointer = { down:false, wx:0, wz:0 };
+function screenToWorld(cx, cy) {
+  const a = aspect();
+  const wx = ((cx/W())*2 - 1) * VIEW_SIZE * a;
+  const wz = ((cy/H())*2 - 1) * VIEW_SIZE;
+  return { wx, wz };
+}
+
+document.addEventListener('touchstart', onPtrDown, { passive:false });
+document.addEventListener('touchmove',  onPtrMove, { passive:false });
+document.addEventListener('touchend',   onPtrUp,   { passive:false });
+document.addEventListener('mousedown',  (e)=>onPtrDown({touches:[{clientX:e.clientX,clientY:e.clientY}]}));
+document.addEventListener('mousemove',  (e)=>{ if(pointer.down) onPtrMove({touches:[{clientX:e.clientX,clientY:e.clientY}]}); });
+document.addEventListener('mouseup',    onPtrUp);
+
+function onPtrDown(e) {
+  e.preventDefault();
+  pointer.down = true;
+  const t = e.touches[0];
+  const { wx, wz } = screenToWorld(t.clientX, t.clientY);
+  pointer.wx = wx; pointer.wz = wz;
+  if (GS.state === 'playing') { player.targetX=wx; player.targetZ=wz; }
+}
+function onPtrMove(e) {
+  e.preventDefault();
+  const t = e.touches[0];
+  const { wx, wz } = screenToWorld(t.clientX, t.clientY);
+  pointer.wx = wx; pointer.wz = wz;
+  if (GS.state === 'playing') { player.targetX=wx; player.targetZ=wz; }
+}
+function onPtrUp(e) { pointer.down = false; }
+
+// ─── SPAWN HELPERS ────────────────────────────────────────────────────────────
+const dummy = new THREE.Object3D();
+
+function spawnEnemy(elite=false) {
+  const slot = enemies.find(e=>!e.active);
+  if (!slot) return;
+  const a = Math.random()*Math.PI*2;
+  const r = ARENA_R * 0.95;
+  slot.active = true;
+  slot.x = Math.cos(a)*r;
+  slot.z = Math.sin(a)*r;
+  slot.angle = a;
+  slot.elite = elite;
+  const waveScale = 1 + (GS.wave-1)*0.15;
+  slot.hp = elite ? Math.ceil(4*waveScale) : Math.ceil(1*waveScale);
+  slot.maxHp = slot.hp;
+  slot.speed = (elite ? 1.4 : 2.2 + Math.random()*0.6) * (1 + (GS.wave-1)*0.05);
+  slot.hitTimer = 0;
+}
+
+function spawnBullet(x, z, vx, vz, pierce=0) {
+  const slot = bullets.find(b=>!b.active);
+  if (!slot) return;
+  slot.active = true;
+  slot.x = x; slot.z = z;
+  slot.vx = vx; slot.vz = vz;
+  slot.life = 2.5;
+  slot.pierce = pierce;
+}
+
+function spawnGem(x, z, val=1) {
+  const slot = gems.find(g=>!g.active);
+  if (!slot) return;
+  slot.active = true;
+  slot.x = x + (Math.random()-0.5)*0.4;
+  slot.z = z + (Math.random()-0.5)*0.4;
+  slot.val = val;
+  slot.bob = Math.random()*Math.PI*2;
+}
+
+// ─── WAVE SPAWN ───────────────────────────────────────────────────────────────
+function startWave() {
+  const base = 5 + GS.wave * 3;
+  GS.enemiesInWave = Math.min(base, 50);
+  GS.enemiesLeft = GS.enemiesInWave;
+  GS.spawnBurst = GS.enemiesInWave;
+  GS.waveTimer = 0;
+  updateHUD();
+}
+
+// ─── UPGRADE SYSTEM ───────────────────────────────────────────────────────────
+const UPGRADE_POOL = [
+  { id:'damage',    icon:'⚔️',  name:'Overcharge',    desc:'Bullets deal +50% damage' },
+  { id:'fireRate',  icon:'⚡',  name:'Rapid Fire',     desc:'Fire rate increases +30%' },
+  { id:'multishot', icon:'💠',  name:'Scatter Shot',   desc:'Fire 2 extra bullets' },
+  { id:'speed',     icon:'🌀',  name:'Afterburner',    desc:'Move speed +25%' },
+  { id:'pierce',    icon:'🔥',  name:'Piercing',       desc:'Bullets pierce through enemies' },
+  { id:'regen',     icon:'💚',  name:'Regeneration',   desc:'Slowly recover HP over time' },
+  { id:'maxhp',     icon:'❤️',  name:'Iron Flesh',     desc:'Max HP +40, restore 20 HP' },
+  { id:'xpmagnet',  icon:'🔮',  name:'XP Magnet',      desc:'XP gems pulled from distance' },
+];
+let xpMagnet = false;
+
+function showUpgradeScreen() {
+  GS.state = 'upgrade';
+  document.getElementById('upgrade-screen').style.display = 'flex';
+  document.getElementById('lvl-badge').textContent = `LEVEL ${GS.level} — CHOOSE AN UPGRADE`;
+
+  const available = [...UPGRADE_POOL].sort(()=>Math.random()-0.5).slice(0,3);
+  const container = document.getElementById('upgrade-options');
+  container.innerHTML = '';
+  available.forEach(u => {
+    const card = document.createElement('div');
+    card.className = 'upgrade-card';
+    card.innerHTML = `<div class="u-icon">${u.icon}</div><div class="u-name">${u.name}</div><div class="u-desc">${u.desc}</div>`;
+    card.addEventListener('click', ()=>{ applyUpgrade(u); hideUpgradeScreen(); });
+    container.appendChild(card);
+  });
+  hapticNotify('success');
+}
+
+function applyUpgrade(u) {
+  switch(u.id) {
+    case 'damage':   GS.upgrades.damage *= 1.5; break;
+    case 'fireRate': GS.upgrades.fireRate *= 1.3; break;
+    case 'multishot':GS.upgrades.bulletCount = Math.min(GS.upgrades.bulletCount+2, 7); break;
+    case 'speed':    GS.upgrades.speed *= 1.25; player.speed *= 1.25; break;
+    case 'pierce':   GS.upgrades.pierce = true; break;
+    case 'regen':    GS.upgrades.regen += 2; break;
+    case 'maxhp':    GS.maxHp += 40; GS.hp = Math.min(GS.hp+20, GS.maxHp); updateHpBar(); break;
+    case 'xpmagnet': xpMagnet = true; break;
+  }
+}
+
+function hideUpgradeScreen() {
+  document.getElementById('upgrade-screen').style.display = 'none';
+  GS.state = 'playing';
+  startWave();
+}
+
+// ─── HUD UPDATES ──────────────────────────────────────────────────────────────
+function updateHUD() {
+  document.getElementById('score-val').textContent = GS.score;
+  document.getElementById('wave-val').textContent = GS.wave;
+  document.getElementById('level-val').textContent = GS.level;
+}
+function updateHpBar() {
+  const pct = (GS.hp / GS.maxHp) * 100;
+  document.getElementById('hp-fill').style.width = pct+'%';
+  const hue = pct < 30 ? 0 : pct < 60 ? 30 : 120;
+  document.getElementById('hp-fill').style.background = `hsl(${hue},80%,55%)`;
+}
+function updateXpBar() {
+  const pct = (GS.xp / GS.xpNeeded) * 100;
+  document.getElementById('xp-fill').style.width = pct+'%';
+  document.getElementById('level-ring').textContent = `XP  ${GS.xp}/${GS.xpNeeded}`;
+}
+
+// ─── COMBO ────────────────────────────────────────────────────────────────────
+const comboHud = document.getElementById('combo-hud');
+function addCombo() {
+  GS.combo++;
+  GS.comboTimer = 2.5;
+  if (GS.combo >= 3) {
+    comboHud.classList.add('show');
+    document.getElementById('combo-text').textContent = `x${GS.combo}`;
+  }
+}
+function breakCombo() {
+  GS.combo = 0;
+  comboHud.classList.remove('show');
+}
+
+// ─── AUTO FIRE ────────────────────────────────────────────────────────────────
+function getFireInterval() { return 0.38 / GS.upgrades.fireRate; }
+
+function fireAtNearestEnemy() {
+  let nearest = null, bestD = Infinity;
+  for (const e of enemies) {
+    if (!e.active) continue;
+    const dx = e.x - player.x, dz = e.z - player.z;
+    const d = dx*dx+dz*dz;
+    if (d < bestD) { bestD=d; nearest=e; }
+  }
+  if (!nearest) return;
+  const dx = nearest.x - player.x, dz = nearest.z - player.z;
+  const len = Math.sqrt(dx*dx+dz*dz);
+  const spd = 14;
+  const bx = dx/len*spd, bz = dz/len*spd;
+  const pierce = GS.upgrades.pierce ? 2 : 0;
+
+  // Multi-shot spread
+  const count = GS.upgrades.bulletCount;
+  const spread = 0.18;
+  for (let i=0; i<count; i++) {
+    const off = (i-(count-1)/2) * spread;
+    const cos = Math.cos(off), sin = Math.sin(off);
+    spawnBullet(player.x, player.z, bx*cos - bz*sin, bx*sin + bz*cos, pierce);
+  }
+}
+
+// ─── DAMAGE ENEMY ─────────────────────────────────────────────────────────────
+function damageEnemy(e, dmg, bx, bz) {
+  e.hp -= dmg;
+  e.hitTimer = 0.12;
+  if (e.hp <= 0) {
+    killEnemy(e, bx, bz);
+    return true;
+  }
+  return false;
+}
+
+function killEnemy(e, bx, bz) {
+  e.active = false;
+  GS.score += (e.elite ? 50 : 10) * Math.max(1, GS.combo);
+  GS.enemiesLeft--;
+  addCombo();
+  hapticImpact('light');
+  spawnParticles(e.x, e.z, e.elite?14:8, e.elite?'#ff8800':'#ff3366', 1.5, 0.5);
+  spawnGem(e.x, e.z, e.elite ? 3 : 1);
+  shake(e.elite ? 0.18 : 0.1);
+  spawnFloat(e.x, e.z, e.elite?'+50':'+10', e.elite?'#ff8800':'#00ffcc');
+  updateHUD();
+  // Check wave clear
+  if (GS.enemiesLeft <= 0 && GS.spawnBurst <= 0) {
+    setTimeout(()=>{ if(GS.state==='playing') nextWave(); }, 1200);
+  }
+}
+
+function nextWave() {
+  GS.wave++;
+  GS.level++;
+  GS.xpNeeded = Math.floor(GS.xpNeeded * 1.4);
+  GS.xp = 0;
+  updateHUD();
+  updateXpBar();
+  showUpgradeScreen();
+}
+
+// ─── COLLECT XP ───────────────────────────────────────────────────────────────
+function collectXp(val) {
+  GS.xp += val;
+  if (GS.xp >= GS.xpNeeded) {
+    GS.xp -= GS.xpNeeded;
+    GS.level++;
+    GS.xpNeeded = Math.floor(GS.xpNeeded * 1.35);
+    updateHUD();
+    showUpgradeScreen();
+  }
+  updateXpBar();
+}
+
+// ─── GAME OVER ────────────────────────────────────────────────────────────────
+function triggerGameOver() {
+  GS.state = 'gameover';
+  GS.hp = 0;
+  updateHpBar();
+  flash('#ff0033', 0.4);
+  shake(0.6, 8);
+  hapticNotify('error');
+  document.getElementById('final-score').textContent = GS.score;
+  document.getElementById('final-wave').textContent = `WAVE ${GS.wave} · LEVEL ${GS.level}`;
+  document.getElementById('gameover-screen').style.display = 'flex';
+}
+
+// ─── RESET ────────────────────────────────────────────────────────────────────
+function resetGame() {
+  GS.score=0; GS.wave=1; GS.level=1; GS.xp=0; GS.xpNeeded=10;
+  GS.hp=100; GS.maxHp=100; GS.combo=0; GS.comboTimer=0;
+  GS.waveTimer=0; GS.fireTimer=0; GS.spawnBurst=0; GS.enemiesLeft=0;
+  GS.upgrades = { damage:1, fireRate:1, bulletCount:1, speed:1, pierce:false, regen:0 };
+  player.x=0; player.z=0; player.targetX=0; player.targetZ=0; player.speed=6; player.invTimer=0;
+  xpMagnet = false;
+  enemies.forEach(e=>{ e.active=false; });
+  bullets.forEach(b=>{ b.active=false; });
+  gems.forEach(g=>{ g.active=false; });
+  particles.length=0; floats.length=0;
+  breakCombo();
+  updateHUD(); updateHpBar(); updateXpBar();
+}
+
+// ─── BUTTONS ──────────────────────────────────────────────────────────────────
+document.getElementById('start-btn').addEventListener('click', ()=>{
+  document.getElementById('start-screen').style.display = 'none';
+  resetGame();
+  GS.state = 'playing';
+  startWave();
+});
+document.getElementById('retry-btn').addEventListener('click', ()=>{
+  document.getElementById('gameover-screen').style.display = 'none';
+  resetGame();
+  GS.state = 'playing';
+  startWave();
+});
+
+// ─── MAIN LOOP ────────────────────────────────────────────────────────────────
+let lastTime = 0;
+let fpsCounter=0, fpsTimer=0, fpsDisplay=0;
+const fpsEl = document.getElementById('fps');
+
+function tick(now) {
+  requestAnimationFrame(tick);
+  const dt = Math.min((now - lastTime)/1000, 0.05);
+  lastTime = now;
+
+  fpsCounter++; fpsTimer+=dt;
+  if (fpsTimer >= 0.5) { fpsDisplay=Math.round(fpsCounter/fpsTimer); fpsCounter=0; fpsTimer=0; fpsEl.textContent=fpsDisplay+'fps'; }
+
+  // Flash decay
+  if (flashTimer > 0) {
+    flashTimer -= dt;
+    if (flashTimer <= 0) { flashEl.style.opacity='0'; }
+    else { flashEl.style.opacity = String(Math.min(0.35, flashTimer*3)); }
+  }
+
+  // Screen shake
+  if (shakeMag > 0.005) {
+    shakeMag *= Math.pow(0.01, dt*shakeDecay);
+    shakeX = (Math.random()-0.5)*shakeMag*30;
+    shakeY = (Math.random()-0.5)*shakeMag*14;
+    shakeEl.style.transform = `translate(${shakeX}px,${shakeY}px)`;
+  } else {
+    shakeMag=0; shakeEl.style.transform='';
+  }
+
+  if (GS.state !== 'playing') {
+    renderer.render(scene, cam);
+    return;
+  }
+
+  // ── Player movement
+  const pdx = player.targetX - player.x;
+  const pdz = player.targetZ - player.z;
+  const pd = Math.sqrt(pdx*pdx + pdz*pdz);
+  if (pd > 0.05) {
+    const spd = player.speed * GS.upgrades.speed;
+    const step = Math.min(pd, spd*dt);
+    player.x += (pdx/pd)*step;
+    player.z += (pdz/pd)*step;
+    // Clamp inside arena
+    const pr = Math.sqrt(player.x*player.x + player.z*player.z);
+    if (pr > ARENA_R-0.5) { player.x *= (ARENA_R-0.5)/pr; player.z *= (ARENA_R-0.5)/pr; }
+  }
+  playerMesh.position.set(player.x, 0.2, player.z);
+  glowRing.position.set(player.x, 0.02, player.z);
+
+  // Invincibility timer
+  if (player.invTimer > 0) { player.invTimer -= dt; }
+
+  // HP regen
+  if (GS.upgrades.regen > 0) {
+    GS.hp = Math.min(GS.maxHp, GS.hp + GS.upgrades.regen * dt);
+    updateHpBar();
+  }
+
+  // Combo timer
+  if (GS.combo > 0) {
+    GS.comboTimer -= dt;
+    if (GS.comboTimer <= 0) breakCombo();
+  }
+
+  // ── Auto fire
+  GS.fireTimer -= dt;
+  if (GS.fireTimer <= 0) {
+    const alive = enemies.some(e=>e.active);
+    if (alive) { fireAtNearestEnemy(); GS.fireTimer = getFireInterval(); }
+  }
+
+  // ── Enemy spawning (burst at wave start, then trickle)
+  GS.waveTimer += dt;
+  if (GS.spawnBurst > 0 && GS.waveTimer > 0.35) {
+    GS.waveTimer = 0;
+    const isElite = GS.wave >= 3 && Math.random() < 0.15;
+    spawnEnemy(isElite);
+    GS.spawnBurst--;
+  }
+
+  // ── Update enemies
+  let normalIdx=0, eliteIdx=0;
+  for (const e of enemies) {
+    if (!e.active) continue;
+    const dx = player.x - e.x, dz = player.z - e.z;
+    const dist = Math.sqrt(dx*dx+dz*dz);
+    // Move toward player
+    if (dist > 0.01) {
+      e.x += (dx/dist)*e.speed*dt;
+      e.z += (dz/dist)*e.speed*dt;
+    }
+    // Hit player
+    if (dist < 0.8 && player.invTimer <= 0) {
+      const dmg = e.elite ? 25 : 12;
+      GS.hp -= dmg;
+      player.invTimer = 0.7;
+      flash('#ff0033');
+      shake(0.3);
+      hapticImpact('heavy');
+      document.getElementById('hp-fill').classList.add('flash');
+      setTimeout(()=>document.getElementById('hp-fill').classList.remove('flash'), 200);
+      updateHpBar();
+      if (GS.hp <= 0) { triggerGameOver(); return; }
+    }
+    // Flash on hit
+    const col = e.hitTimer > 0 ? new THREE.Color(1,1,1) : (e.elite ? new THREE.Color(1,0.53,0) : new THREE.Color(1,0.2,0.4));
+    if (e.hitTimer > 0) e.hitTimer -= dt;
+    // Update instanced matrix
+    if (!e.elite) {
+      dummy.position.set(e.x, 0.25, e.z);
+      dummy.rotation.y = Math.atan2(dx, dz);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      enemyIM.setMatrixAt(normalIdx, dummy.matrix);
+      enemyIM.setColorAt(normalIdx, col);
+      e.idx = normalIdx++;
+    } else {
+      dummy.position.set(e.x, 0.3, e.z);
+      dummy.rotation.y += dt*2;
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      eliteIM.setMatrixAt(eliteIdx, dummy.matrix);
+      eliteIM.setColorAt(eliteIdx, col);
+      e.idx = eliteIdx++;
+    }
+  }
+  enemyIM.count = normalIdx;
+  enemyIM.instanceMatrix.needsUpdate = true;
+  if (enemyIM.instanceColor) enemyIM.instanceColor.needsUpdate = true;
+  eliteIM.count = eliteIdx;
+  eliteIM.instanceMatrix.needsUpdate = true;
+  if (eliteIM.instanceColor) eliteIM.instanceColor.needsUpdate = true;
+
+  // ── Update bullets
+  let bIdx=0;
+  for (const b of bullets) {
+    if (!b.active) continue;
+    b.x += b.vx*dt;
+    b.z += b.vz*dt;
+    b.life -= dt;
+    // Out of arena
+    if (b.x*b.x+b.z*b.z > (ARENA_R+2)*(ARENA_R+2) || b.life<=0) { b.active=false; continue; }
+    // Hit enemy
+    let killed = false;
+    for (const e of enemies) {
+      if (!e.active) continue;
+      const dx=e.x-b.x, dz=e.z-b.z;
+      if (dx*dx+dz*dz < 0.6) {
+        const dead = damageEnemy(e, GS.upgrades.damage, b.vx, b.vz);
+        if (!dead) { spawnParticles(e.x, e.z, 3, '#ff3366', 0.8, 0.25); }
+        if (b.pierce <= 0) { b.active=false; killed=true; break; }
+        else { b.pierce--; }
+      }
+    }
+    if (!b.active) continue;
+    dummy.position.set(b.x, 0.22, b.z);
+    dummy.rotation.set(0,0,0); dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    bulletIM.setMatrixAt(bIdx++, dummy.matrix);
+  }
+  bulletIM.count = bIdx;
+  bulletIM.instanceMatrix.needsUpdate = true;
+
+  // ── Update XP gems
+  let gIdx=0;
+  for (const g of gems) {
+    if (!g.active) continue;
+    g.bob += dt*3;
+    // Magnet pull
+    const dx=player.x-g.x, dz=player.z-g.z;
+    const dist=Math.sqrt(dx*dx+dz*dz);
+    const pickR = xpMagnet ? 4.5 : 0.9;
+    if (dist < pickR) {
+      if (dist < 0.5) {
+        g.active=false;
+        collectXp(g.val);
+        spawnParticles(g.x, g.z, 5, '#4488ff', 0.8, 0.3);
+        hapticImpact('light');
+        continue;
+      }
+      const pullSpd = xpMagnet ? 8 : 3;
+      g.x += (dx/dist)*pullSpd*dt;
+      g.z += (dz/dist)*pullSpd*dt;
+    }
+    dummy.position.set(g.x, 0.25+Math.sin(g.bob)*0.08, g.z);
+    dummy.rotation.y = g.bob;
+    dummy.scale.setScalar(0.8+g.val*0.1);
+    dummy.updateMatrix();
+    gemIM.setMatrixAt(gIdx++, dummy.matrix);
+  }
+  gemIM.count = gIdx;
+  gemIM.instanceMatrix.needsUpdate = true;
+
+  // ── Player glow pulse
+  const glowPulse = 0.2 + Math.sin(now*0.004)*0.08;
+  glowMat.opacity = glowPulse;
+  playerMesh.rotation.y += dt*2;
+
+  // ── Render
+  renderer.render(scene, cam);
+
+  // ── 2D overlay
+  octx.clearRect(0, 0, W(), H());
+  // Particles
+  for (let i=particles.length-1; i>=0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i,1); continue; }
+    p.x += p.vx*dt;
+    p.y += p.vy*dt;
+    p.vy += 80*dt; // gravity
+    const a = p.life/p.maxLife;
+    octx.globalAlpha = a;
+    octx.fillStyle = p.color;
+    octx.beginPath();
+    octx.arc(p.x, p.y, p.r*a, 0, Math.PI*2);
+    octx.fill();
+  }
+  // Floating text
+  for (let i=floats.length-1; i>=0; i--) {
+    const f = floats[i];
+    f.life -= dt;
+    if (f.life <= 0) { floats.splice(i,1); continue; }
+    f.y += f.vy*dt;
+    const a = f.life/f.maxLife;
+    octx.globalAlpha = a;
+    octx.fillStyle = f.color;
+    octx.font = `bold ${Math.floor(16+a*4)}px system-ui`;
+    octx.textAlign = 'center';
+    octx.fillText(f.text, f.x, f.y);
+  }
+  octx.globalAlpha = 1;
+}
+
+// ─── RESIZE ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', ()=>{
+  renderer.setSize(W(), H());
+  buildCamera();
+  resizeOverlay();
+});
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

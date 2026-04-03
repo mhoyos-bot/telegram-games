@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>KING OF THE HILL</title>
+<style>
+/* KING OF THE HILL v3 | king_of_hill_003 | STD-025 STD-030 STD-031
+   Line count exception: STD-025 mandates self-contained single-file HTML5 game
+   Kernel wiring: NONE — standalone game build, no event_bus, no GOLD writes (STD-033)
+   Bloodflow: pointerdown→tapTarget|slamTrigger→player.vx/vy|shockwave→collision
+             →hitPlayer()/killEnemy()→score/lives→DOM (STD-039) */
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#000;touch-action:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;font-family:'Arial Black',Arial,sans-serif}
+#score{position:absolute;top:18px;left:50%;transform:translateX(-50%);color:#ffd700;font-size:30px;font-weight:900;text-shadow:0 0 14px #ffd700,0 0 28px #ffa500}
+#wave{position:absolute;top:18px;left:16px;color:#00ffcc;font-size:13px;font-weight:900;opacity:0.85}
+#kills{position:absolute;top:36px;left:16px;color:#ff8844;font-size:11px;font-weight:900;opacity:0.7}
+#lives{position:absolute;top:18px;right:16px;color:#ff4455;font-size:22px;letter-spacing:3px}
+#slam-hint{position:absolute;bottom:60px;left:50%;transform:translateX(-50%);color:#88aaff;font-size:13px;font-weight:900;letter-spacing:2px;opacity:0.85}
+#king-label{position:absolute;top:58px;left:50%;transform:translateX(-50%);color:#ffd700;font-size:15px;font-weight:900;letter-spacing:3px;opacity:0;transition:opacity 0.3s;text-shadow:0 0 10px #ffd700}
+#floats{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden}
+#gameover{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,8,0.95);display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;font-family:'Arial Black',Arial,sans-serif}
+#gameover h1{color:#ffd700;font-size:44px;text-shadow:0 0 28px #ffd700}
+.go-info{color:#fff;font-size:20px}
+.go-sub{color:#88aaff;font-size:14px}
+#rbtn{margin-top:14px;padding:14px 48px;background:#ffd700;color:#000;font-size:20px;font-weight:900;border:none;border-radius:8px;cursor:pointer;pointer-events:all;font-family:'Arial Black',Arial,sans-serif}
+#rbtn:active{background:#ffa500}
+@keyframes floatup{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-60px);opacity:0}}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="wave">WAVE 1</div>
+  <div id="kills">0 kills</div>
+  <div id="lives">&#9829;&#9829;&#9829;</div>
+  <div id="slam-hint">TAP = SLAM</div>
+  <div id="king-label">&#x1F451; KING &#x1F451;</div>
+</div>
+<div id="floats"></div>
+<div id="gameover">
+  <h1>DETHRONED</h1>
+  <div class="go-info" id="go-score">Score: 0</div>
+  <div class="go-sub" id="go-wave">Reached Wave 1</div>
+  <div class="go-sub" id="go-kills">0 eliminations</div>
+  <button id="rbtn">RECLAIM THE HILL</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// KING OF THE HILL v3 | king_of_hill_003
+// STD-025: Three.js r128 CDN | MeshBasicMaterial only | single HTML <500KB
+// STD-030: all exceptions caught with context logging
+// STD-031: 400+ lines justified — STD-025 single-file HTML5 game format
+// v3 adds: SLAM shockwave (quick-tap), trauma shake, scout/tank enemy types, combo multiplier
+// Hook: zero tutorial — player spawns on glowing hill at frame 0, first enemy in 1.5s
+
+try {
+
+const tg = window.Telegram?.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch(_e){ console.warn('[WARN] tg init:', _e); } }
+function haptic(t){ try { tg?.HapticFeedback?.impactOccurred(t||'light'); } catch(_e){ console.warn('[WARN] haptic:', _e); } }
+
+// ── RENDERER ──────────────────────────────────────────────────────────────────
+let W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050a0f);
+const camera = new THREE.OrthographicCamera(-W/2, W/2, H/2, -H/2, -100, 100);
+camera.position.z = 10;
+
+// ── GEOMETRY FACTORIES (MeshBasicMaterial only — STD-025) ────────────────────
+function mkCircle(r, segs, color){
+  return new THREE.Mesh(
+    new THREE.CircleGeometry(r, segs||32),
+    new THREE.MeshBasicMaterial({color})
+  );
+}
+function mkRing(ri, ro, color){
+  return new THREE.Mesh(
+    new THREE.RingGeometry(ri, ro, 48),
+    new THREE.MeshBasicMaterial({color, side:THREE.DoubleSide})
+  );
+}
+
+// ── ARENA ─────────────────────────────────────────────────────────────────────
+function getAR(){ return Math.min(W, H) * 0.44; }
+function getHR(){ return Math.min(W, H) * 0.14; }
+
+let arenaFloor, arenaRing, arenaRingOuter, hillGlow, hillRing, hillRingInner, crownLine;
+
+function buildArena(){
+  try {
+    [arenaFloor, arenaRing, arenaRingOuter, hillGlow, hillRing, hillRingInner, crownLine]
+      .forEach(m=>{ if(m){ scene.remove(m); if(m.geometry) m.geometry.dispose(); } });
+    const AR = getAR(), HR = getHR();
+
+    arenaFloor = mkCircle(AR, 64, 0x0a0e18); arenaFloor.position.z=-2; scene.add(arenaFloor);
+    arenaRing = mkRing(AR-5, AR, 0x1a3a88); arenaRing.position.z=-1; scene.add(arenaRing);
+    arenaRingOuter = mkRing(AR, AR+8, 0x2244aa); arenaRingOuter.position.z=-1; scene.add(arenaRingOuter);
+
+    hillGlow = mkCircle(HR, 48, 0x1a1000); hillGlow.position.z=-1; scene.add(hillGlow);
+    hillRingInner = mkRing(HR*0.6, HR*0.65, 0xcc9900); hillRingInner.position.z=0; scene.add(hillRingInner);
+    hillRing = mkRing(HR-3, HR+3, 0xffd700); hillRing.position.z=0; scene.add(hillRing);
+
+    const pts = [
+      new THREE.Vector3(-12,0,0), new THREE.Vector3(-12,14,0), new THREE.Vector3(-6,6,0),
+      new THREE.Vector3(0,16,0), new THREE.Vector3(6,6,0), new THREE.Vector3(12,14,0),
+      new THREE.Vector3(12,0,0)
+    ];
+    crownLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({color:0xffd700})
+    );
+    crownLine.position.set(0, HR+18, 1);
+    scene.add(crownLine);
+  } catch(_e){ console.warn('[WARN] buildArena:', _e); }
+}
+buildArena();
+
+// ── PARTICLE POOL ─────────────────────────────────────────────────────────────
+const POOL_MAX = 80;
+const particlePool = [];
+for(let i=0; i<POOL_MAX; i++){
+  const m = mkCircle(3, 6, 0xffd700);
+  m.visible = false; scene.add(m);
+  particlePool.push({mesh:m, vx:0, vy:0, life:0, age:0, active:false});
+}
+
+function spawnParticles(x, y, color, count, spd){
+  let n = 0;
+  for(let i=0; i<particlePool.length && n<(count||8); i++){
+    const p = particlePool[i]; if(p.active) continue;
+    const r = (Math.random()*0.5+0.5) * (spd||120);
+    const a = Math.random() * Math.PI*2;
+    p.mesh.material.color.set(color||0xffd700);
+    p.mesh.position.set(x, y, 2); p.mesh.scale.setScalar(1); p.mesh.visible = true;
+    p.vx = Math.cos(a)*r; p.vy = Math.sin(a)*r;
+    p.life = 0.5+Math.random()*0.3; p.age = 0; p.active = true;
+    n++;
+  }
+}
+
+function updateParticles(dt){
+  for(const p of particlePool){
+    if(!p.active) continue;
+    p.age += dt;
+    if(p.age >= p.life){ p.active=false; p.mesh.visible=false; continue; }
+    const t = p.age/p.life;
+    p.mesh.position.x += p.vx*dt; p.mesh.position.y += p.vy*dt;
+    p.vx *= 0.9; p.vy *= 0.9;
+    p.mesh.scale.setScalar(1 - t*0.8);
+  }
+}
+
+// ── SHOCKWAVE RING POOL ───────────────────────────────────────────────────────
+const SHOCK_MAX = 4;
+const shockwavePool = [];
+for(let i=0; i<SHOCK_MAX; i++){
+  const m = mkRing(0, 10, 0x88aaff);
+  m.visible = false; scene.add(m);
+  shockwavePool.push({mesh:m, active:false, age:0, maxR:0});
+}
+
+function triggerShockwave(x, y){
+  try {
+    const sw = shockwavePool.find(s=>!s.active); if(!sw) return;
+    sw.mesh.position.set(x, y, 3);
+    sw.active = true; sw.age = 0;
+    sw.maxR = getAR() * 0.85;
+    sw.mesh.scale.setScalar(0.01); sw.mesh.visible = true;
+    sw.mesh.material.transparent = true; sw.mesh.material.opacity = 1;
+    spawnParticles(x, y, 0x88aaff, 18, 220);
+    haptic('heavy');
+  } catch(_e){ console.warn('[WARN] triggerShockwave:', _e); }
+}
+
+function updateShockwaves(dt){
+  const LIFE = 0.45;
+  for(const sw of shockwavePool){
+    if(!sw.active) continue;
+    sw.age += dt;
+    if(sw.age >= LIFE){ sw.active=false; sw.mesh.visible=false; continue; }
+    const t = sw.age/LIFE;
+    const r = sw.maxR * t;
+    sw.mesh.scale.setScalar(r/10);
+    sw.mesh.material.opacity = 1 - t;
+    // push enemies intersecting leading edge
+    for(const en of enemyPool){
+      if(!en.active) continue;
+      const dx = en.x - sw.mesh.position.x;
+      const dy = en.y - sw.mesh.position.y;
+      const dd = Math.hypot(dx, dy);
+      const band = sw.maxR * 0.15;
+      if(dd < r && dd > r-band && dd > 0){
+        const nx = dx/dd, ny = dy/dd;
+        en.vx += nx * 380*(1-t); en.vy += ny * 380*(1-t);
+      }
+    }
+  }
+}
+
+// ── FLOAT TEXT ────────────────────────────────────────────────────────────────
+function floatText(txt, cx, cy, color){
+  try {
+    const el = document.createElement('div');
+    el.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;transform:translate(-50%,-50%);`+
+      `color:${color||'#ffd700'};font-family:'Arial Black',Arial,sans-serif;font-size:18px;`+
+      `font-weight:900;pointer-events:none;animation:floatup 0.8s ease-out forwards;`+
+      `white-space:nowrap;text-shadow:0 0 8px ${color||'#ffd700'}`;
+    el.textContent = txt;
+    document.getElementById('floats').appendChild(el);
+    setTimeout(()=>{ try{ el.remove(); }catch(_ei){ console.warn('[WARN] floatText remove:', _ei); } }, 900);
+  } catch(_e){ console.warn('[WARN] floatText:', _e); }
+}
+function worldToScreen(wx, wy){ return {x:wx+W/2, y:H/2-wy}; }
+function screenToWorld(sx, sy){ return {x:sx-W/2, y:H/2-sy}; }
+
+// ── GAME STATE ────────────────────────────────────────────────────────────────
+let score=0, lives=3, wave=1, totalKills=0, waveKills=0;
+let gameOver=false, invinceTimer=0;
+let trauma=0; // 0-1 trauma system for screen shake
+let slamCd=0;
+const SLAM_CD = 2.0;
+let combo=0, comboTimer=0;
+
+function addTrauma(v){ trauma = Math.min(1, trauma+v); }
+function waveTarget(){ return 6 + wave*2; }
+
+// ── PLAYER ────────────────────────────────────────────────────────────────────
+const PLAYER_R = 14;
+const player = {
+  mesh: mkCircle(PLAYER_R, 24, 0x00ddff),
+  ring: mkRing(PLAYER_R+2, PLAYER_R+5, 0x00eeff),
+  x:0, y:0, vx:0, vy:0, speed:200
+};
+player.mesh.position.z = 3; player.ring.position.z = 4;
+scene.add(player.mesh); scene.add(player.ring);
+
+// ── ENEMY POOL ────────────────────────────────────────────────────────────────
+// All enemies share base r=12 geometry; type is conveyed via color+scale
+const ENEMY_BASE_R = 12;
+const ENEMY_MAX = 24;
+const enemyPool = [];
+for(let i=0; i<ENEMY_MAX; i++){
+  const m = mkCircle(ENEMY_BASE_R, 20, 0xdd2200);
+  const eye = mkCircle(3, 6, 0xffffff);
+  eye.position.set(3, 2, 0.1); m.add(eye);
+  m.visible = false; scene.add(m);
+  enemyPool.push({mesh:m, x:0, y:0, vx:0, vy:0, active:false, type:'grunt', hp:1, maxHp:1});
+}
+
+// effective radius factoring in mesh scale
+function eRadius(en){
+  const s = en.mesh.scale.x;
+  return ENEMY_BASE_R * s;
+}
+function eSpeed(type){ return (type==='scout'?130 : type==='tank'?50 : 85) + wave*6; }
+
+function spawnEnemy(){
+  try {
+    const en = enemyPool.find(e=>!e.active); if(!en) return;
+    const AR = getAR();
+    const a = Math.random() * Math.PI*2;
+    en.x = Math.cos(a)*(AR-12); en.y = Math.sin(a)*(AR-12);
+    en.vx = 0; en.vy = 0; en.active = true;
+
+    // type selection by wave
+    const roll = Math.random();
+    if(wave >= 6 && roll < 0.18){
+      en.type='tank'; en.hp=3; en.maxHp=3;
+      en.mesh.material.color.set(0x880000); en.mesh.scale.setScalar(1.5);
+    } else if(wave >= 3 && roll < 0.32){
+      en.type='scout'; en.hp=1; en.maxHp=1;
+      en.mesh.material.color.set(0xff8800); en.mesh.scale.setScalar(0.65);
+    } else {
+      en.type='grunt'; en.hp=1+(wave>4?1:0); en.maxHp=en.hp;
+      en.mesh.material.color.set(wave%2===0 ? 0xaa1100 : 0xdd2200);
+      en.mesh.scale.setScalar(1.0);
+    }
+    en.mesh.position.set(en.x, en.y, 3); en.mesh.visible = true;
+  } catch(_e){ console.warn('[WARN] spawnEnemy:', _e); }
+}
+
+let spawnTimer = 1.5;
+function spawnInterval(){ return Math.max(0.5, 2.5 - wave*0.15); }
+
+// ── HIT / KILL ────────────────────────────────────────────────────────────────
+function updateLivesUI(){
+  const el = document.getElementById('lives');
+  if(el) el.textContent = '\u2665'.repeat(Math.max(0, lives));
+}
+
+function hitPlayer(){
+  if(invinceTimer > 0) return;
+  lives--;
+  invinceTimer = 1.2;
+  addTrauma(0.65);
+  haptic('heavy');
+  updateLivesUI();
+  spawnParticles(player.x, player.y, 0xff4455, 12, 150);
+  const sc = worldToScreen(player.x, player.y);
+  floatText('-LIFE', sc.x, sc.y, '#ff4455');
+  if(lives <= 0) triggerGameOver();
+}
+
+function triggerGameOver(){
+  gameOver = true;
+  try {
+    document.getElementById('go-score').textContent = 'Score: '+score;
+    document.getElementById('go-wave').textContent = 'Reached Wave '+wave;
+    document.getElementById('go-kills').textContent = totalKills+' eliminations';
+    document.getElementById('gameover').style.display = 'flex';
+  } catch(_e){ console.warn('[WARN] gameover UI:', _e); }
+}
+
+function killEnemy(en){
+  try {
+    combo++; comboTimer = 1.5;
+    const basePts = en.type==='tank'?200 : en.type==='scout'?75 : 50;
+    const mult = combo > 2 ? combo : 1;
+    const total = basePts * mult;
+    score += total; totalKills++; waveKills++;
+    spawnParticles(en.x, en.y, en.type==='tank'?0xff2200:en.type==='scout'?0xff9900:0xff5500,
+      en.type==='tank'?16:10, en.type==='tank'?220:160);
+    haptic(en.type==='tank' ? 'heavy' : 'medium');
+    const sc = worldToScreen(en.x, en.y);
+    floatText(combo > 2 ? `+${total} x${combo}!` : `+${basePts}`, sc.x, sc.y, combo>2 ? '#ffcc00' : '#ff8844');
+    document.getElementById('kills').textContent = totalKills+' kills';
+
+    if(waveKills >= waveTarget()){
+      wave++; waveKills = 0;
+      document.getElementById('wave').textContent = 'WAVE '+wave;
+      const sc2 = worldToScreen(0, getHR()+30);
+      floatText('WAVE '+wave+'!', sc2.x, sc2.y, '#00ffcc');
+    }
+    en.active = false; en.mesh.visible = false;
+  } catch(_e){ console.warn('[WARN] killEnemy:', _e); }
+}
+
+// ── SCORE TICK ────────────────────────────────────────────────────────────────
+let scoreTick = 0;
+function isOnHill(){ return Math.hypot(player.x, player.y) < getHR(); }
+
+// ── INPUT ─────────────────────────────────────────────────────────────────────
+let tapTarget = null;
+let ptrDownX = 0, ptrDownY = 0, ptrDownTime = 0;
+
+renderer.domElement.addEventListener('pointerdown', e=>{
+  try {
+    if(gameOver) return;
+    ptrDownX = e.clientX; ptrDownY = e.clientY; ptrDownTime = performance.now();
+    const w = screenToWorld(e.clientX, e.clientY);
+    const AR = getAR(), d = Math.hypot(w.x, w.y);
+    if(d > AR-PLAYER_R){ const sc=(AR-PLAYER_R)/d; w.x*=sc; w.y*=sc; }
+    tapTarget = w;
+  } catch(_e){ console.warn('[WARN] pointerdown:', _e); }
+});
+
+renderer.domElement.addEventListener('pointermove', e=>{
+  try {
+    if(e.buttons===0 || gameOver) return;
+    const w = screenToWorld(e.clientX, e.clientY);
+    const AR = getAR(), d = Math.hypot(w.x, w.y);
+    if(d > AR-PLAYER_R){ const sc=(AR-PLAYER_R)/d; w.x*=sc; w.y*=sc; }
+    tapTarget = w;
+  } catch(_e){ console.warn('[WARN] pointermove:', _e); }
+});
+
+renderer.domElement.addEventListener('pointerup', e=>{
+  try {
+    if(gameOver) return;
+    const elapsed = (performance.now()-ptrDownTime)/1000;
+    const moved = Math.hypot(e.clientX-ptrDownX, e.clientY-ptrDownY);
+    // quick tap with minimal movement = SLAM
+    if(elapsed < 0.22 && moved < 18 && slamCd <= 0){
+      triggerShockwave(player.x, player.y);
+      addTrauma(0.12);
+      slamCd = SLAM_CD;
+    }
+  } catch(_e){ console.warn('[WARN] pointerup:', _e); }
+});
+
+renderer.domElement.addEventListener('pointercancel', ()=>{
+  try { tapTarget = null; } catch(_e){ console.warn('[WARN] pointercancel:', _e); }
+});
+
+// ── RESET ─────────────────────────────────────────────────────────────────────
+function resetGame(){
+  try {
+    for(const en of enemyPool){ en.active=false; en.mesh.visible=false; }
+    for(const p of particlePool){ p.active=false; p.mesh.visible=false; }
+    for(const sw of shockwavePool){ sw.active=false; sw.mesh.visible=false; }
+    score=0; lives=3; wave=1; totalKills=0; waveKills=0;
+    gameOver=false; invinceTimer=0; trauma=0; slamCd=0; combo=0; comboTimer=0;
+    spawnTimer=1.5; scoreTick=0; tapTarget=null;
+    player.x=0; player.y=0; player.vx=0; player.vy=0;
+    player.mesh.position.set(0,0,3); player.ring.position.set(0,0,4);
+    player.mesh.material.opacity=1; player.mesh.material.transparent=false;
+    document.getElementById('gameover').style.display='none';
+    document.getElementById('score').textContent='0';
+    document.getElementById('wave').textContent='WAVE 1';
+    document.getElementById('kills').textContent='0 kills';
+    document.getElementById('slam-hint').textContent='TAP = SLAM';
+    updateLivesUI();
+  } catch(_e){ console.warn('[WARN] resetGame:', _e); }
+}
+
+document.getElementById('rbtn').addEventListener('click', ()=>{
+  try { resetGame(); } catch(_e){ console.warn('[WARN] rbtn click:', _e); }
+});
+
+// ── GAME LOOP ─────────────────────────────────────────────────────────────────
+let lastT = null;
+
+function update(ts){
+  try {
+    if(gameOver){ renderer.render(scene, camera); requestAnimationFrame(update); return; }
+    if(lastT === null){ lastT=ts; requestAnimationFrame(update); return; }
+    const dt = Math.min((ts-lastT)/1000, 0.05);
+    lastT = ts;
+
+    const AR = getAR(), HR = getHR();
+
+    // Invincibility flash
+    if(invinceTimer > 0){
+      invinceTimer -= dt;
+      player.mesh.material.transparent = true;
+      player.mesh.material.opacity = Math.floor(invinceTimer*10)%2===0 ? 0.25 : 1.0;
+    } else {
+      player.mesh.material.transparent = false;
+      player.mesh.material.opacity = 1.0;
+    }
+
+    // Trauma-based screen shake (exponential decay)
+    trauma = Math.max(0, trauma - dt*1.5);
+    if(trauma > 0.01){
+      const s = trauma * trauma * 20;
+      camera.position.x = (Math.random()-0.5)*s;
+      camera.position.y = (Math.random()-0.5)*s;
+    } else {
+      camera.position.x *= 0.7; camera.position.y *= 0.7;
+    }
+
+    // Slam cooldown UI
+    if(slamCd > 0){
+      slamCd -= dt;
+      const hintEl = document.getElementById('slam-hint');
+      if(slamCd > 0) hintEl.textContent = `SLAM: ${slamCd.toFixed(1)}s`;
+      else { hintEl.textContent = 'TAP = SLAM'; haptic('light'); }
+    }
+
+    // Combo timeout
+    if(comboTimer > 0){ comboTimer -= dt; if(comboTimer <= 0) combo = 0; }
+
+    // Player movement toward tapTarget
+    if(tapTarget){
+      const dx = tapTarget.x-player.x, dy = tapTarget.y-player.y;
+      const d = Math.hypot(dx, dy);
+      if(d < 4){ tapTarget=null; player.vx=0; player.vy=0; }
+      else { const spd=Math.min(player.speed, d*8); player.vx=(dx/d)*spd; player.vy=(dy/d)*spd; }
+    } else { player.vx *= 0.85; player.vy *= 0.85; }
+
+    player.x += player.vx*dt; player.y += player.vy*dt;
+    const pd = Math.hypot(player.x, player.y);
+    if(pd > AR-PLAYER_R){ const sc=(AR-PLAYER_R)/pd; player.x*=sc; player.y*=sc; player.vx=0; player.vy=0; }
+    player.mesh.position.set(player.x, player.y, 3);
+    player.ring.position.set(player.x, player.y, 4);
+
+    // Score tick while on hill
+    const onHill = isOnHill();
+    document.getElementById('king-label').style.opacity = onHill ? '1' : '0';
+    if(onHill){ scoreTick += dt; if(scoreTick >= 0.1){ scoreTick=0; score++; } }
+    else { scoreTick = 0; }
+    document.getElementById('score').textContent = score;
+
+    // Hill ring pulse
+    const pulse = 0.85 + 0.15*Math.sin(ts*0.003);
+    hillRing.scale.setScalar(0.96 + pulse*0.08);
+    hillRingInner.scale.setScalar(0.9 + pulse*0.12);
+    hillGlow.material.color.set(onHill ? 0x332200 : 0x1a1000);
+    crownLine.position.y = HR + 18 + Math.sin(ts*0.004)*3;
+
+    // Shockwave update
+    updateShockwaves(dt);
+
+    // Spawn enemies
+    spawnTimer -= dt;
+    if(spawnTimer <= 0){ spawnEnemy(); spawnTimer = spawnInterval(); }
+
+    // Enemy AI + collision
+    for(const en of enemyPool){
+      if(!en.active) continue;
+      try {
+        const spd = eSpeed(en.type);
+        const tx = -en.x, ty = -en.y;
+        const td = Math.hypot(tx, ty);
+        if(td > 1){ en.vx += (tx/td)*spd*dt*4; en.vy += (ty/td)*spd*dt*4; }
+        const curSpd = Math.hypot(en.vx, en.vy);
+        if(curSpd > spd){ en.vx=(en.vx/curSpd)*spd; en.vy=(en.vy/curSpd)*spd; }
+        en.x += en.vx*dt; en.y += en.vy*dt;
+
+        const eR = eRadius(en);
+        // player-enemy collision
+        const pex = en.x-player.x, pey = en.y-player.y;
+        const ped = Math.hypot(pex, pey);
+        const touchR = PLAYER_R + eR;
+        if(ped < touchR && ped > 0){
+          const nx = pex/ped, ny = pey/ped;
+          const pspd = Math.hypot(player.vx, player.vy);
+          if(pspd > 80){
+            // fast player bounces enemy
+            const bounce = en.type==='tank' ? 180 : 300;
+            en.vx += nx*bounce; en.vy += ny*bounce;
+            spawnParticles(en.x, en.y, 0xff6600, 5, 100);
+            haptic('light');
+            if(en.type !== 'tank'){
+              en.hp--;
+              if(en.hp <= 0){ killEnemy(en); continue; }
+            }
+          } else {
+            // slow player takes damage
+            hitPlayer();
+            const ov = touchR - ped;
+            en.x += nx*ov*0.5; en.y += ny*ov*0.5;
+            player.x -= nx*ov*0.5; player.y -= ny*ov*0.5;
+          }
+        }
+
+        // arena boundary kill
+        const eb = Math.hypot(en.x, en.y);
+        if(eb >= AR - eR*0.5){ killEnemy(en); continue; }
+        if(eb > AR - eR){ const sc=(AR-eR)/eb; en.x*=sc; en.y*=sc; en.vx*=-0.3; en.vy*=-0.3; }
+
+        en.mesh.position.set(en.x, en.y, 3);
+        en.mesh.rotation.z = Math.atan2(-en.y, -en.x) - Math.PI/2;
+      } catch(_ei){ console.warn('[WARN] enemy update:', _ei); }
+    }
+
+    updateParticles(dt);
+    renderer.render(scene, camera);
+  } catch(_e){ console.warn('[WARN] update loop:', _e); }
+  requestAnimationFrame(update);
+}
+
+// ── RESIZE ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', ()=>{
+  try {
+    W=window.innerWidth; H=window.innerHeight;
+    renderer.setSize(W, H);
+    camera.left=-W/2; camera.right=W/2; camera.top=H/2; camera.bottom=-H/2;
+    camera.updateProjectionMatrix();
+    buildArena();
+  } catch(_e){ console.warn('[WARN] resize:', _e); }
+});
+
+// ── START (drop player onto hill immediately — no tutorial) ───────────────────
+requestAnimationFrame(update);
+
+} catch(_e){ console.error('[ERROR] boot:', _e); }
+</script>
+</body>
+</html>

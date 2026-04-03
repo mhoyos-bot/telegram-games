@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>TIMING TAP</title>
+<!--
+  STD-025: Single-file HTML5 Telegram Mini App. Three.js r128 CDN. <500KB.
+  STD-031 LINE OVERRIDE: ~480 lines. JUSTIFIED: STD-025 mandates single-file HTML5.
+    All game code (scene, UI, physics, input, effects) must coexist in one file.
+  STD-033 KERNEL WIRING: NO — standalone game build. No event_bus, no kingdom_state.
+  STD-039 BLOODFLOW: pointerdown → onTap() → score/combo/hp → UI update → endGame()
+    loop(): needle advance → color feedback → particles → flash → shake → render
+-->
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050510;overflow:hidden;touch-action:none;
+     font-family:'Arial Black',Arial,sans-serif;user-select:none;-webkit-user-select:none}
+#ui{position:fixed;top:0;left:0;width:100%;z-index:10;pointer-events:none;padding:14px 18px 0}
+#score{font-size:44px;font-weight:900;color:#fff;
+       text-shadow:0 0 20px rgba(255,255,255,.45);letter-spacing:2px;transition:transform .05s}
+#score.bump{transform:scale(1.2)}
+#combo{font-size:18px;color:#ffcc00;margin-top:4px;
+       text-shadow:0 0 10px rgba(255,204,0,.55);min-height:24px}
+#mult{font-size:24px;color:#ff4488;font-weight:900;min-height:28px}
+#lives{font-size:22px;color:#ff4444;text-align:right;
+       position:absolute;top:18px;right:18px;text-shadow:0 0 8px rgba(255,68,68,.5)}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;
+         align-items:center;justify-content:center;z-index:20;background:rgba(5,5,16,.93)}
+#overlay h1{font-size:52px;color:#fff;font-weight:900;letter-spacing:4px;
+            text-shadow:0 0 30px rgba(255,255,255,.25)}
+#overlay p{font-size:20px;color:#888;margin-top:16px;text-align:center;padding:0 24px}
+#final-val{font-size:40px;color:#ffcc00;font-weight:900;margin-top:10px;display:none}
+#btn{margin-top:36px;padding:16px 52px;font-size:22px;background:#14f195;color:#000;
+     border:none;border-radius:50px;font-weight:900;cursor:pointer;font-family:inherit}
+#floats{position:fixed;inset:0;pointer-events:none;z-index:15;overflow:hidden}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="score">00000</div>
+  <div id="combo"></div>
+  <div id="mult"></div>
+  <div id="lives">&#9829;&#9829;&#9829;&#9829;&#9829;</div>
+</div>
+<div id="floats"></div>
+<div id="overlay">
+  <h1>TIMING TAP</h1>
+  <p>Tap when the needle hits the zone</p>
+  <div id="final-val"></div>
+  <button id="btn">TAP TO PLAY</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+// --- Telegram bridge ---
+var tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+function haptic(t) {
+  try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(t); }
+  catch (_e) { console.warn('[INFO] haptic unavailable (non-Telegram context):', _e); }
+}
+
+// --- Renderer ---
+var W = window.innerWidth, H = window.innerHeight;
+var renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(W, H);
+  renderer.setClearColor(0x050510);
+  renderer.domElement.style.cssText = 'position:fixed;top:0;left:0;z-index:1';
+  document.body.appendChild(renderer.domElement);
+} catch (_e) {
+  document.body.innerHTML = '<div style="color:#fff;padding:24px;font-family:sans-serif">WebGL required</div>';
+  throw _e;
+}
+
+var scene = new THREE.Scene();
+var cam   = new THREE.OrthographicCamera(-W/2, W/2, H/2, -H/2, 0.1, 100);
+cam.position.z = 10;
+
+// --- Layout ---
+var CX     = 0;
+var CY     = -(H * 0.06);
+var RADIUS = Math.min(W, H) * 0.34;
+// Arc: THREE.RingGeometry thetaStart=0 → thetaLength=PI gives 180° CCW from +X through top to -X
+
+// --- Colors ---
+var C_TRACK   = 0x252545;
+var C_GOOD    = 0x22cc55;
+var C_PERFECT = 0xffcc00;
+var C_MISS    = 0xff3344;
+var C_NEEDLE  = 0xffffff;
+var C_PIVOT   = 0xaaaacc;
+
+// --- Game state ---
+var phase       = 'title';
+var score       = 0;
+var combo       = 0;
+var hp          = 5;
+var shake       = 0;
+var flashT      = 0;
+var flashClr    = C_PERFECT;
+var elapsed     = 0;
+var lastT       = performance.now();
+var needleAngle = 0;         // 0=right, PI=left; sweeps within [0, PI]
+var needleDir   = 1;         // +1 toward PI, -1 toward 0
+var needleSpeed = 1.2;       // rad/s
+var zoneCenter  = Math.PI / 2;
+var perfectHalf = 0.12;
+var goodHalf    = 0.26;
+var zoneMoveDir = 1;
+
+// --- Scene objects ---
+// Track arc (thin ring, full 180°)
+var trackMesh = new THREE.Mesh(
+  new THREE.RingGeometry(RADIUS - 3, RADIUS + 3, 80, 1, 0, Math.PI),
+  new THREE.MeshBasicMaterial({ color: C_TRACK, side: THREE.DoubleSide })
+);
+trackMesh.position.set(CX, CY, 0);
+scene.add(trackMesh);
+
+// Arc end-cap dots
+function makeDot(angle, color, r) {
+  var m = new THREE.Mesh(
+    new THREE.CircleGeometry(r, 12),
+    new THREE.MeshBasicMaterial({ color: color })
+  );
+  m.position.set(CX + Math.cos(angle) * RADIUS, CY + Math.sin(angle) * RADIUS, 0.3);
+  scene.add(m);
+  return m;
+}
+makeDot(0,        0x333355, 10);
+makeDot(Math.PI,  0x333355, 10);
+
+// Good zone arc
+var goodMesh = new THREE.Mesh(
+  new THREE.RingGeometry(RADIUS - 10, RADIUS + 10, 24, 1, zoneCenter - goodHalf, goodHalf * 2),
+  new THREE.MeshBasicMaterial({ color: C_GOOD, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })
+);
+goodMesh.position.set(CX, CY, 0.1);
+scene.add(goodMesh);
+
+// Perfect zone arc
+var perfectMesh = new THREE.Mesh(
+  new THREE.RingGeometry(RADIUS - 13, RADIUS + 13, 16, 1, zoneCenter - perfectHalf, perfectHalf * 2),
+  new THREE.MeshBasicMaterial({ color: C_PERFECT, side: THREE.DoubleSide, transparent: true, opacity: 0.85 })
+);
+perfectMesh.position.set(CX, CY, 0.2);
+scene.add(perfectMesh);
+
+function rebuildZones() {
+  try {
+    goodMesh.geometry.dispose();
+    goodMesh.geometry = new THREE.RingGeometry(
+      RADIUS - 10, RADIUS + 10, 24, 1, zoneCenter - goodHalf, goodHalf * 2);
+    perfectMesh.geometry.dispose();
+    perfectMesh.geometry = new THREE.RingGeometry(
+      RADIUS - 13, RADIUS + 13, 16, 1, zoneCenter - perfectHalf, perfectHalf * 2);
+  } catch (_e) {
+    console.warn('[WARN] rebuildZones failed:', _e);
+  }
+}
+
+// Needle: PlaneGeometry pivot-offset so rotation.z spins from CX,CY
+var needleGeo = new THREE.PlaneGeometry(RADIUS * 0.88, 5);
+needleGeo.translate(RADIUS * 0.44, 0, 0);
+var needleMat = new THREE.MeshBasicMaterial({ color: C_NEEDLE, side: THREE.DoubleSide });
+var needleMesh = new THREE.Mesh(needleGeo, needleMat);
+needleMesh.position.set(CX, CY, 1);
+scene.add(needleMesh);
+
+// Pivot dot
+var pivotMesh = new THREE.Mesh(
+  new THREE.CircleGeometry(RADIUS * 0.058, 16),
+  new THREE.MeshBasicMaterial({ color: 0xffffff })
+);
+pivotMesh.position.set(CX, CY, 2);
+scene.add(pivotMesh);
+
+// Needle tip dot
+var tipMat  = new THREE.MeshBasicMaterial({ color: 0xffffff });
+var tipMesh = new THREE.Mesh(new THREE.CircleGeometry(9, 12), tipMat);
+tipMesh.position.set(CX + RADIUS * 0.88, CY, 1.5);
+scene.add(tipMesh);
+
+// Flash overlay
+var flashMat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 });
+var flashMesh = new THREE.Mesh(new THREE.PlaneGeometry(W * 4, H * 4), flashMat);
+flashMesh.position.z = 8;
+scene.add(flashMesh);
+
+// --- Particle pool ---
+var PART_MAX = 64;
+var parts = [];
+(function() {
+  for (var i = 0; i < PART_MAX; i++) {
+    var pm = new THREE.Mesh(
+      new THREE.CircleGeometry(5, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 })
+    );
+    pm.visible = false;
+    pm.userData = { active: false, vx: 0, vy: 0, life: 0 };
+    scene.add(pm);
+    parts.push(pm);
+  }
+}());
+
+function burst(x, y, color, count) {
+  var spawned = 0;
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (p.userData.active) continue;
+    var a   = Math.random() * Math.PI * 2;
+    var spd = 100 + Math.random() * 190;
+    p.userData.vx   = Math.cos(a) * spd;
+    p.userData.vy   = Math.sin(a) * spd;
+    p.userData.life = 0.5 + Math.random() * 0.4;
+    p.userData.active = true;
+    p.material.color.setHex(color);
+    p.material.opacity = 1;
+    p.position.set(x, y, 3);
+    p.scale.setScalar(1);
+    p.visible = true;
+    if (++spawned >= count) break;
+  }
+}
+
+// --- UI helpers ---
+var scoreEl   = document.getElementById('score');
+var comboEl   = document.getElementById('combo');
+var multEl    = document.getElementById('mult');
+var livesEl   = document.getElementById('lives');
+var floatsEl  = document.getElementById('floats');
+var overlay   = document.getElementById('overlay');
+var finalVal  = document.getElementById('final-val');
+var btn       = document.getElementById('btn');
+
+function updateLives() {
+  livesEl.textContent =
+    '\u2665'.repeat(Math.max(0, hp)) + '\u2661'.repeat(Math.max(0, 5 - hp));
+}
+updateLives();
+
+function bumpScore(pts) {
+  score += pts;
+  scoreEl.textContent = ('00000' + score).slice(-5);
+  scoreEl.classList.remove('bump');
+  void scoreEl.offsetWidth;
+  scoreEl.classList.add('bump');
+  setTimeout(function() { scoreEl.classList.remove('bump'); }, 90);
+}
+
+function getMult() {
+  if (combo >= 20) return 4;
+  if (combo >= 10) return 3;
+  if (combo >= 5)  return 2;
+  return 1;
+}
+
+function updateComboUI() {
+  if (combo >= 2) {
+    comboEl.textContent = combo + ' COMBO';
+    var m = getMult();
+    multEl.textContent  = m > 1 ? '\xd7' + m : '';
+  } else {
+    comboEl.textContent = '';
+    multEl.textContent  = '';
+  }
+}
+
+function floatText(txt, wx, wy, color) {
+  var sx = wx + W / 2;
+  var sy = H / 2 - wy;
+  var el = document.createElement('div');
+  el.style.cssText = 'position:absolute;pointer-events:none;font-family:Arial Black,Arial,sans-serif;' +
+    'font-size:22px;font-weight:900;text-align:center;width:90px;' +
+    'left:' + (sx - 45) + 'px;top:' + sy + 'px;color:' + color;
+  el.textContent = txt;
+  floatsEl.appendChild(el);
+  var t = 0;
+  (function step() {
+    t += 16;
+    el.style.top     = (sy - t * 0.09) + 'px';
+    el.style.opacity = Math.max(0, 1 - t / 650).toString();
+    if (t < 650) requestAnimationFrame(step); else el.remove();
+  }());
+}
+
+// --- Tap logic ---
+function onTap() {
+  if (phase !== 'playing') return;
+  var diff = Math.abs(needleAngle - zoneCenter);
+  var tipX = CX + Math.cos(needleAngle) * RADIUS * 0.85;
+  var tipY = CY + Math.sin(needleAngle) * RADIUS * 0.85;
+  var pts  = 0;
+
+  if (diff <= perfectHalf) {
+    pts = 100 * getMult();
+    bumpScore(pts);
+    combo++;
+    updateComboUI();
+    shake  = 0.009;
+    flashT = 0.18; flashClr = C_PERFECT;
+    burst(CX, CY, C_PERFECT, 22);
+    floatText('PERFECT', tipX, tipY, '#ffcc00');
+    haptic('heavy');
+    shiftZone();
+  } else if (diff <= goodHalf) {
+    pts = 40 * getMult();
+    bumpScore(pts);
+    combo++;
+    updateComboUI();
+    shake  = 0.003;
+    flashT = 0.09; flashClr = C_GOOD;
+    burst(CX, CY, C_GOOD, 10);
+    floatText('GOOD', tipX, tipY, '#22cc55');
+    haptic('medium');
+    shiftZone();
+  } else {
+    combo = 0;
+    updateComboUI();
+    hp--;
+    updateLives();
+    shake  = 0.006;
+    flashT = 0.1; flashClr = C_MISS;
+    floatText('MISS', tipX, tipY, '#ff3344');
+    haptic('light');
+    if (hp <= 0) endGame();
+  }
+}
+
+function shiftZone() {
+  var range = 0.36;
+  var step  = 0.16 + Math.random() * 0.24;
+  zoneCenter += zoneMoveDir * step;
+  if (zoneCenter > Math.PI / 2 + range || zoneCenter < Math.PI / 2 - range) {
+    zoneMoveDir *= -1;
+  }
+  var min = goodHalf + 0.08;
+  var max = Math.PI - goodHalf - 0.08;
+  zoneCenter = Math.max(min, Math.min(max, zoneCenter));
+  rebuildZones();
+}
+
+// --- Difficulty ---
+function applyDifficulty() {
+  var t    = Math.min(elapsed, 90);
+  needleSpeed = 1.2 + (t / 90) * 2.4;       // 1.2 → 3.6 rad/s over 90s
+  perfectHalf = 0.12  - (t / 90) * 0.055;   // 0.12 → 0.065 (narrower perfect zone)
+  goodHalf    = 0.26  - (t / 90) * 0.08;    // 0.26 → 0.18
+}
+
+// --- Game lifecycle ---
+function startGame() {
+  phase       = 'playing';
+  score       = 0; combo = 0; hp = 5; elapsed = 0;
+  needleAngle = 0; needleDir = 1; needleSpeed = 1.2;
+  perfectHalf = 0.12; goodHalf = 0.26;
+  zoneCenter  = Math.PI / 2; zoneMoveDir = 1;
+  shake = 0; flashT = 0;
+  updateLives(); updateComboUI();
+  scoreEl.textContent = '00000';
+  rebuildZones();
+  overlay.style.display = 'none';
+}
+
+function endGame() {
+  phase = 'gameover';
+  overlay.querySelector('h1').textContent = 'GAME OVER';
+  overlay.querySelector('p').textContent  = 'Final score';
+  finalVal.style.display = 'block';
+  finalVal.textContent   = ('00000' + score).slice(-5);
+  btn.textContent        = 'PLAY AGAIN';
+  overlay.style.display  = 'flex';
+}
+
+btn.addEventListener('pointerdown', function(e) {
+  e.stopPropagation();
+  startGame();
+});
+
+document.addEventListener('pointerdown', function() {
+  if (overlay.style.display !== 'none') return;
+  onTap();
+});
+
+// --- Render loop ---
+function loop(ts) {
+  requestAnimationFrame(loop);
+  var dt = Math.min((ts - lastT) / 1000, 0.05);
+  lastT = ts;
+
+  if (phase === 'playing') {
+    elapsed += dt;
+    applyDifficulty();
+
+    // Advance needle; bounce at arc ends
+    needleAngle += needleDir * needleSpeed * dt;
+    if (needleAngle >= Math.PI) { needleAngle = Math.PI; needleDir = -1; }
+    if (needleAngle <= 0)       { needleAngle = 0;       needleDir  =  1; }
+
+    // Rotate needle mesh (pivot at CX, CY)
+    needleMesh.rotation.z = needleAngle;
+
+    // Move tip dot
+    tipMesh.position.set(
+      CX + Math.cos(needleAngle) * RADIUS * 0.88,
+      CY + Math.sin(needleAngle) * RADIUS * 0.88,
+      1.5
+    );
+
+    // Color needle by proximity to zone — instant feedback hint
+    var d = Math.abs(needleAngle - zoneCenter);
+    if (d <= perfectHalf) {
+      needleMat.color.setHex(C_PERFECT);
+      tipMat.color.setHex(C_PERFECT);
+    } else if (d <= goodHalf) {
+      needleMat.color.setHex(C_GOOD);
+      tipMat.color.setHex(C_GOOD);
+    } else {
+      needleMat.color.setHex(C_NEEDLE);
+      tipMat.color.setHex(C_PIVOT);
+    }
+
+    // Pulse perfect zone opacity
+    perfectMesh.material.opacity = 0.7 + Math.sin(ts * 0.004) * 0.15;
+  }
+
+  // Particles
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (!p.userData.active) continue;
+    p.userData.life -= dt;
+    if (p.userData.life <= 0) { p.userData.active = false; p.visible = false; continue; }
+    p.position.x    += p.userData.vx * dt;
+    p.position.y    += p.userData.vy * dt;
+    p.userData.vy   -= 220 * dt;
+    p.material.opacity = p.userData.life;
+  }
+
+  // Flash decay
+  if (flashT > 0) {
+    flashT -= dt;
+    flashMat.color.setHex(flashClr);
+    flashMat.opacity = Math.max(0, flashT * 3.0);
+  } else {
+    flashMat.opacity = 0;
+  }
+
+  // Screen shake decay (×0.78 per frame)
+  if (shake > 0.0002) {
+    shake *= 0.78;
+    cam.position.x = (Math.random() - 0.5) * shake * 20;
+    cam.position.y = (Math.random() - 0.5) * shake * 20;
+  } else {
+    shake = 0;
+    cam.position.x = 0;
+    cam.position.y = 0;
+  }
+
+  renderer.render(scene, cam);
+}
+lastT = performance.now();
+requestAnimationFrame(loop);
+
+// --- Resize ---
+window.addEventListener('resize', function() {
+  W = window.innerWidth; H = window.innerHeight;
+  renderer.setSize(W, H);
+  cam.left = -W/2; cam.right = W/2;
+  cam.top  =  H/2; cam.bottom = -H/2;
+  cam.updateProjectionMatrix();
+});
+</script>
+</body>
+</html>

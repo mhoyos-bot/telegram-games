@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>DRIFT</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; touch-action: none; }
+    canvas { display: block; }
+    #ui {
+      position: fixed; top: 14px; left: 0; right: 0;
+      display: flex; justify-content: space-between; padding: 0 18px;
+      pointer-events: none; font-family: monospace;
+      color: rgba(255,255,255,0.65); font-size: 13px; letter-spacing: 2px;
+    }
+    #danger {
+      position: fixed; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse at center, transparent 55%, rgba(220,20,40,0.55) 100%);
+      opacity: 0;
+    }
+    #msg {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center; pointer-events: none; opacity: 0;
+      font-family: monospace; color: rgba(255,255,255,0.92);
+      font-size: 20px; letter-spacing: 5px; line-height: 1.8;
+    }
+    #msg small { font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,0.45); }
+  </style>
+</head>
+<body>
+
+<div id="ui">
+  <span id="score">0</span>
+  <span id="best">BEST 0</span>
+</div>
+<div id="danger"></div>
+<div id="msg">DRIFT<br><small>TOUCH TO MOVE</small></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+// DRIFT — creature_survival | lc_lane_004_unknown_b7e242
+// Boid hunter AI. Drift to collect seeds. Survive.
+// Atoms: ATOM_BOID_HUNT, ATOM_CREATURE_SURVIVAL_LOOP, ATOM_LERP_DODGE_CONTROL
+
+// ═══════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════
+const ARENA_R        = 9.2;
+const VIEW_H         = 22;
+const PLAYER_LERP    = 0.13;
+const HUNTER_SPD_MIN = 0.052;
+const HUNTER_SPD_MAX = 0.12;
+const SEP_DIST       = 2.5;
+const SEP_STR        = 0.07;
+const HUNT_STR       = 0.046;
+const KILL_DIST      = 0.75;
+const COLLECT_DIST   = 1.15;
+const SEED_COUNT     = 9;
+const HUNTER_START   = 4;
+const HUNTER_MAX     = 11;
+const ADD_INTERVAL   = 9;   // seconds between hunter additions
+const PCOUNT         = 96;  // particle pool
+
+// ═══════════════════════════════════════════════════════
+// SCENE
+// ═══════════════════════════════════════════════════════
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x010407);
+
+let aspect = window.innerWidth / window.innerHeight;
+let VIEW_W = VIEW_H * aspect;
+const camera = new THREE.OrthographicCamera(
+  -VIEW_W / 2, VIEW_W / 2, VIEW_H / 2, -VIEW_H / 2, 0.1, 50
+);
+camera.position.z = 10;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  aspect = window.innerWidth / window.innerHeight;
+  VIEW_W = VIEW_H * aspect;
+  camera.left = -VIEW_W / 2;
+  camera.right = VIEW_W / 2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ═══════════════════════════════════════════════════════
+// ARENA
+// ═══════════════════════════════════════════════════════
+{
+  const geo = new THREE.RingGeometry(ARENA_R - 0.07, ARENA_R + 0.07, 72);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x1a4444, side: THREE.DoubleSide });
+  scene.add(new THREE.Mesh(geo, mat));
+}
+// Faint inner glow ring
+{
+  const geo = new THREE.RingGeometry(ARENA_R - 0.25, ARENA_R - 0.07, 72);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x0a2222, side: THREE.DoubleSide, transparent: true, opacity: 0.5
+  });
+  scene.add(new THREE.Mesh(geo, mat));
+}
+
+// ═══════════════════════════════════════════════════════
+// PLAYER
+// ═══════════════════════════════════════════════════════
+const playerGeo = new THREE.TetrahedronGeometry(0.46, 0);
+const playerMat = new THREE.MeshBasicMaterial({ color: 0x55ffee });
+const playerMesh = new THREE.Mesh(playerGeo, playerMat);
+scene.add(playerMesh);
+
+const glowGeo = new THREE.CircleGeometry(0.9, 20);
+const glowMat = new THREE.MeshBasicMaterial({
+  color: 0x00ccbb, transparent: true, opacity: 0.13, depthWrite: false
+});
+const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+glowMesh.position.z = -0.1;
+scene.add(glowMesh);
+
+let px = 0, py = 0;
+let ptx = 0, pty = 0;
+let touching = false;
+
+// ═══════════════════════════════════════════════════════
+// HUNTERS — boid pursuit AI
+// Separation keeps them spread. Hunt steers toward player.
+// Result: natural pack behavior without scripted paths.
+// ATOM_BOID_HUNT
+// ═══════════════════════════════════════════════════════
+const hunterGeo = new THREE.TetrahedronGeometry(0.38, 0);
+
+const hunters = [];
+
+function spawnHunter() {
+  const angle = Math.random() * Math.PI * 2;
+  const hx = Math.cos(angle) * (ARENA_R - 0.7);
+  const hy = Math.sin(angle) * (ARENA_R - 0.7);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xcc2244 });
+  const mesh = new THREE.Mesh(hunterGeo, mat);
+  mesh.position.set(hx, hy, 0);
+  mesh.rotation.z = Math.random() * Math.PI * 2;
+  scene.add(mesh);
+  hunters.push({ x: hx, y: hy, vx: 0, vy: 0, mesh, mat });
+}
+
+for (let i = 0; i < HUNTER_START; i++) spawnHunter();
+
+function updateHunters(speed) {
+  const n = hunters.length;
+  for (let i = 0; i < n; i++) {
+    const h = hunters[i];
+
+    // Separation: push away from nearby hunters
+    let sx = 0, sy = 0;
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      const dx = h.x - hunters[j].x;
+      const dy = h.y - hunters[j].y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < SEP_DIST * SEP_DIST && d2 > 0.0001) {
+        const d = Math.sqrt(d2);
+        const f = (SEP_DIST - d) / SEP_DIST;
+        sx += (dx / d) * f;
+        sy += (dy / d) * f;
+      }
+    }
+
+    // Hunt: steer toward player
+    const dpx = px - h.x;
+    const dpy = py - h.y;
+    const dpd = Math.sqrt(dpx * dpx + dpy * dpy) + 0.001;
+
+    // Micro-jitter for organic movement
+    const jx = (Math.random() - 0.5) * 0.012;
+    const jy = (Math.random() - 0.5) * 0.012;
+
+    h.vx += (dpx / dpd) * HUNT_STR + sx * SEP_STR + jx;
+    h.vy += (dpy / dpd) * HUNT_STR + sy * SEP_STR + jy;
+
+    // Normalize and apply speed
+    const vs = Math.sqrt(h.vx * h.vx + h.vy * h.vy) + 0.001;
+    h.vx = (h.vx / vs) * speed;
+    h.vy = (h.vy / vs) * speed;
+
+    // Move
+    h.x += h.vx;
+    h.y += h.vy;
+
+    // Arena boundary clamp
+    const hd = Math.sqrt(h.x * h.x + h.y * h.y);
+    if (hd > ARENA_R - 0.45) {
+      const inv = (ARENA_R - 0.45) / hd;
+      h.x *= inv;
+      h.y *= inv;
+      // Reflect velocity inward
+      const dot = h.vx * (h.x / hd) + h.vy * (h.y / hd);
+      h.vx -= 2 * dot * (h.x / hd);
+      h.vy -= 2 * dot * (h.y / hd);
+      h.vx *= 0.4;
+      h.vy *= 0.4;
+    }
+
+    // Update mesh
+    h.mesh.position.set(h.x, h.y, 0);
+    h.mesh.rotation.z += 0.045;
+
+    // Color pulse: brighter red as they close in on player
+    const dp = Math.sqrt((px - h.x) ** 2 + (py - h.y) ** 2);
+    const prox = Math.max(0, 1 - dp / 5.5);
+    h.mat.color.setRGB(0.5 + prox * 0.5, 0.05 + prox * 0.12, 0.08 + prox * 0.08);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// SEEDS
+// ═══════════════════════════════════════════════════════
+const seedGeo = new THREE.CircleGeometry(0.28, 8);
+
+const seeds = [];
+
+function createSeed() {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffdd44, side: THREE.DoubleSide, transparent: true, opacity: 0.88
+  });
+  const mesh = new THREE.Mesh(seedGeo, mat);
+  scene.add(mesh);
+  const s = { mesh, mat, x: 0, y: 0, phase: Math.random() * Math.PI * 2, active: false };
+  seeds.push(s);
+  return s;
+}
+
+function placeSeed(s) {
+  // Keep trying until seed lands away from player spawn
+  let sx, sy;
+  let tries = 0;
+  do {
+    const angle = Math.random() * Math.PI * 2;
+    const r = 1.8 + Math.random() * (ARENA_R - 3.0);
+    sx = Math.cos(angle) * r;
+    sy = Math.sin(angle) * r;
+    tries++;
+  } while (tries < 8 && sx * sx + sy * sy < 4);
+  s.x = sx;
+  s.y = sy;
+  s.mesh.position.set(sx, sy, 0);
+  s.mesh.visible = true;
+  s.active = true;
+}
+
+for (let i = 0; i < SEED_COUNT; i++) {
+  placeSeed(createSeed());
+}
+
+// ═══════════════════════════════════════════════════════
+// PARTICLES
+// ═══════════════════════════════════════════════════════
+const pGeo = new THREE.BufferGeometry();
+const pPos = new Float32Array(PCOUNT * 3);
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+const pMat = new THREE.PointsMaterial({
+  color: 0xffee88, size: 0.24, transparent: true, opacity: 0.85,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.Points(pGeo, pMat));
+
+const pData = [];
+for (let i = 0; i < PCOUNT; i++) {
+  pData.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0 });
+}
+
+function burst(x, y, count) {
+  let n = 0;
+  for (let i = 0; i < PCOUNT && n < count; i++) {
+    if (!pData[i].active) {
+      const a = Math.random() * Math.PI * 2;
+      const spd = 0.04 + Math.random() * 0.14;
+      pData[i].active = true;
+      pData[i].x = x;
+      pData[i].y = y;
+      pData[i].vx = Math.cos(a) * spd;
+      pData[i].vy = Math.sin(a) * spd;
+      pData[i].life = 1.0;
+      n++;
+    }
+  }
+}
+
+function updateParticles() {
+  for (let i = 0; i < PCOUNT; i++) {
+    const p = pData[i];
+    const i3 = i * 3;
+    if (p.active) {
+      p.life -= 0.024;
+      if (p.life <= 0) {
+        p.active = false;
+      } else {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.91;
+        p.vy *= 0.91;
+      }
+    }
+    pPos[i3]     = p.active ? p.x : 9999;
+    pPos[i3 + 1] = p.active ? p.y : 9999;
+    pPos[i3 + 2] = 0;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+}
+
+// ═══════════════════════════════════════════════════════
+// INPUT
+// ═══════════════════════════════════════════════════════
+function scrToWorld(cx, cy) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  return {
+    x: ((cx - rect.left) / rect.width - 0.5) * VIEW_W,
+    y: (0.5 - (cy - rect.top) / rect.height) * VIEW_H
+  };
+}
+
+renderer.domElement.addEventListener('mousedown', (e) => {
+  const w = scrToWorld(e.clientX, e.clientY);
+  ptx = w.x; pty = w.y; touching = true;
+  activate();
+});
+renderer.domElement.addEventListener('mousemove', (e) => {
+  if (!touching) return;
+  const w = scrToWorld(e.clientX, e.clientY);
+  ptx = w.x; pty = w.y;
+});
+renderer.domElement.addEventListener('mouseup', () => { touching = false; });
+
+renderer.domElement.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  const w = scrToWorld(t.clientX, t.clientY);
+  ptx = w.x; pty = w.y; touching = true;
+  activate();
+}, { passive: false });
+renderer.domElement.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  const w = scrToWorld(t.clientX, t.clientY);
+  ptx = w.x; pty = w.y;
+}, { passive: false });
+renderer.domElement.addEventListener('touchend', (e) => {
+  if (e.touches.length === 0) touching = false;
+}, { passive: false });
+
+// ═══════════════════════════════════════════════════════
+// GAME STATE
+// ═══════════════════════════════════════════════════════
+let state = 'title'; // title | play | dead
+let score = 0;
+let best = 0;
+let gameTime = 0;
+let addTimer = 0;
+let dangerAlpha = 0;
+let msgVisible = true;
+
+const scoreEl  = document.getElementById('score');
+const bestEl   = document.getElementById('best');
+const dangerEl = document.getElementById('danger');
+const msgEl    = document.getElementById('msg');
+
+function activate() {
+  if (!msgVisible) return;
+  msgVisible = false;
+  msgEl.style.opacity = '0';
+  if (state === 'title' || state === 'dead') startGame();
+}
+
+function startGame() {
+  state = 'play';
+  score = 0;
+  gameTime = 0;
+  addTimer = 0;
+  scoreEl.textContent = '0';
+
+  // Reset player
+  px = 0; py = 0; ptx = 0; pty = 0;
+  playerMesh.visible = true;
+  glowMesh.visible = true;
+
+  // Trim hunters to start count
+  while (hunters.length > HUNTER_START) {
+    const h = hunters.pop();
+    scene.remove(h.mesh);
+  }
+  while (hunters.length < HUNTER_START) spawnHunter();
+  // Reposition all hunters
+  for (const h of hunters) {
+    const angle = Math.random() * Math.PI * 2;
+    h.x = Math.cos(angle) * (ARENA_R - 0.7);
+    h.y = Math.sin(angle) * (ARENA_R - 0.7);
+    h.vx = 0; h.vy = 0;
+    h.mesh.position.set(h.x, h.y, 0);
+  }
+
+  // Re-scatter seeds
+  for (const s of seeds) placeSeed(s);
+}
+
+function killPlayer() {
+  state = 'dead';
+  if (score > best) {
+    best = score;
+    bestEl.textContent = 'BEST ' + best;
+  }
+  burst(px, py, 22);
+  playerMesh.visible = false;
+  glowMesh.visible = false;
+
+  msgEl.innerHTML = 'SCATTERED<br><small>TAP TO DRIFT AGAIN</small>';
+  msgEl.style.opacity = '1';
+  msgVisible = true;
+}
+
+// ═══════════════════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════════════════
+const clock = new THREE.Clock();
+let t = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  t += dt;
+
+  updateParticles();
+
+  if (state === 'title') {
+    // Gentle idle: hunters wander, seeds bob
+    for (const h of hunters) {
+      h.x += Math.sin(t * 0.6 + h.y * 0.4) * 0.007;
+      h.y += Math.cos(t * 0.5 + h.x * 0.3) * 0.007;
+      // Keep in arena
+      const hd = Math.sqrt(h.x * h.x + h.y * h.y);
+      if (hd > ARENA_R - 0.7) { h.x *= 0.98; h.y *= 0.98; }
+      h.mesh.position.set(h.x, h.y, 0);
+      h.mesh.rotation.z += 0.01;
+    }
+    for (const s of seeds) {
+      s.mesh.position.y = s.y + Math.sin(t * 1.6 + s.phase) * 0.13;
+    }
+    renderer.render(scene, camera);
+    return;
+  }
+
+  if (state === 'dead') {
+    dangerAlpha = Math.max(0, dangerAlpha - dt * 1.8);
+    dangerEl.style.opacity = dangerAlpha;
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // ─── PLAY ───────────────────────────────────────────
+  gameTime += dt;
+  addTimer  += dt;
+
+  // Add hunter on interval
+  if (addTimer >= ADD_INTERVAL && hunters.length < HUNTER_MAX) {
+    addTimer = 0;
+    spawnHunter();
+  }
+
+  // Speed ramp: linear from min to max over 60 seconds
+  const speed = Math.min(HUNTER_SPD_MIN + gameTime * 0.0011, HUNTER_SPD_MAX);
+
+  // Player movement: lerp toward touch point, clamped to arena
+  if (touching) {
+    // Clamp target to arena circle
+    const td = Math.sqrt(ptx * ptx + pty * pty);
+    const limit = ARENA_R - 0.55;
+    const tcx = td > limit ? (ptx / td) * limit : ptx;
+    const tcy = td > limit ? (pty / td) * limit : pty;
+    px += (tcx - px) * PLAYER_LERP;
+    py += (tcy - py) * PLAYER_LERP;
+  }
+
+  playerMesh.rotation.z += 0.028;
+  playerMesh.rotation.x += 0.018;
+  playerMesh.position.set(px, py, 0);
+  glowMesh.position.set(px, py, -0.1);
+
+  // Hunter boid update
+  updateHunters(speed);
+
+  // Seed bob
+  for (const s of seeds) {
+    if (s.active) {
+      s.mesh.position.y = s.y + Math.sin(t * 1.9 + s.phase) * 0.15;
+      s.mesh.rotation.z += 0.03;
+    }
+  }
+
+  // Collision: player vs seeds
+  for (const s of seeds) {
+    if (!s.active) continue;
+    const dx = px - s.x;
+    const dy = py - s.y;
+    if (dx * dx + dy * dy < COLLECT_DIST * COLLECT_DIST) {
+      s.active = false;
+      s.mesh.visible = false;
+      score += 10;
+      scoreEl.textContent = score;
+      burst(s.x, s.y, 11);
+      placeSeed(s); // immediate respawn
+    }
+  }
+
+  // Collision: player vs hunters
+  let closestDist = Infinity;
+  for (const h of hunters) {
+    const dx = px - h.x;
+    const dy = py - h.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < closestDist) closestDist = d;
+    if (d < KILL_DIST) {
+      killPlayer();
+      renderer.render(scene, camera);
+      return;
+    }
+  }
+
+  // Danger vignette
+  const dangerThresh = 2.8;
+  if (closestDist < dangerThresh) {
+    dangerAlpha = Math.min(1, dangerAlpha + dt * 5);
+  } else {
+    dangerAlpha = Math.max(0, dangerAlpha - dt * 2.5);
+  }
+  dangerEl.style.opacity = dangerAlpha;
+
+  renderer.render(scene, camera);
+}
+
+// Show title after short pause
+setTimeout(() => { msgEl.style.opacity = '1'; }, 250);
+
+animate();
+</script>
+</body>
+</html>

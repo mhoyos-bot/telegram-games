@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>THUNDER TAP</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #080414; overflow: hidden; touch-action: none; font-family: monospace; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none;
+    }
+    #score { color: #fff; font: bold 26px/1 monospace; text-shadow: 0 0 18px rgba(180,140,255,0.9); }
+    #combo {
+      color: rgba(255,220,60,0.95); font: bold 17px/1 monospace;
+      text-shadow: 0 0 12px rgba(255,220,60,0.7); min-width: 90px; text-align: center;
+    }
+    #lives { color: rgba(160,120,255,0.9); font: 22px/1 monospace; letter-spacing: 4px; }
+    #feedback {
+      position: fixed; top: 38%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 36px/1 monospace; pointer-events: none; opacity: 0;
+      white-space: nowrap; text-shadow: 0 0 24px currentColor;
+    }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(8,4,20,0.85);
+    }
+    #overlay h1 { color: #c8aaff; font: bold 40px/1.2 monospace; margin-bottom: 8px; letter-spacing: 0.05em; }
+    #overlay .sub { color: rgba(255,255,255,0.4); font: 13px/1.6 monospace; text-align: center; margin-bottom: 6px; max-width: 280px; }
+    #overlay .final { color: rgba(255,200,60,0.9); font: bold 24px/1 monospace; margin: 18px 0 26px; }
+    #btn {
+      background: rgba(180,140,255,0.12); border: 1px solid rgba(180,140,255,0.4);
+      color: rgba(180,140,255,0.95); font: bold 18px/1 monospace; padding: 13px 40px;
+      cursor: pointer; letter-spacing: 0.1em; transition: background 0.1s;
+    }
+    #btn:active { background: rgba(180,140,255,0.3); }
+    #hint {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.18); font: 11px/1 monospace; letter-spacing: 0.12em;
+      pointer-events: none; transition: opacity 1.5s;
+    }
+    #hint.faded { opacity: 0; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div id="score">00000</div>
+    <div id="combo"></div>
+    <div id="lives">⚡⚡⚡</div>
+  </div>
+  <div id="feedback"></div>
+  <div id="hint">TAP WHEN LIGHTNING STRIKES</div>
+
+  <div id="overlay">
+    <h1>THUNDER TAP</h1>
+    <div class="sub">Tap the surge rings when lightning strikes.<br>Perfect timing = max energy.</div>
+    <div class="final" id="final-score" style="display:none"></div>
+    <button id="btn">PLAY</button>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ── AUDIO ──────────────────────────────────────────────────────────────────
+    let audioCtx = null;
+    function getAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    }
+    function playThunder(vol = 0.6) {
+      try {
+        const ac = getAudio();
+        const buf = ac.createBuffer(1, ac.sampleRate * 0.35, ac.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) {
+          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 1.4);
+        }
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        const gain = ac.createGain();
+        gain.gain.setValueAtTime(vol, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.35);
+        const filter = ac.createBiquadFilter();
+        filter.type = 'lowpass'; filter.frequency.value = 400;
+        src.connect(filter); filter.connect(gain); gain.connect(ac.destination);
+        src.start();
+      } catch (_e) { /* silent fail ok for audio */ }
+    }
+    function playPing(freq = 880, vol = 0.4) {
+      try {
+        const ac = getAudio();
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+        osc.type = 'sine'; osc.frequency.value = freq;
+        gain.gain.setValueAtTime(vol, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.22);
+        osc.connect(gain); gain.connect(ac.destination);
+        osc.start(); osc.stop(ac.currentTime + 0.22);
+      } catch (_e) { /* silent fail ok for audio */ }
+    }
+    function playCrackle(vol = 0.5) {
+      try {
+        const ac = getAudio();
+        const buf = ac.createBuffer(1, ac.sampleRate * 0.08, ac.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) {
+          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 0.5);
+        }
+        const src = ac.createBufferSource(); src.buffer = buf;
+        const gain = ac.createGain();
+        gain.gain.setValueAtTime(vol, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.08);
+        src.connect(gain); gain.connect(ac.destination);
+        src.start();
+      } catch (_e) { /* silent fail ok for audio */ }
+    }
+
+    // ── THREE SETUP ────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = false;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x080414);
+    scene.fog = new THREE.Fog(0x080414, 18, 42);
+
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 60);
+    camera.position.set(0, 11, 14);
+    camera.lookAt(0, 0, 0);
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // ── TERRAIN ────────────────────────────────────────────────────────────────
+    const terrainGeo = new THREE.PlaneGeometry(36, 36, 16, 16);
+    const positions = terrainGeo.attributes.position;
+    for (let i = 0; i < positions.count; i++) {
+      const x = positions.getX(i), z = positions.getZ(i);
+      if (Math.abs(x) > 1 || Math.abs(z) > 1) {
+        positions.setY(i, (Math.sin(x * 0.5) + Math.cos(z * 0.4)) * 0.55 + Math.random() * 0.3);
+      }
+    }
+    terrainGeo.computeVertexNormals();
+    const terrainMat = new THREE.MeshFlatMaterial
+      ? new THREE.MeshFlatMaterial({ color: 0x1a0d35 })
+      : new THREE.MeshLambertMaterial({ color: 0x1a0d35, flatShading: true });
+
+    const terrain = new THREE.Mesh(
+      terrainGeo,
+      new THREE.MeshLambertMaterial({ color: 0x1a0d35, flatShading: true })
+    );
+    terrain.rotation.x = -Math.PI / 2;
+    scene.add(terrain);
+
+    // Grid lines for depth
+    const gridHelper = new THREE.GridHelper(36, 18, 0x2a1555, 0x1e0d40);
+    gridHelper.position.y = 0.01;
+    scene.add(gridHelper);
+
+    // ── TREES (low-poly cones) ─────────────────────────────────────────────────
+    const treePositions = [
+      [-7, 0, -6], [7, 0, -7], [-9, 0, -3], [8, 0, -4],
+      [-6, 0, 5], [9, 0, 3], [-8, 0, 8], [7, 0, 7],
+      [0, 0, -9], [-3, 0, -8], [3, 0, -8],
+    ];
+    treePositions.forEach(([x, , z]) => {
+      const h = 1.2 + Math.random() * 1.2;
+      const geo = new THREE.ConeGeometry(0.5 + Math.random() * 0.3, h, 5);
+      const mat = new THREE.MeshLambertMaterial({
+        color: new THREE.Color().setHSL(0.75 + Math.random() * 0.1, 0.5, 0.12 + Math.random() * 0.08),
+        flatShading: true
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x + Math.random() - 0.5, h / 2, z + Math.random() - 0.5);
+      scene.add(mesh);
+    });
+
+    // ── LIGHTING ───────────────────────────────────────────────────────────────
+    scene.add(new THREE.AmbientLight(0x180830, 2.5));
+    const dirLight = new THREE.DirectionalLight(0x9966ff, 1.8);
+    dirLight.position.set(5, 12, 8);
+    scene.add(dirLight);
+    const fillLight = new THREE.PointLight(0x3311aa, 1.2, 30);
+    fillLight.position.set(-5, 4, -3);
+    scene.add(fillLight);
+
+    // ── PARTICLES POOL ─────────────────────────────────────────────────────────
+    const PART_COUNT = 120;
+    const partGeo = new THREE.BufferGeometry();
+    const partPos = new Float32Array(PART_COUNT * 3);
+    const partAlpha = new Float32Array(PART_COUNT);
+    partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
+    const partMat = new THREE.PointsMaterial({
+      color: 0xddbbff, size: 0.18, transparent: true, opacity: 1,
+      sizeAttenuation: true, depthWrite: false
+    });
+    const particles = new THREE.Points(partGeo, partMat);
+    scene.add(particles);
+    const partVel = Array.from({ length: PART_COUNT }, () => new THREE.Vector3());
+    const partLife = new Float32Array(PART_COUNT);
+
+    function spawnBurst(x, z, color) {
+      for (let i = 0; i < PART_COUNT; i++) {
+        if (partLife[i] > 0) continue;
+        partLife[i] = 0.7 + Math.random() * 0.5;
+        partPos[i * 3] = x;
+        partPos[i * 3 + 1] = 0.2;
+        partPos[i * 3 + 2] = z;
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 2 + Math.random() * 5;
+        partVel[i].set(
+          Math.cos(angle) * spd,
+          2 + Math.random() * 6,
+          Math.sin(angle) * spd
+        );
+        if (i >= PART_COUNT - 10) break;
+      }
+      partMat.color.set(color);
+      partGeo.attributes.position.needsUpdate = true;
+    }
+
+    function updateParticles(dt) {
+      let anyAlive = false;
+      for (let i = 0; i < PART_COUNT; i++) {
+        if (partLife[i] <= 0) continue;
+        anyAlive = true;
+        partLife[i] -= dt;
+        partVel[i].y -= 9 * dt;
+        partPos[i * 3] += partVel[i].x * dt;
+        partPos[i * 3 + 1] += partVel[i].y * dt;
+        partPos[i * 3 + 2] += partVel[i].z * dt;
+        if (partPos[i * 3 + 1] < 0) { partPos[i * 3 + 1] = 0; partVel[i].y = 0; }
+      }
+      partGeo.attributes.position.needsUpdate = true;
+      partMat.opacity = anyAlive ? 1 : 0;
+    }
+
+    // ── LIGHTNING BOLT (line mesh) ─────────────────────────────────────────────
+    function makeBolt(x, z) {
+      const points = [];
+      let cx = x, cz = z, cy = 10;
+      points.push(new THREE.Vector3(cx, cy, cz));
+      while (cy > 0.2) {
+        cy -= 0.8 + Math.random() * 1.2;
+        cx += (Math.random() - 0.5) * 0.7;
+        cz += (Math.random() - 0.5) * 0.7;
+        points.push(new THREE.Vector3(cx, Math.max(cy, 0), cz));
+      }
+      const geo = new THREE.BufferGeometry().setFromPoints(points);
+      const mat = new THREE.LineBasicMaterial({ color: 0xeeddff, transparent: true, opacity: 0.95, linewidth: 1 });
+      return new THREE.Line(geo, mat);
+    }
+
+    // ── SURGE RING ─────────────────────────────────────────────────────────────
+    function makeSurgeRing(x, z) {
+      const geo = new THREE.RingGeometry(0.2, 0.35, 32);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xcc99ff, transparent: true, opacity: 0.9, side: THREE.DoubleSide });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(x, 0.05, z);
+      return mesh;
+    }
+
+    // ── GAME STATE ─────────────────────────────────────────────────────────────
+    const STRIKE_SLOTS = [
+      [-4, -3], [0, -4], [4, -3],
+      [-5, 0], [-2, 0], [2, 0], [5, 0],
+      [-4, 3], [0, 4], [4, 3],
+    ];
+
+    let gameRunning = false;
+    let score = 0, combo = 0, lives = 3;
+    let strikes = []; // active strike objects
+    let spawnTimer = 0, spawnInterval = 2.0;
+    let difficulty = 1.0;
+    let shakeTime = 0, shakeAmt = 0;
+    const camOrigin = camera.position.clone();
+    let cameraY = 11;
+
+    // Each strike: { x, z, phase, timer, maxTimer, bolt, ring, outerRing, slot }
+    // phases: 'charge'(ring grows) -> 'flash'(bolt+peak) -> 'done'
+
+    function resetGame() {
+      score = 0; combo = 0; lives = 3;
+      strikes.forEach(s => clearStrike(s));
+      strikes = [];
+      spawnTimer = 0; spawnInterval = 2.0; difficulty = 1.0;
+      updateHUD();
+    }
+
+    function clearStrike(s) {
+      if (s.bolt) { scene.remove(s.bolt); s.bolt.geometry.dispose(); s.bolt.material.dispose(); s.bolt = null; }
+      if (s.ring) { scene.remove(s.ring); s.ring.geometry.dispose(); s.ring.material.dispose(); s.ring = null; }
+      if (s.outerRing) { scene.remove(s.outerRing); s.outerRing.geometry.dispose(); s.outerRing.material.dispose(); s.outerRing = null; }
+    }
+
+    // Track occupied slots
+    const occupiedSlots = new Set();
+
+    function spawnStrike() {
+      const free = STRIKE_SLOTS.filter((_, i) => !occupiedSlots.has(i));
+      if (!free.length) return;
+      const idx = STRIKE_SLOTS.indexOf(free[Math.floor(Math.random() * free.length)]);
+      const [x, z] = STRIKE_SLOTS[idx];
+      occupiedSlots.add(idx);
+
+      const chargeTime = Math.max(0.8, 2.0 - difficulty * 0.15);
+      const ring = makeSurgeRing(x, z);
+      const outerRing = makeSurgeRing(x, z);
+      outerRing.material = outerRing.material.clone();
+      outerRing.material.color.set(0x9955ff);
+      outerRing.material.opacity = 0.4;
+      scene.add(ring); scene.add(outerRing);
+
+      strikes.push({ x, z, phase: 'charge', timer: 0, maxTimer: chargeTime, bolt: null, ring, outerRing, slotIdx: idx, tapped: false });
+    }
+
+    // ── POINTER HIT TEST ───────────────────────────────────────────────────────
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const hitPoint = new THREE.Vector3();
+
+    function getWorldTap(clientX, clientY) {
+      mouse.x = (clientX / innerWidth) * 2 - 1;
+      mouse.y = -(clientY / innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
+        return { x: hitPoint.x, z: hitPoint.z };
+      }
+      return null;
+    }
+
+    function onTap(clientX, clientY) {
+      if (!gameRunning) return;
+      getAudio(); // unlock audio on first tap
+      const pt = getWorldTap(clientX, clientY);
+      if (!pt) return;
+
+      let hit = false;
+      for (const s of strikes) {
+        if (s.tapped) continue;
+        if (s.phase !== 'flash') continue; // only tappable during flash
+        const dist = Math.sqrt((pt.x - s.x) ** 2 + (pt.z - s.z) ** 2);
+        if (dist < 2.8) {
+          s.tapped = true;
+          hit = true;
+
+          combo++;
+          const pts = combo >= 5 ? 250 : combo >= 3 ? 150 : combo >= 2 ? 100 : 75;
+          score += pts;
+
+          // Visual feedback
+          const label = combo >= 5 ? 'SURGE!!!' : combo >= 3 ? 'CHAIN!' : 'STRIKE';
+          const col = combo >= 5 ? '#ffee00' : combo >= 3 ? '#cc99ff' : '#ffffff';
+          showFeedback(label, col);
+          spawnBurst(s.x, s.z, combo >= 5 ? 0xffee00 : combo >= 3 ? 0xcc99ff : 0xeeddff);
+          shakeTime = 0.18; shakeAmt = combo >= 3 ? 0.22 : 0.12;
+          playPing(440 + combo * 80, 0.45);
+          playCrackle(0.5);
+          updateHUD();
+          break;
+        }
+      }
+      if (!hit) {
+        // Missed tap — reset combo only if tapping during flash phase exists
+        const anyFlash = strikes.some(s => !s.tapped && s.phase === 'flash');
+        if (anyFlash) {
+          combo = 0;
+          showFeedback('MISS', 'rgba(255,80,80,0.9)');
+          updateHUD();
+        }
+      }
+    }
+
+    renderer.domElement.addEventListener('pointerdown', e => onTap(e.clientX, e.clientY));
+
+    // ── HUD ────────────────────────────────────────────────────────────────────
+    const scoreEl = document.getElementById('score');
+    const comboEl = document.getElementById('combo');
+    const livesEl = document.getElementById('lives');
+    const feedbackEl = document.getElementById('feedback');
+    const overlay = document.getElementById('overlay');
+    const finalScoreEl = document.getElementById('final-score');
+    const hintEl = document.getElementById('hint');
+    let hintShown = true;
+
+    function updateHUD() {
+      scoreEl.textContent = String(score).padStart(5, '0');
+      comboEl.textContent = combo >= 2 ? `x${combo} CHAIN` : '';
+      livesEl.textContent = '⚡'.repeat(Math.max(0, lives));
+    }
+
+    let feedbackTimeout = null;
+    function showFeedback(text, color) {
+      feedbackEl.textContent = text;
+      feedbackEl.style.color = color;
+      feedbackEl.style.opacity = '1';
+      if (feedbackTimeout) clearTimeout(feedbackTimeout);
+      feedbackTimeout = setTimeout(() => { feedbackEl.style.opacity = '0'; }, 700);
+    }
+
+    // ── GAME OVER ──────────────────────────────────────────────────────────────
+    function gameOver() {
+      gameRunning = false;
+      strikes.forEach(s => clearStrike(s));
+      strikes = [];
+      occupiedSlots.clear();
+      overlay.style.display = 'flex';
+      finalScoreEl.style.display = 'block';
+      finalScoreEl.textContent = `SCORE: ${String(score).padStart(5, '0')}`;
+      document.querySelector('#overlay h1').textContent = 'STORM PASSED';
+      document.getElementById('btn').textContent = 'PLAY AGAIN';
+      document.querySelector('#overlay .sub').textContent = 'The thunder fades...';
+    }
+
+    // ── START ──────────────────────────────────────────────────────────────────
+    document.getElementById('btn').addEventListener('click', () => {
+      resetGame();
+      overlay.style.display = 'none';
+      document.querySelector('#overlay h1').textContent = 'THUNDER TAP';
+      document.querySelector('#overlay .sub').textContent = 'Tap the surge rings when lightning strikes.';
+      gameRunning = true;
+      if (hintShown) {
+        setTimeout(() => { hintEl.classList.add('faded'); hintShown = false; }, 3000);
+      }
+    });
+
+    // ── BACKGROUND ATMOSPHERE ──────────────────────────────────────────────────
+    // Floating dust motes
+    const MOTE_COUNT = 60;
+    const moteGeo = new THREE.BufferGeometry();
+    const motePos = new Float32Array(MOTE_COUNT * 3);
+    const moteVel = [];
+    for (let i = 0; i < MOTE_COUNT; i++) {
+      motePos[i * 3] = (Math.random() - 0.5) * 28;
+      motePos[i * 3 + 1] = Math.random() * 8;
+      motePos[i * 3 + 2] = (Math.random() - 0.5) * 28;
+      moteVel.push(new THREE.Vector3((Math.random() - 0.5) * 0.3, 0.1 + Math.random() * 0.2, (Math.random() - 0.5) * 0.3));
+    }
+    moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
+    const moteMat = new THREE.PointsMaterial({ color: 0x9977cc, size: 0.06, transparent: true, opacity: 0.5, sizeAttenuation: true });
+    scene.add(new THREE.Points(moteGeo, moteMat));
+
+    function updateMotes(dt) {
+      for (let i = 0; i < MOTE_COUNT; i++) {
+        motePos[i * 3] += moteVel[i].x * dt;
+        motePos[i * 3 + 1] += moteVel[i].y * dt;
+        motePos[i * 3 + 2] += moteVel[i].z * dt;
+        if (motePos[i * 3 + 1] > 9) { motePos[i * 3 + 1] = 0; }
+        if (Math.abs(motePos[i * 3]) > 14) moteVel[i].x *= -1;
+        if (Math.abs(motePos[i * 3 + 2]) > 14) moteVel[i].z *= -1;
+      }
+      moteGeo.attributes.position.needsUpdate = true;
+    }
+
+    // ── MAIN LOOP ──────────────────────────────────────────────────────────────
+    const clock = new THREE.Clock();
+
+    renderer.setAnimationLoop(() => {
+      const dt = Math.min(clock.getDelta(), 0.05);
+      const t = clock.elapsedTime;
+
+      updateMotes(dt);
+      updateParticles(dt);
+
+      // Camera gentle bob
+      camera.position.y = cameraY + Math.sin(t * 0.4) * 0.08;
+
+      // Screen shake
+      if (shakeTime > 0) {
+        shakeTime -= dt;
+        const s = shakeAmt * (shakeTime / 0.18);
+        camera.position.x = camOrigin.x + (Math.random() - 0.5) * s;
+        camera.position.z = camOrigin.z + (Math.random() - 0.5) * s;
+      } else {
+        camera.position.x = camOrigin.x;
+        camera.position.z = camOrigin.z;
+      }
+
+      if (gameRunning) {
+        // Difficulty ramp
+        difficulty = 1 + score / 800;
+        spawnInterval = Math.max(0.6, 2.0 - difficulty * 0.12);
+
+        // Spawn timer
+        spawnTimer += dt;
+        if (spawnTimer >= spawnInterval) {
+          spawnTimer = 0;
+          const numToSpawn = difficulty > 4 ? 2 : 1;
+          for (let i = 0; i < numToSpawn; i++) spawnStrike();
+        }
+
+        // Update strikes
+        for (let i = strikes.length - 1; i >= 0; i--) {
+          const s = strikes[i];
+          s.timer += dt;
+          const progress = s.timer / s.maxTimer;
+
+          if (s.phase === 'charge') {
+            // Ring expands as charge builds
+            const scale = 0.4 + progress * 2.8;
+            s.ring.scale.set(scale, scale, 1);
+            s.outerRing.scale.set(scale * 1.3, scale * 1.3, 1);
+            s.ring.material.opacity = 0.3 + progress * 0.7;
+            s.outerRing.material.opacity = 0.2 + progress * 0.35;
+            // Color shift to white near strike
+            const hue = 0.75 - progress * 0.1;
+            s.ring.material.color.setHSL(hue, 0.8, 0.5 + progress * 0.4);
+
+            if (progress >= 1.0) {
+              // STRIKE!
+              s.phase = 'flash';
+              s.timer = 0;
+              s.maxTimer = 0.55; // window to tap
+
+              const bolt = makeBolt(s.x, s.z);
+              scene.add(bolt);
+              s.bolt = bolt;
+
+              s.ring.material.color.set(0xffffff);
+              s.ring.material.opacity = 1.0;
+              s.ring.scale.set(3.5, 3.5, 1);
+
+              playThunder(0.55);
+              shakeTime = 0.14; shakeAmt = 0.18;
+              dirLight.color.set(0xeeddff);
+            }
+          } else if (s.phase === 'flash') {
+            const flashProgress = s.timer / s.maxTimer;
+            // Bolt flickers
+            if (s.bolt) {
+              s.bolt.material.opacity = (1 - flashProgress) * (0.6 + Math.random() * 0.4);
+              if (flashProgress > 0.3 && Math.random() > 0.7) {
+                // Rebuild bolt for flicker
+                scene.remove(s.bolt);
+                s.bolt.geometry.dispose(); s.bolt.material.dispose();
+                const newBolt = makeBolt(s.x, s.z);
+                newBolt.material.opacity = s.bolt ? s.bolt.material.opacity : 0.5;
+                scene.add(newBolt);
+                s.bolt = newBolt;
+              }
+            }
+            s.ring.material.opacity = Math.max(0, 1 - flashProgress * 1.5);
+            s.outerRing.material.opacity = Math.max(0, 0.6 - flashProgress * 1.2);
+
+            if (flashProgress >= 1.0) {
+              // Flash expired
+              if (!s.tapped) {
+                // Missed!
+                lives--;
+                combo = 0;
+                updateHUD();
+                showFeedback('MISSED', 'rgba(255,60,60,0.9)');
+                shakeTime = 0.25; shakeAmt = 0.3;
+                if (lives <= 0) {
+                  clearStrike(s);
+                  strikes.splice(i, 1);
+                  occupiedSlots.delete(s.slotIdx);
+                  gameOver();
+                  continue;
+                }
+              }
+              clearStrike(s);
+              strikes.splice(i, 1);
+              occupiedSlots.delete(s.slotIdx);
+            }
+          }
+        }
+
+        // Restore light
+        dirLight.color.lerp(new THREE.Color(0x9966ff), 0.05);
+      }
+
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

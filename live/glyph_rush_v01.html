@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Glyph Rush</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;touch-action:none;background:#000;font-family:'Segoe UI',sans-serif}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;width:100%;pointer-events:none;z-index:10}
+#score-bar{display:flex;justify-content:space-between;align-items:center;padding:14px 20px}
+#score{color:#14f195;font-size:28px;font-weight:700;text-shadow:0 0 12px #14f19588;letter-spacing:2px}
+#combo{color:#ffd700;font-size:18px;font-weight:600;text-shadow:0 0 10px #ffd70066;transition:transform .1s}
+#lives{display:flex;gap:8px;align-items:center}
+.life-flame{width:16px;height:22px;border-radius:50% 50% 40% 40%;background:linear-gradient(#ff6b35,#ffd700);box-shadow:0 0 8px #ff6b35aa;transition:opacity .3s}
+.life-flame.dead{opacity:.15;box-shadow:none}
+#flash{position:fixed;inset:0;pointer-events:none;opacity:0;z-index:20;transition:opacity .08s}
+#start-screen{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:30;background:rgba(0,0,0,.85);backdrop-filter:blur(4px)}
+#start-screen h1{color:#14f195;font-size:36px;font-weight:700;text-shadow:0 0 20px #14f19566;letter-spacing:4px;margin-bottom:8px}
+#start-screen p{color:#aaa;font-size:14px;margin-bottom:32px;letter-spacing:1px}
+#start-btn{background:transparent;border:2px solid #14f195;color:#14f195;font-size:18px;font-weight:600;padding:14px 40px;border-radius:8px;letter-spacing:3px;cursor:pointer;text-shadow:0 0 10px #14f19544;box-shadow:0 0 20px #14f19522;transition:all .2s}
+#start-btn:active{background:#14f19522;transform:scale(.96)}
+#gameover{position:fixed;inset:0;display:none;flex-direction:column;justify-content:center;align-items:center;z-index:30;background:rgba(0,0,0,.88);backdrop-filter:blur(4px)}
+#gameover h2{color:#ff6b35;font-size:32px;font-weight:700;text-shadow:0 0 20px #ff6b3566;letter-spacing:3px;margin-bottom:6px}
+#final-score{color:#14f195;font-size:48px;font-weight:700;text-shadow:0 0 20px #14f19566;margin-bottom:6px}
+#gameover p{color:#aaa;font-size:13px;margin-bottom:28px}
+#retry-btn{background:transparent;border:2px solid #14f195;color:#14f195;font-size:17px;font-weight:600;padding:12px 36px;border-radius:8px;letter-spacing:3px;cursor:pointer;box-shadow:0 0 20px #14f19522}
+#retry-btn:active{background:#14f19522;transform:scale(.96)}
+</style>
+</head><body>
+<div id="ui">
+  <div id="score-bar">
+    <div id="score">0</div>
+    <div id="combo"></div>
+    <div id="lives">
+      <div class="life-flame" id="l0"></div>
+      <div class="life-flame" id="l1"></div>
+      <div class="life-flame" id="l2"></div>
+    </div>
+  </div>
+</div>
+<div id="flash"></div>
+<div id="start-screen">
+  <h1>GLYPH RUSH</h1>
+  <p>TAP THE GLYPHS BEFORE THEY FADE</p>
+  <button id="start-btn">BEGIN</button>
+</div>
+<div id="gameover">
+  <h2>SPIRIT FADES</h2>
+  <div id="final-score">0</div>
+  <p>GLYPHS COLLECTED</p>
+  <button id="retry-btn">RETRY</button>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+
+// --- Telegram bridge ---
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+function haptic(type) { tg?.HapticFeedback?.impactOccurred(type||'medium'); }
+
+// --- Renderer ---
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x050810, 1);
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+
+// --- Scene / Camera ---
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x050810, 8, 22);
+
+const W = window.innerWidth, H = window.innerHeight;
+const isPortrait = H > W;
+const camFOV = isPortrait ? 55 : 45;
+const camera = new THREE.PerspectiveCamera(camFOV, W/H, 0.1, 60);
+camera.position.set(0, 10, 10);
+camera.lookAt(0, 0, 0);
+
+// --- Lights ---
+const ambient = new THREE.AmbientLight(0x1a2040, 2.5);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0x4060ff, 1.2);
+dirLight.position.set(3, 8, 4);
+scene.add(dirLight);
+
+// --- Ground ---
+const groundGeo = new THREE.PlaneGeometry(24, 24, 8, 8);
+// Slightly undulate vertices for organic feel
+const pos = groundGeo.attributes.position;
+for (let i = 0; i < pos.count; i++) {
+  const x = pos.getX(i), z = pos.getZ(i);
+  pos.setY(i, Math.sin(x * 0.6) * 0.25 + Math.cos(z * 0.5) * 0.2);
+}
+groundGeo.computeVertexNormals();
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x0d1525 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// --- Grid of possible glyph positions ---
+const GRID_COLS = isPortrait ? 3 : 4;
+const GRID_ROWS = isPortrait ? 4 : 3;
+const CELL_W = 5.5 / GRID_COLS;
+const CELL_H = 5.5 / GRID_ROWS;
+function gridPos(col, row) {
+  return new THREE.Vector3(
+    (col - (GRID_COLS-1)/2) * CELL_W * 2,
+    0,
+    (row - (GRID_ROWS-1)/2) * CELL_H * 2
+  );
+}
+
+// --- Glyph geometry pool ---
+const POOL_SIZE = 24;
+const GLYPH_COLORS = [0x14f195, 0x7b4fff, 0xff6b35, 0x00cfff, 0xffd700, 0xff3399];
+const glyphPool = [];
+const GLYPH_SHAPES = ['ring','tri','hex','star'];
+
+function makeGlyphMesh(shapeType) {
+  let geo;
+  if (shapeType === 'ring') {
+    geo = new THREE.TorusGeometry(0.38, 0.1, 6, 12);
+  } else if (shapeType === 'tri') {
+    geo = new THREE.ConeGeometry(0.42, 0.08, 3);
+    geo.rotateX(Math.PI / 2);
+  } else if (shapeType === 'hex') {
+    geo = new THREE.CylinderGeometry(0.42, 0.42, 0.08, 6);
+    geo.rotateX(Math.PI / 2);
+  } else {
+    // star approximation: octahedron flat
+    geo = new THREE.OctahedronGeometry(0.40, 0);
+    geo.scale(1, 0.2, 1);
+  }
+  const mat = new THREE.MeshBasicMaterial({ color: 0x14f195, transparent: true, opacity: 1 });
+  const mesh = new THREE.Mesh(geo, mat);
+
+  // Inner glow disc
+  const innerGeo = new THREE.CircleGeometry(0.28, 8);
+  const innerMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, side: THREE.DoubleSide });
+  const inner = new THREE.Mesh(innerGeo, innerMat);
+  mesh.add(inner);
+
+  // Aura ring
+  const auraGeo = new THREE.RingGeometry(0.5, 0.66, 12);
+  const auraMat = new THREE.MeshBasicMaterial({ color: 0x14f195, transparent: true, opacity: 0.18, side: THREE.DoubleSide });
+  const aura = new THREE.Mesh(auraGeo, auraMat);
+  mesh.add(aura);
+
+  scene.add(mesh);
+  return { mesh, inner, innerMat, aura, auraMat, mat };
+}
+
+for (let i = 0; i < POOL_SIZE; i++) {
+  const shape = GLYPH_SHAPES[i % GLYPH_SHAPES.length];
+  const g = makeGlyphMesh(shape);
+  g.mesh.visible = false;
+  g.active = false;
+  g.col = 0; g.row = 0;
+  g.phase = 0; // 0=grow, 1=hold, 2=fade
+  g.t = 0;
+  g.lifetime = 2.2;
+  g.color = GLYPH_COLORS[i % GLYPH_COLORS.length];
+  g.shape = shape;
+  glyphPool.push(g);
+}
+
+function getFreeGlyph() {
+  return glyphPool.find(g => !g.active) || null;
+}
+
+// --- Particle system ---
+const PART_COUNT = 320;
+const partGeo = new THREE.BufferGeometry();
+const partPos = new Float32Array(PART_COUNT * 3);
+const partColor = new Float32Array(PART_COUNT * 3);
+partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
+partGeo.setAttribute('color', new THREE.BufferAttribute(partColor, 3));
+const partMat = new THREE.PointsMaterial({ size: 0.14, vertexColors: true, transparent: true, opacity: 0.9, sizeAttenuation: true });
+const particles = new THREE.Points(partGeo, partMat);
+scene.add(particles);
+
+const partData = [];
+for (let i = 0; i < PART_COUNT; i++) {
+  partData.push({ active: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0.7, r: 0, g: 0, b: 0 });
+}
+
+function spawnBurst(wx, wy, wz, color) {
+  const c = new THREE.Color(color);
+  for (let i = 0; i < 18; i++) {
+    const p = partData.find(p => !p.active);
+    if (!p) break;
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.8 + Math.random() * 3.2;
+    const elev = (Math.random() - 0.3) * 2.2;
+    p.active = true;
+    p.x = wx; p.y = wy + 0.3; p.z = wz;
+    p.vx = Math.cos(angle) * speed;
+    p.vy = elev + 2.0;
+    p.vz = Math.sin(angle) * speed;
+    p.life = 0;
+    p.maxLife = 0.45 + Math.random() * 0.35;
+    p.r = c.r + (Math.random() - 0.5) * 0.3;
+    p.g = c.g + (Math.random() - 0.5) * 0.3;
+    p.b = c.b + (Math.random() - 0.5) * 0.3;
+  }
+}
+
+function updateParticles(dt) {
+  let i = 0;
+  for (const p of partData) {
+    if (p.active) {
+      p.life += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      p.vy -= 5.0 * dt;
+      const ratio = 1 - p.life / p.maxLife;
+      if (p.life >= p.maxLife) { p.active = false; ratio == 0; }
+      partPos[i*3]   = p.active ? p.x : 999;
+      partPos[i*3+1] = p.active ? p.y : 999;
+      partPos[i*3+2] = p.active ? p.z : 999;
+      partColor[i*3]   = p.r * ratio;
+      partColor[i*3+1] = p.g * ratio;
+      partColor[i*3+2] = p.b * ratio;
+    } else {
+      partPos[i*3] = 999; partPos[i*3+1] = 999; partPos[i*3+2] = 999;
+    }
+    i++;
+  }
+  partGeo.attributes.position.needsUpdate = true;
+  partGeo.attributes.color.needsUpdate = true;
+}
+
+// --- Camera shake ---
+let shakeTime = 0, shakeAmt = 0;
+const camOrigin = new THREE.Vector3(0, 10, 10);
+function triggerShake(amt) { shakeAmt = amt; shakeTime = 0.18; }
+function updateShake(dt) {
+  if (shakeTime <= 0) {
+    camera.position.copy(camOrigin);
+    return;
+  }
+  shakeTime -= dt;
+  const s = shakeAmt * (shakeTime / 0.18);
+  camera.position.set(
+    camOrigin.x + (Math.random()-0.5)*s,
+    camOrigin.y + (Math.random()-0.5)*s*0.4,
+    camOrigin.z + (Math.random()-0.5)*s
+  );
+}
+
+// --- Screen flash ---
+const flashEl = document.getElementById('flash');
+let flashTimer = 0;
+function triggerFlash(color, duration) {
+  flashEl.style.background = color;
+  flashEl.style.opacity = '0.35';
+  flashTimer = duration || 0.12;
+}
+function updateFlash(dt) {
+  if (flashTimer > 0) {
+    flashTimer -= dt;
+    if (flashTimer <= 0) flashEl.style.opacity = '0';
+  }
+}
+
+// --- Game state ---
+let score = 0, combo = 0, lives = 3;
+let playing = false;
+let spawnTimer = 0, spawnInterval = 1.2;
+let occupiedCells = new Set();
+const scoreEl = document.getElementById('score');
+const comboEl = document.getElementById('combo');
+const lifeEls = [document.getElementById('l0'), document.getElementById('l1'), document.getElementById('l2')];
+
+function updateLivesUI() {
+  for (let i = 0; i < 3; i++) {
+    lifeEls[i].classList.toggle('dead', i >= lives);
+  }
+}
+function updateScoreUI() { scoreEl.textContent = score; }
+function updateComboUI() {
+  if (combo >= 2) {
+    comboEl.textContent = `×${combo} COMBO`;
+    comboEl.style.transform = 'scale(1.2)';
+    setTimeout(() => comboEl.style.transform = 'scale(1)', 100);
+  } else {
+    comboEl.textContent = '';
+  }
+}
+
+function resetGame() {
+  score = 0; combo = 0; lives = 3;
+  spawnTimer = 0; spawnInterval = 1.2;
+  occupiedCells.clear();
+  for (const g of glyphPool) {
+    g.active = false;
+    g.mesh.visible = false;
+  }
+  updateScoreUI(); updateComboUI(); updateLivesUI();
+}
+
+// --- Raycasting for tap ---
+const raycaster = new THREE.Raycaster();
+const tapVec = new THREE.Vector2();
+
+function getActiveGlyphMeshes() {
+  return glyphPool.filter(g => g.active).map(g => g.mesh);
+}
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (!playing) return;
+  e.preventDefault();
+  const rect = renderer.domElement.getBoundingClientRect();
+  tapVec.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  tapVec.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(tapVec, camera);
+  const meshes = getActiveGlyphMeshes();
+  const hits = raycaster.intersectObjects(meshes, true);
+
+  if (hits.length > 0) {
+    // find parent glyph
+    let hitObj = hits[0].object;
+    while (hitObj.parent && hitObj.parent !== scene) hitObj = hitObj.parent;
+    const glyph = glyphPool.find(g => g.mesh === hitObj);
+    if (glyph && glyph.active) {
+      collectGlyph(glyph);
+    }
+  }
+});
+
+function collectGlyph(glyph) {
+  combo++;
+  const pts = 10 * Math.max(1, combo);
+  score += pts;
+  spawnBurst(glyph.mesh.position.x, glyph.mesh.position.y, glyph.mesh.position.z, glyph.color);
+  triggerShake(combo >= 5 ? 0.22 : 0.12);
+  triggerFlash(combo >= 5 ? '#ffd70033' : '#14f19522', 0.1);
+  haptic(combo >= 5 ? 'heavy' : 'medium');
+  deactivateGlyph(glyph);
+  updateScoreUI();
+  updateComboUI();
+}
+
+function missGlyph(glyph) {
+  combo = 0;
+  lives--;
+  haptic('light');
+  triggerFlash('#ff003322', 0.15);
+  deactivateGlyph(glyph);
+  updateComboUI();
+  updateLivesUI();
+  if (lives <= 0) endGame();
+}
+
+function deactivateGlyph(glyph) {
+  glyph.active = false;
+  glyph.mesh.visible = false;
+  occupiedCells.delete(`${glyph.col},${glyph.row}`);
+}
+
+function spawnGlyph() {
+  const glyph = getFreeGlyph();
+  if (!glyph) return;
+
+  // find free cell
+  const allCells = [];
+  for (let c = 0; c < GRID_COLS; c++) {
+    for (let r = 0; r < GRID_ROWS; r++) {
+      if (!occupiedCells.has(`${c},${r}`)) allCells.push([c,r]);
+    }
+  }
+  if (allCells.length === 0) return;
+
+  const [col, row] = allCells[Math.floor(Math.random() * allCells.length)];
+  occupiedCells.add(`${col},${row}`);
+
+  const pos = gridPos(col, row);
+  glyph.mesh.position.copy(pos);
+  glyph.mesh.position.y = 0.4;
+  glyph.col = col; glyph.row = row;
+  glyph.active = true;
+  glyph.phase = 0;
+  glyph.t = 0;
+  // Difficulty scaling
+  const diffFactor = 1 - Math.min(score / 500, 0.55);
+  glyph.lifetime = (1.6 + Math.random() * 0.8) * diffFactor + 0.6;
+  glyph.mesh.scale.set(0.01, 0.01, 0.01);
+  glyph.mat.color.setHex(glyph.color);
+  glyph.mat.opacity = 1;
+  glyph.auraMat.color.setHex(glyph.color);
+  glyph.mesh.visible = true;
+
+  // Float height varies per glyph
+  glyph.floatY = 0.4 + Math.sin(Math.random() * Math.PI) * 0.3;
+}
+
+// --- Update glyphs per frame ---
+function updateGlyphs(dt) {
+  for (const g of glyphPool) {
+    if (!g.active) continue;
+    g.t += dt;
+
+    const growDur = 0.22;
+    const holdDur = g.lifetime;
+    const fadeDur = 0.18;
+
+    if (g.t < growDur) {
+      // grow phase
+      const p = g.t / growDur;
+      const eased = p < 0.5 ? 2*p*p : -1+(4-2*p)*p;
+      g.mesh.scale.setScalar(eased * 1.0);
+      g.mat.opacity = eased;
+      g.mesh.rotation.z += dt * 1.2;
+    } else if (g.t < growDur + holdDur) {
+      // hold phase — pulse aura
+      g.mesh.scale.setScalar(1.0);
+      g.mat.opacity = 1;
+      const pulse = Math.sin((g.t - growDur) * Math.PI * 3) * 0.07;
+      g.auraMat.opacity = 0.18 + pulse;
+      g.mesh.rotation.z += dt * 0.6;
+      // warn fade: last 40% of hold dims aura
+      const holdRatio = (g.t - growDur) / holdDur;
+      if (holdRatio > 0.6) {
+        g.mat.opacity = 1 - (holdRatio - 0.6) / 0.4 * 0.4;
+      }
+    } else if (g.t < growDur + holdDur + fadeDur) {
+      // fade phase
+      const p = (g.t - growDur - holdDur) / fadeDur;
+      g.mat.opacity = (1 - p) * 0.6;
+      g.mesh.scale.setScalar(1 + p * 0.3);
+    } else {
+      // expired — miss
+      missGlyph(g);
+    }
+  }
+}
+
+// --- Difficulty: adjust spawn interval ---
+function getDifficultyInterval() {
+  // starts at 1.2s, reaches 0.55s at score 400
+  return Math.max(0.55, 1.2 - score * 0.00175);
+}
+
+// --- Main loop ---
+let lastTime = 0;
+let animId = null;
+function loop(ts) {
+  animId = requestAnimationFrame(loop);
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+
+  if (!playing) {
+    renderer.render(scene, camera);
+    return;
+  }
+
+  spawnTimer += dt;
+  spawnInterval = getDifficultyInterval();
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnGlyph();
+    // sometimes double spawn at high scores
+    if (score > 200 && Math.random() < 0.35) spawnGlyph();
+  }
+
+  updateGlyphs(dt);
+  updateParticles(dt);
+  updateShake(dt);
+  updateFlash(dt);
+
+  // Gentle camera bob
+  const bob = Math.sin(ts * 0.0008) * 0.06;
+  if (shakeTime <= 0) {
+    camera.position.y = camOrigin.y + bob;
+  }
+
+  renderer.render(scene, camera);
+}
+animId = requestAnimationFrame(loop);
+
+// --- Resize ---
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+});
+
+// --- Game flow ---
+function startGame() {
+  resetGame();
+  document.getElementById('start-screen').style.display = 'none';
+  document.getElementById('gameover').style.display = 'none';
+  playing = true;
+  lastTime = performance.now();
+  // Spawn first glyph immediately for instant_start feel
+  spawnGlyph();
+  haptic('medium');
+}
+
+function endGame() {
+  playing = false;
+  document.getElementById('final-score').textContent = score;
+  document.getElementById('gameover').style.display = 'flex';
+  // Clear remaining glyphs
+  for (const g of glyphPool) { g.active = false; g.mesh.visible = false; }
+  occupiedCells.clear();
+  haptic('heavy');
+}
+
+document.getElementById('start-btn').addEventListener('click', startGame);
+document.getElementById('retry-btn').addEventListener('click', startGame);
+
+// Preload idle: slowly spin glyphs in scene as background
+</script>
+</body></html>

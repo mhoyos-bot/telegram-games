@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+<title>SPIRIT WEAVE</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#020810;overflow:hidden;font-family:'Courier New',monospace;touch-action:none}
+canvas{display:block}
+#hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:14px 18px;pointer-events:none}
+#score{color:#aaffcc;font:bold 28px/1 monospace;text-shadow:0 0 14px #44ff8880}
+#lives{color:#cc88ff;font:22px/1 monospace;letter-spacing:5px}
+#level{position:fixed;top:58px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.28);font:12px/1 monospace;letter-spacing:.2em;pointer-events:none}
+#combo{position:fixed;top:44%;left:50%;transform:translate(-50%,-50%);font:bold 36px/1 monospace;pointer-events:none;opacity:0;white-space:nowrap;transition:opacity .14s}
+#flash{position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .1s}
+#prompt{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.2);font:11px/1 monospace;letter-spacing:.15em;pointer-events:none;transition:color .3s}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(2,8,16,.9);pointer-events:all}
+#overlay h1{color:#aaffcc;font:bold 40px/1.3 monospace;text-shadow:0 0 28px #44ff8855;margin-bottom:10px;letter-spacing:3px}
+#overlay .sub{color:rgba(255,255,255,.36);font:13px/1.9 monospace;text-align:center;max-width:230px}
+#fscore{color:rgba(255,220,80,.9);font:bold 22px/1 monospace;margin:20px 0 26px;display:none}
+#btn{background:rgba(100,255,160,.07);border:1px solid rgba(100,255,160,.3);color:rgba(100,255,160,.9);font:bold 16px/1 monospace;padding:13px 36px;cursor:pointer;letter-spacing:.12em;margin-top:24px}
+#btn:active{background:rgba(100,255,160,.2)}
+.gone{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div id="score">00000</div>
+  <div id="lives">♦♦♦</div>
+</div>
+<div id="level">LEVEL 1</div>
+<div id="combo"></div>
+<div id="flash"></div>
+<div id="prompt">WATCH · REPEAT</div>
+<div id="overlay">
+  <h1>SPIRIT WEAVE</h1>
+  <div class="sub">Ancient stones light up in sequence.<br>Tap them in the same order.<br>Miss three times and the spirits fade.</div>
+  <div id="fscore"></div>
+  <button id="btn">BEGIN</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+'use strict';
+
+// --- DOM refs ---
+const scoreEl  = document.getElementById('score');
+const livesEl  = document.getElementById('lives');
+const levelEl  = document.getElementById('level');
+const comboEl  = document.getElementById('combo');
+const flashEl  = document.getElementById('flash');
+const promptEl = document.getElementById('prompt');
+const overlayEl= document.getElementById('overlay');
+const fscoreEl = document.getElementById('fscore');
+const btnEl    = document.getElementById('btn');
+
+// --- Renderer ---
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias: true});
+let W = window.innerWidth, H = window.innerHeight;
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x020810);
+
+const scene  = new THREE.Scene();
+scene.fog    = new THREE.FogExp2(0x020810, 0.052);
+
+const camera = new THREE.PerspectiveCamera(52, W/H, 0.1, 80);
+camera.position.set(0, 9, 11);
+camera.lookAt(0, 0, 0);
+
+window.addEventListener('resize', () => {
+  W = window.innerWidth; H = window.innerHeight;
+  renderer.setSize(W, H);
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+});
+
+// --- Lights ---
+scene.add(new THREE.AmbientLight(0x0d1f30, 0.7));
+const moonLight = new THREE.DirectionalLight(0x6e80b8, 1.0);
+moonLight.position.set(-5, 14, 7);
+scene.add(moonLight);
+
+// --- Ground ---
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(16, 40),
+  new THREE.MeshLambertMaterial({color: 0x080f09})
+);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// --- Background trees ---
+for (let i = 0; i < 16; i++) {
+  const angle = (i / 16) * Math.PI * 2;
+  const r = 9 + Math.random() * 3.5;
+  const h = 3.5 + Math.random() * 3;
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.09, 0.18, h, 5),
+    new THREE.MeshLambertMaterial({color: 0x0e0905})
+  );
+  trunk.position.set(Math.cos(angle) * r, h / 2, Math.sin(angle) * r);
+  scene.add(trunk);
+  const crown = new THREE.Mesh(
+    new THREE.ConeGeometry(0.8 + Math.random() * 0.6, 2.2 + Math.random() * 1.2, 6),
+    new THREE.MeshLambertMaterial({color: 0x081108})
+  );
+  crown.position.set(Math.cos(angle) * r, h + 1.0, Math.sin(angle) * r);
+  scene.add(crown);
+}
+
+// --- Stone definitions ---
+const COLORS = [0x44ff88, 0xff4488, 0x4499ff, 0xffcc22, 0xdd44ff];
+const N      = 5;
+const RADIUS = 3.8;
+const stones = [];
+const targets = [];
+
+for (let i = 0; i < N; i++) {
+  const angle = (i / N) * Math.PI * 2 - Math.PI / 2;
+  const x = Math.cos(angle) * RADIUS;
+  const z = Math.sin(angle) * RADIUS;
+  const h = 1.1 + Math.random() * 0.5;
+  const w = 0.5 + Math.random() * 0.25;
+
+  // Stone pillar
+  const rock = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, w * 0.75),
+    new THREE.MeshLambertMaterial({color: 0x243040})
+  );
+  rock.position.set(x, h / 2, z);
+  rock.rotation.y = (Math.random() - 0.5) * 0.5;
+  scene.add(rock);
+
+  // Glow orb
+  const orbMat = new THREE.MeshBasicMaterial({color: COLORS[i], transparent: true, opacity: 0.1});
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 8), orbMat);
+  orb.position.set(x, h + 0.38, z);
+  scene.add(orb);
+
+  // Point light (off by default)
+  const ptLight = new THREE.PointLight(COLORS[i], 0, 4.0);
+  ptLight.position.copy(orb.position);
+  scene.add(ptLight);
+
+  // Invisible click sphere
+  const hitMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.75, 8, 6),
+    new THREE.MeshBasicMaterial({visible: false})
+  );
+  hitMesh.position.copy(orb.position);
+  scene.add(hitMesh);
+  targets.push(hitMesh);
+
+  stones.push({rock, orb, orbMat, ptLight, color: COLORS[i], pos: orb.position.clone()});
+}
+
+// --- Particle system ---
+const MAX_P = 360;
+const pPos  = new Float32Array(MAX_P * 3);
+const pCol  = new Float32Array(MAX_P * 3);
+const pVel  = [];
+const pLife = new Float32Array(MAX_P);
+for (let i = 0; i < MAX_P; i++) {
+  pPos[i * 3 + 1] = -60;
+  pVel.push({x: 0, y: 0, z: 0});
+}
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color',    new THREE.BufferAttribute(pCol, 3));
+const pMesh = new THREE.Points(pGeo, new THREE.PointsMaterial({size: 0.13, vertexColors: true, transparent: true, opacity: 0.92}));
+scene.add(pMesh);
+let pNext = 0;
+
+function emitParticles(pos, hexColor, count) {
+  const c = new THREE.Color(hexColor);
+  for (let i = 0; i < count; i++) {
+    const idx = pNext % MAX_P;
+    pPos[idx*3]   = pos.x + (Math.random() - 0.5) * 0.3;
+    pPos[idx*3+1] = pos.y + Math.random() * 0.15;
+    pPos[idx*3+2] = pos.z + (Math.random() - 0.5) * 0.3;
+    pCol[idx*3]   = c.r; pCol[idx*3+1] = c.g; pCol[idx*3+2] = c.b;
+    const spd = 0.035 + Math.random() * 0.07;
+    const a   = Math.random() * Math.PI * 2;
+    const el  = Math.random() * Math.PI / 2;
+    pVel[idx] = {x: Math.cos(a)*Math.cos(el)*spd, y: Math.sin(el)*spd*1.6+0.025, z: Math.sin(a)*Math.cos(el)*spd};
+    pLife[idx] = 1.0;
+    pNext++;
+  }
+}
+
+// --- Raycaster ---
+const raycaster = new THREE.Raycaster();
+const mouse2d   = new THREE.Vector2();
+
+// --- Game state ---
+let gameActive = false;
+let score = 0, combo = 1, lives = 3, level = 1;
+let sequence = [], inputSeq = [];
+let phase = 'idle'; // idle | showing | waiting | feedback
+let showIdx = 0;
+let shakeT = 0, shakeAmt = 0;
+const SHOW_DUR = 550;
+const SHOW_GAP = 280;
+
+function updateHUD() {
+  scoreEl.textContent  = String(score).padStart(5, '0');
+  livesEl.textContent  = '♦'.repeat(lives) + '◇'.repeat(Math.max(0, 3 - lives));
+  levelEl.textContent  = `LEVEL ${level}`;
+}
+
+function showCombo(text, color) {
+  comboEl.textContent = text;
+  comboEl.style.color = color;
+  comboEl.style.textShadow = `0 0 22px ${color}`;
+  comboEl.style.opacity = '1';
+  setTimeout(() => { comboEl.style.opacity = '0'; }, 750);
+}
+
+function flashScreen(color, alpha) {
+  flashEl.style.background = color;
+  flashEl.style.opacity = String(alpha);
+  setTimeout(() => { flashEl.style.opacity = '0'; }, 160);
+}
+
+function triggerShake(amt) {
+  shakeAmt = amt;
+  shakeT = 0.35;
+}
+
+function setStoneGlow(idx, on) {
+  const s = stones[idx];
+  s.orbMat.opacity  = on ? 0.95 : 0.1;
+  s.ptLight.intensity = on ? 2.8 : 0;
+}
+
+// --- Sequence logic ---
+function buildSequence() {
+  const len = Math.min(2 + level, 9);
+  sequence = [];
+  for (let i = 0; i < len; i++) {
+    sequence.push(Math.floor(Math.random() * N));
+  }
+}
+
+function showSequence() {
+  phase = 'showing';
+  promptEl.textContent = 'WATCH...';
+  promptEl.style.color = 'rgba(255,255,255,.18)';
+  inputSeq = [];
+  showIdx = 0;
+  showNextStone();
+}
+
+function showNextStone() {
+  if (showIdx >= sequence.length) {
+    setTimeout(() => {
+      phase = 'waiting';
+      promptEl.textContent = 'YOUR TURN';
+      promptEl.style.color = 'rgba(170,255,200,.55)';
+    }, SHOW_GAP);
+    return;
+  }
+  const idx = sequence[showIdx];
+  setStoneGlow(idx, true);
+  emitParticles(stones[idx].pos, stones[idx].color, 6);
+  setTimeout(() => {
+    setStoneGlow(idx, false);
+    showIdx++;
+    setTimeout(showNextStone, SHOW_GAP);
+  }, SHOW_DUR);
+}
+
+// --- Input handling ---
+function onPointerDown(evt) {
+  evt.preventDefault();
+  if (!gameActive || phase !== 'waiting') return;
+  const rect = canvas.getBoundingClientRect();
+  const cx = evt.touches ? evt.touches[0].clientX : evt.clientX;
+  const cy = evt.touches ? evt.touches[0].clientY : evt.clientY;
+  mouse2d.x =  ((cx - rect.left) / W) * 2 - 1;
+  mouse2d.y = -((cy - rect.top)  / H) * 2 + 1;
+  raycaster.setFromCamera(mouse2d, camera);
+  const hits = raycaster.intersectObjects(targets);
+  if (!hits.length) return;
+  const stoneIdx = targets.indexOf(hits[0].object);
+  if (stoneIdx === -1) return;
+  handleInput(stoneIdx);
+}
+
+canvas.addEventListener('mousedown',  onPointerDown);
+canvas.addEventListener('touchstart', onPointerDown, {passive: false});
+
+function handleInput(tappedIdx) {
+  const expected = sequence[inputSeq.length];
+
+  // Flash the tapped stone briefly
+  setStoneGlow(tappedIdx, true);
+  setTimeout(() => setStoneGlow(tappedIdx, false), 200);
+
+  if (tappedIdx === expected) {
+    inputSeq.push(tappedIdx);
+    emitParticles(stones[tappedIdx].pos, stones[tappedIdx].color, 20);
+    score += 100 * combo;
+    updateHUD();
+
+    if (inputSeq.length === sequence.length) {
+      // Full sequence correct — level up
+      phase = 'feedback';
+      combo = Math.min(combo + 1, 8);
+      score += 500 * level;
+      updateHUD();
+      showCombo(`COMBO ×${combo}`, '#ffdd44');
+      flashScreen('#ffffff', 0.18);
+      emitParticles({x: 0, y: 1.5, z: 0}, 0xffffff, 50);
+      setTimeout(() => {
+        level++;
+        updateHUD();
+        buildSequence();
+        setTimeout(showSequence, 700);
+      }, 950);
+    }
+  } else {
+    // Wrong stone
+    phase = 'feedback';
+    lives--;
+    combo = 1;
+    updateHUD();
+    triggerShake(0.28);
+    flashScreen('#ff1133', 0.42);
+    showCombo('WRONG', '#ff4466');
+
+    if (lives <= 0) {
+      setTimeout(endGame, 900);
+    } else {
+      setTimeout(() => {
+        buildSequence();
+        showSequence();
+      }, 1100);
+    }
+  }
+}
+
+// --- Game flow ---
+function startGame() {
+  gameActive = true;
+  score = 0; combo = 1; lives = 3; level = 1;
+  overlayEl.classList.add('gone');
+  fscoreEl.style.display = 'none';
+  updateHUD();
+  buildSequence();
+  setTimeout(showSequence, 900);
+}
+
+function endGame() {
+  gameActive = false;
+  phase = 'idle';
+  promptEl.textContent = 'WATCH · REPEAT';
+  promptEl.style.color = 'rgba(255,255,255,.2)';
+  fscoreEl.textContent = `SCORE  ${String(score).padStart(5,'0')}`;
+  fscoreEl.style.display = 'block';
+  btnEl.textContent = 'PLAY AGAIN';
+  overlayEl.classList.remove('gone');
+}
+
+btnEl.addEventListener('click', startGame);
+
+// --- Render loop ---
+const clock = new THREE.Clock();
+const camBaseX = camera.position.x;
+const camBaseY = camera.position.y;
+const camBaseZ = camera.position.z;
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.getElapsedTime();
+
+  // Update particles
+  for (let i = 0; i < MAX_P; i++) {
+    if (pLife[i] <= 0) continue;
+    pLife[i] -= dt * 1.7;
+    if (pLife[i] <= 0) {
+      pPos[i*3+1] = -60;
+    } else {
+      pPos[i*3]   += pVel[i].x;
+      pPos[i*3+1] += pVel[i].y;
+      pPos[i*3+2] += pVel[i].z;
+      pVel[i].y   -= 0.0025;
+    }
+  }
+  pGeo.attributes.position.needsUpdate = true;
+
+  // Idle orb breathing
+  stones.forEach((s, i) => {
+    if (s.ptLight.intensity === 0) {
+      s.orbMat.opacity = 0.1 + Math.sin(t * 1.4 + i * 1.26) * 0.04;
+    }
+  });
+
+  // Camera: slow drift + shake
+  let cx = camBaseX + Math.sin(t * 0.07) * 0.6;
+  let cy = camBaseY;
+  if (shakeT > 0) {
+    shakeT -= dt;
+    const sf = shakeAmt * Math.max(0, shakeT / 0.35);
+    cx += (Math.random() - 0.5) * sf;
+    cy += (Math.random() - 0.5) * sf;
+  }
+  camera.position.x = cx;
+  camera.position.y = cy;
+  camera.position.z = camBaseZ;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+});
+
+updateHUD();
+</script>
+</body>
+</html>

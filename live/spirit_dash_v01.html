@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>SPIRIT DASH</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #050812; overflow: hidden; touch-action: none; font-family: monospace; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none;
+    }
+    #score { color: #40d0ff; font: bold 26px/1 monospace; text-shadow: 0 0 16px rgba(64,208,255,0.8); }
+    #dist  { color: rgba(180,220,255,0.45); font: 12px/1 monospace; margin-top: 5px; letter-spacing: 0.08em; }
+    #lives { color: #ff6060; font: 20px/1 monospace; letter-spacing: 5px; }
+    #level { color: rgba(255,220,80,0.7); font: bold 13px/1 monospace; text-align: right; margin-top: 5px; }
+    #popup {
+      position: fixed; top: 38%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 34px/1 monospace; pointer-events: none; opacity: 0;
+      text-shadow: 0 0 20px currentColor; white-space: nowrap; transition: opacity 0.08s;
+    }
+    #flash {
+      position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      background: rgba(255,60,60,0.18); transition: opacity 0.06s;
+    }
+    #hint {
+      position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.18); font: 11px/1 monospace; letter-spacing: 0.14em;
+      pointer-events: none; transition: opacity 1.5s;
+    }
+    #hint.gone { opacity: 0; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(5,8,18,0.86);
+    }
+    #overlay h1 {
+      color: #40d0ff; font: bold 42px/1.2 monospace; margin-bottom: 6px;
+      text-shadow: 0 0 28px rgba(64,208,255,0.55);
+    }
+    #overlay .sub { color: rgba(255,255,255,0.28); font: 12px/1 monospace; letter-spacing: 0.18em; margin-bottom: 32px; }
+    #ov-score { color: rgba(255,220,80,0.9); font: bold 18px/1.4 monospace; margin-bottom: 22px; display: none; text-align: center; }
+    #btn {
+      background: rgba(64,208,255,0.08); border: 1px solid rgba(64,208,255,0.38);
+      color: rgba(64,208,255,0.9); font: bold 18px/1 monospace; padding: 14px 44px;
+      cursor: pointer; letter-spacing: 0.14em;
+    }
+    #btn:active { background: rgba(64,208,255,0.22); }
+    #speed-lines {
+      position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      background: radial-gradient(ellipse at center, transparent 40%, rgba(64,130,255,0.06) 100%);
+      transition: opacity 0.3s;
+    }
+  </style>
+</head>
+<body>
+  <div id="speed-lines"></div>
+  <div id="hud">
+    <div>
+      <div id="score">00000</div>
+      <div id="dist">0 m</div>
+    </div>
+    <div style="text-align:right">
+      <div id="lives">&#9829;&#9829;&#9829;</div>
+      <div id="level">LVL 1</div>
+    </div>
+  </div>
+  <div id="popup"></div>
+  <div id="flash"></div>
+  <div id="overlay">
+    <h1>SPIRIT DASH</h1>
+    <div class="sub">WILD LANDS &middot; ENDLESS RUNNER</div>
+    <div id="ov-score"></div>
+    <button id="btn">DASH</button>
+  </div>
+  <div id="hint">TAP LEFT / RIGHT TO SWITCH LANES</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  // ================================================================
+  // SPIRIT DASH v01  —  runner mechanic, Wild Lands aesthetic
+  // Lane: lane_001_wild_lands | Task: lc_lane_001_unknown_3b7f0b
+  // SRG DIFF_001: speed = BASE + (lvl-1)*0.8 + dist*0.002, cap 13
+  // SRG DIFF_003: spawnInterval = max(0.6, 1.8 - d*0.95)
+  // ================================================================
+
+  if (window.Telegram?.WebApp) window.Telegram.WebApp.ready();
+
+  // ── SRG CONSTANTS (DIFF_001 / DIFF_003) ─────────────────────────
+  const BASE_SPEED    = 5;
+  const LEVEL_INC     = 0.8;
+  const DIST_FACTOR   = 0.002;
+  const SPEED_CAP     = 13;
+  const SPAWN_BASE    = 1.8;
+  const SPAWN_MIN     = 0.6;
+  const SPAWN_DECAY   = 0.95;
+  const LEVEL_DIST    = 500;   // distance units per level
+
+  // ── LANE CONFIG ──────────────────────────────────────────────────
+  const LANE_X = [-2.3, 0, 2.3];
+
+  // ── STATE ────────────────────────────────────────────────────────
+  let score = 0, dist = 0, level = 1, lives = 3;
+  let gameActive = false;
+  let curLane = 1, targetX = 0, playerX = 0;
+  let speed = BASE_SPEED;
+  let spawnTimer = 0.6, spawnInterval = SPAWN_BASE;
+  let wispTimer = 2.0, wispInterval = 2.8;
+  let shakeAmt = 0, invincible = 0;
+  let popupTimer = 0;
+  let hintGone = false;
+
+  // ── RENDERER / SCENE ─────────────────────────────────────────────
+  const W = window.innerWidth, H = window.innerHeight;
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x050812);
+  scene.fog = new THREE.Fog(0x050812, 18, 48);
+
+  const camera = new THREE.PerspectiveCamera(62, W / H, 0.1, 100);
+  const CAM_POS = new THREE.Vector3(0, 4.2, -8);
+  camera.position.copy(CAM_POS);
+  camera.lookAt(0, 1, 18);
+
+  // ── LIGHTS ───────────────────────────────────────────────────────
+  scene.add(new THREE.AmbientLight(0x14203a, 1.6));
+  const sunLight = new THREE.DirectionalLight(0x3a5080, 0.9);
+  sunLight.position.set(4, 12, -6);
+  scene.add(sunLight);
+  const foxLight = new THREE.PointLight(0x40c8ff, 2.2, 7);
+  scene.add(foxLight);
+  const deepLight = new THREE.PointLight(0x6030c0, 0.7, 25);
+  deepLight.position.set(0, 4, 16);
+  scene.add(deepLight);
+
+  // ── PLAYER (Spirit Fox) ──────────────────────────────────────────
+  const foxGroup = new THREE.Group();
+  scene.add(foxGroup);
+
+  const bodyGeo = new THREE.OctahedronGeometry(0.44, 0);
+  const bodyMat = new THREE.MeshPhongMaterial({
+    color: 0x48d8ff, emissive: 0x1055a0, emissiveIntensity: 0.9, flatShading: true
+  });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.scale.y = 1.28;
+  foxGroup.add(body);
+
+  const earGeo = new THREE.TetrahedronGeometry(0.19, 0);
+  const earMat = new THREE.MeshPhongMaterial({ color: 0x7ae8ff, flatShading: true });
+  const earL = new THREE.Mesh(earGeo, earMat);
+  earL.position.set(-0.23, 0.52, 0.05); earL.rotation.z = -0.35;
+  foxGroup.add(earL);
+  const earR = new THREE.Mesh(earGeo, earMat.clone());
+  earR.position.set(0.23, 0.52, 0.05); earR.rotation.z = 0.35;
+  foxGroup.add(earR);
+
+  const tailGeo = new THREE.SphereGeometry(0.2, 6, 4);
+  const tailMat = new THREE.MeshBasicMaterial({ color: 0x40c8ff, transparent: true, opacity: 0.65 });
+  const tail = new THREE.Mesh(tailGeo, tailMat);
+  tail.position.set(0, -0.08, -0.5);
+  foxGroup.add(tail);
+
+  foxGroup.position.set(0, 0.6, 0);
+
+  // ── FLOOR SLABS (recycled pool) ──────────────────────────────────
+  const SLAB_W   = 7.2;
+  const SLAB_D   = 6;
+  const SLAB_N   = 9;
+  const slabs    = [];
+  const slabGeo  = new THREE.PlaneGeometry(SLAB_W, SLAB_D);
+  slabGeo.rotateX(-Math.PI / 2);
+
+  for (let i = 0; i < SLAB_N; i++) {
+    const dark = (i % 2 === 0);
+    const mat = new THREE.MeshPhongMaterial({
+      color: dark ? 0x070d1a : 0x0a1426, flatShading: true
+    });
+    const mesh = new THREE.Mesh(slabGeo, mat);
+    mesh.position.z = i * SLAB_D;
+    scene.add(mesh);
+    slabs.push(mesh);
+  }
+
+  // ── BORDER TREES ─────────────────────────────────────────────────
+  const trees = [];
+  const TREE_ROWS    = 12;
+  const TREE_SPACING = 4.5;
+  const treeSides = [
+    { x: -4.6, offset: 0 },
+    { x: -5.8, offset: 2.2 },
+    { x:  4.6, offset: 0 },
+    { x:  5.8, offset: 2.2 },
+  ];
+
+  for (let row = 0; row < TREE_ROWS; row++) {
+    for (const side of treeSides) {
+      const h = 1.6 + Math.random() * 2.4;
+      const trunkH = h * 0.38;
+      const coneH  = h * 0.68;
+      const tg = new THREE.Group();
+
+      const trunkGeo = new THREE.CylinderGeometry(0.07, 0.13, trunkH, 5);
+      const trunkMat = new THREE.MeshPhongMaterial({ color: 0x080e06, flatShading: true });
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+      trunk.position.y = trunkH / 2;
+      tg.add(trunk);
+
+      const canopyColors = [0x060f06, 0x091606, 0x0a1c08];
+      for (let c = 0; c < 3; c++) {
+        const geo = new THREE.ConeGeometry(0.52 - c * 0.1, coneH * (0.65 - c * 0.15), 5);
+        const cMat = new THREE.MeshPhongMaterial({
+          color: canopyColors[c % canopyColors.length],
+          emissive: 0x000904, flatShading: true
+        });
+        const cone = new THREE.Mesh(geo, cMat);
+        cone.position.y = trunkH + coneH * 0.28 + c * coneH * 0.22;
+        tg.add(cone);
+      }
+
+      tg.position.set(side.x, 0, row * TREE_SPACING + side.offset);
+      scene.add(tg);
+      trees.push(tg);
+    }
+  }
+
+  // ── OBSTACLE POOL ────────────────────────────────────────────────
+  const OBS_POOL = 14;
+  const obstacles = [];
+
+  function buildObstacle() {
+    const type = Math.floor(Math.random() * 3);
+    const grp = new THREE.Group();
+    const darkMat = () => new THREE.MeshPhongMaterial({
+      color: 0x1a0820, emissive: 0x0a0316, flatShading: true
+    });
+
+    if (type === 0) {
+      // Boulder
+      const geo = new THREE.DodecahedronGeometry(0.48 + Math.random() * 0.18, 0);
+      const m = new THREE.Mesh(geo, darkMat());
+      m.position.y = 0.38; m.rotation.y = Math.random() * Math.PI * 2;
+      grp.add(m);
+    } else if (type === 1) {
+      // Stump
+      const tGeo = new THREE.CylinderGeometry(0.22, 0.33, 0.65, 6);
+      const trunk = new THREE.Mesh(tGeo, darkMat()); trunk.position.y = 0.32; grp.add(trunk);
+      const capGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.1, 6);
+      const cap = new THREE.Mesh(capGeo, new THREE.MeshPhongMaterial({ color: 0x240a2e, flatShading: true }));
+      cap.position.y = 0.69; grp.add(cap);
+    } else {
+      // Crystal cluster
+      const count = 2 + Math.floor(Math.random() * 3);
+      for (let s = 0; s < count; s++) {
+        const geo = new THREE.OctahedronGeometry(0.18 + Math.random() * 0.14, 0);
+        const mat = new THREE.MeshPhongMaterial({
+          color: 0x3d0060, emissive: 0x1a0030, emissiveIntensity: 0.6, flatShading: true
+        });
+        const shard = new THREE.Mesh(geo, mat);
+        shard.position.set(
+          (Math.random() - 0.5) * 0.4,
+          0.28 + Math.random() * 0.32,
+          (Math.random() - 0.5) * 0.3
+        );
+        shard.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
+        grp.add(shard);
+      }
+    }
+
+    grp.visible = false;
+    scene.add(grp);
+    return { grp, active: false, lane: 0 };
+  }
+
+  for (let i = 0; i < OBS_POOL; i++) obstacles.push(buildObstacle());
+
+  // ── WISP POOL ────────────────────────────────────────────────────
+  const WISP_POOL = 8;
+  const wisps = [];
+
+  function buildWisp() {
+    const geo = new THREE.SphereGeometry(0.24, 10, 7);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffe060, transparent: true, opacity: 0.88 });
+    const mesh = new THREE.Mesh(geo, mat);
+
+    const glowGeo = new THREE.SphereGeometry(0.38, 8, 5);
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0xffb020, transparent: true, opacity: 0.18, side: THREE.BackSide });
+    mesh.add(new THREE.Mesh(glowGeo, glowMat));
+
+    mesh.visible = false;
+    scene.add(mesh);
+    return { mesh, active: false, lane: 0, phase: Math.random() * Math.PI * 2 };
+  }
+
+  for (let i = 0; i < WISP_POOL; i++) wisps.push(buildWisp());
+
+  // ── PARTICLE POOL ────────────────────────────────────────────────
+  const PARTICLE_COUNT = 110;
+  const pPool = [];
+  const pGeo  = new THREE.SphereGeometry(0.075, 4, 3);
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const mat  = new THREE.MeshBasicMaterial({ color: 0x40d0ff, transparent: true });
+    const mesh = new THREE.Mesh(pGeo, mat);
+    mesh.visible = false;
+    scene.add(mesh);
+    pPool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0.5 });
+  }
+
+  function spawnParticles(x, y, z, count, color, spread, upSpeed) {
+    let n = 0;
+    for (const p of pPool) {
+      if (p.life > 0 || n >= count) continue;
+      p.mesh.position.set(x, y, z);
+      p.mesh.material.color.setHex(color);
+      p.vx = (Math.random() - 0.5) * spread;
+      p.vy = upSpeed * (0.5 + Math.random() * 0.8);
+      p.vz = (Math.random() - 0.5) * spread;
+      p.maxLife = 0.4 + Math.random() * 0.32;
+      p.life    = p.maxLife;
+      p.mesh.visible = true;
+      p.mesh.scale.setScalar(1);
+      n++;
+    }
+  }
+
+  // ── CACHED VECTORS ────────────────────────────────────────────────
+  const V1 = new THREE.Vector3(1, 1, 1);
+
+  // ── HUD ELEMENTS ─────────────────────────────────────────────────
+  const scoreEl   = document.getElementById('score');
+  const distEl    = document.getElementById('dist');
+  const livesEl   = document.getElementById('lives');
+  const levelEl   = document.getElementById('level');
+  const popupEl   = document.getElementById('popup');
+  const flashEl   = document.getElementById('flash');
+  const hintEl    = document.getElementById('hint');
+  const overlay   = document.getElementById('overlay');
+  const ovScoreEl = document.getElementById('ov-score');
+  const btn       = document.getElementById('btn');
+  const speedLines = document.getElementById('speed-lines');
+
+  const HEART_FULL  = '\u2665';
+  const HEART_EMPTY = '\u2661';
+
+  function updateHUD() {
+    scoreEl.textContent = String(Math.floor(score)).padStart(5, '0');
+    distEl.textContent  = Math.floor(dist) + ' m';
+    livesEl.textContent = HEART_FULL.repeat(lives) + HEART_EMPTY.repeat(Math.max(0, 3 - lives));
+    levelEl.textContent = 'LVL ' + level;
+  }
+
+  function showPopup(text, color) {
+    popupEl.textContent = text;
+    popupEl.style.color = color || '#40d0ff';
+    popupEl.style.opacity = '1';
+    popupTimer = 1.0;
+  }
+
+  // ── INPUT ────────────────────────────────────────────────────────
+  function goLeft()  { if (!gameActive || curLane <= 0) return; curLane--; targetX = LANE_X[curLane]; pulseFox(); }
+  function goRight() { if (!gameActive || curLane >= 2) return; curLane++; targetX = LANE_X[curLane]; pulseFox(); }
+  function pulseFox() { foxGroup.scale.set(1.3, 1.3, 1.3); }
+
+  let touchStartX = 0;
+  document.addEventListener('touchstart', e => {
+    touchStartX = e.touches[0].clientX;
+    const tx = e.touches[0].clientX;
+    if (tx < W * 0.38) goLeft();
+    else if (tx > W * 0.62) goRight();
+  }, { passive: true });
+
+  document.addEventListener('touchend', e => {
+    if (!gameActive) return;
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 45) { dx < 0 ? goLeft() : goRight(); }
+  }, { passive: true });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft'  || e.key === 'a') goLeft();
+    if (e.key === 'ArrowRight' || e.key === 'd') goRight();
+  });
+
+  btn.addEventListener('click', startGame);
+  btn.addEventListener('touchend', e => { e.preventDefault(); startGame(); });
+
+  // ── GAME STATE FUNCTIONS ─────────────────────────────────────────
+  function startGame() {
+    score = 0; dist = 0; level = 1; lives = 3;
+    speed = BASE_SPEED;
+    spawnTimer = 0.8; spawnInterval = SPAWN_BASE;
+    wispTimer  = 2.0; wispInterval  = 2.8;
+    curLane = 1; targetX = 0; playerX = 0;
+    foxGroup.position.set(0, 0.6, 0);
+    foxGroup.rotation.set(0, 0, 0);
+    foxGroup.scale.set(1, 1, 1);
+    shakeAmt = 0; invincible = 0;
+
+    for (const o of obstacles) { o.grp.visible = false; o.active = false; }
+    for (const w of wisps)     { w.mesh.visible = false; w.active = false; }
+    for (const p of pPool)     { p.life = 0; p.mesh.visible = false; }
+
+    overlay.style.display = 'none';
+    gameActive = true;
+    updateHUD();
+  }
+
+  function takeDamage() {
+    if (invincible > 0) return;
+    lives--;
+    updateHUD();
+    shakeAmt = 0.5;
+    invincible = 1.8;
+    flashEl.style.opacity = '1';
+    setTimeout(() => { flashEl.style.opacity = '0'; }, 100);
+    spawnParticles(foxGroup.position.x, foxGroup.position.y, foxGroup.position.z, 18, 0xff4040, 3.0, 4.0);
+    showPopup(lives > 0 ? '!' : 'OUT', '#ff4060');
+    if (lives <= 0) endGame();
+  }
+
+  function collectWisp(w) {
+    w.active = false; w.mesh.visible = false;
+    const gain = 50 + Math.floor(level * 10);
+    score += gain;
+    spawnParticles(w.mesh.position.x, w.mesh.position.y, w.mesh.position.z, 16, 0xffe060, 2.5, 4.5);
+    showPopup('+' + gain, '#ffe060');
+    updateHUD();
+  }
+
+  function spawnObstacle() {
+    for (const o of obstacles) {
+      if (!o.active) {
+        o.lane = Math.floor(Math.random() * 3);
+        o.grp.position.set(LANE_X[o.lane], 0, 38);
+        o.grp.visible = true;
+        o.active = true;
+        break;
+      }
+    }
+  }
+
+  function spawnWisp() {
+    for (const w of wisps) {
+      if (!w.active) {
+        w.lane = Math.floor(Math.random() * 3);
+        w.mesh.position.set(LANE_X[w.lane], 0.88, 38);
+        w.mesh.visible = true;
+        w.active = true;
+        break;
+      }
+    }
+  }
+
+  function endGame() {
+    gameActive = false;
+    ovScoreEl.textContent = 'SCORE  ' + String(Math.floor(score)).padStart(5, '0') +
+      '\nDIST   ' + Math.floor(dist) + ' m' +
+      '\nLEVEL  ' + level;
+    ovScoreEl.style.display = 'block';
+    btn.textContent = 'RUN AGAIN';
+    overlay.style.display = 'flex';
+  }
+
+  // ── TRAIL STATE ──────────────────────────────────────────────────
+  let trailTimer = 0;
+  const TRAIL_RATE = 0.04;
+
+  // ── MAIN LOOP ────────────────────────────────────────────────────
+  const clock = new THREE.Clock();
+
+  function tick() {
+    requestAnimationFrame(tick);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    const t  = clock.elapsedTime;
+
+    if (gameActive) {
+
+      // ── Speed & difficulty (SRG DIFF_001) ──────────────────────
+      dist  += speed * dt;
+      score += speed * dt * 0.08;
+
+      const newLevel = 1 + Math.floor(dist / LEVEL_DIST);
+      if (newLevel > level) {
+        level = newLevel;
+        showPopup('LEVEL ' + level, '#ffe060');
+        updateHUD();
+      }
+
+      speed = Math.min(SPEED_CAP, BASE_SPEED + (level - 1) * LEVEL_INC + dist * DIST_FACTOR);
+
+      // SRG DIFF_003: spawn interval decay
+      const d = Math.min(dist / 2500, 1);
+      spawnInterval = Math.max(SPAWN_MIN, SPAWN_BASE - d * SPAWN_DECAY);
+
+      // Speed lines visual feedback
+      speedLines.style.opacity = String(Math.max(0, (speed - 8) / (SPEED_CAP - 8) * 0.8));
+
+      // ── Player X lerp ──────────────────────────────────────────
+      playerX += (targetX - playerX) * Math.min(1, dt * 11);
+      foxGroup.position.x = playerX;
+      foxGroup.position.y = 0.6 + Math.sin(t * 5.5) * 0.06;
+
+      // Lean toward target lane
+      const lean = (targetX - playerX) * 0.35;
+      foxGroup.rotation.z += (lean - foxGroup.rotation.z) * dt * 9;
+      foxGroup.scale.lerp(V1, dt * 11);
+
+      // Emissive pulse (flicker when invincible)
+      if (invincible > 0) {
+        bodyMat.emissiveIntensity = Math.sin(t * 22) > 0 ? 2.2 : 0.1;
+        invincible -= dt;
+      } else {
+        bodyMat.emissiveIntensity = 0.85 + Math.sin(t * 3.8) * 0.28;
+      }
+
+      // Fox point light tracks player
+      foxLight.position.set(foxGroup.position.x, foxGroup.position.y + 0.6, foxGroup.position.z);
+
+      // ── Trail particles ─────────────────────────────────────────
+      trailTimer -= dt;
+      if (trailTimer <= 0) {
+        trailTimer = TRAIL_RATE;
+        const col = Math.random() > 0.4 ? 0x40d0ff : 0x5060ff;
+        spawnParticles(
+          foxGroup.position.x + (Math.random() - 0.5) * 0.18,
+          foxGroup.position.y - 0.1,
+          foxGroup.position.z - 0.25,
+          1, col, 0.35, 1.8
+        );
+      }
+
+      // ── Obstacle spawn & update ─────────────────────────────────
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) { spawnObstacle(); spawnTimer = spawnInterval; }
+
+      for (const o of obstacles) {
+        if (!o.active) continue;
+        o.grp.position.z -= speed * dt;
+        o.grp.rotation.y += dt * 0.5;
+
+        if (invincible <= 0) {
+          const dx = Math.abs(o.grp.position.x - foxGroup.position.x);
+          const dz = Math.abs(o.grp.position.z - foxGroup.position.z);
+          if (dx < 0.88 && dz < 1.15) takeDamage();
+        }
+
+        if (o.grp.position.z < -4) { o.active = false; o.grp.visible = false; }
+      }
+
+      // ── Wisp spawn & update ─────────────────────────────────────
+      wispTimer -= dt;
+      if (wispTimer <= 0) { spawnWisp(); wispTimer = wispInterval + Math.random() * 1.6; }
+
+      for (const w of wisps) {
+        if (!w.active) continue;
+        w.mesh.position.z -= speed * dt;
+        w.phase += dt * 2.8;
+        w.mesh.position.y = 0.88 + Math.sin(w.phase) * 0.22;
+        w.mesh.rotation.y += dt * 1.8;
+
+        const dx = Math.abs(w.mesh.position.x - foxGroup.position.x);
+        const dz = Math.abs(w.mesh.position.z - foxGroup.position.z);
+        if (dx < 0.82 && dz < 1.0) collectWisp(w);
+        if (w.mesh.position.z < -4) { w.active = false; w.mesh.visible = false; }
+      }
+
+      // ── Floor slab recycling ────────────────────────────────────
+      for (const s of slabs) {
+        s.position.z -= speed * dt;
+        if (s.position.z < -SLAB_D) s.position.z += SLAB_N * SLAB_D;
+      }
+
+      // ── Tree recycling ──────────────────────────────────────────
+      const TREE_TOTAL_Z = TREE_ROWS * TREE_SPACING;
+      for (const tree of trees) {
+        tree.position.z -= speed * dt;
+        if (tree.position.z < -8) tree.position.z += TREE_TOTAL_Z + 6;
+      }
+
+      // ── Popup decay ─────────────────────────────────────────────
+      if (popupTimer > 0) {
+        popupTimer -= dt;
+        popupEl.style.opacity = String(Math.min(1, popupTimer * 2.2));
+        if (popupTimer <= 0) popupEl.style.opacity = '0';
+      }
+
+      // ── Hint fade ───────────────────────────────────────────────
+      if (!hintGone && dist > 60) { hintEl.classList.add('gone'); hintGone = true; }
+
+      // ── HUD refresh ─────────────────────────────────────────────
+      if ((Math.floor(t * 12) % 4) === 0) updateHUD();
+    }
+
+    // ── Particles (always active) ───────────────────────────────
+    for (const p of pPool) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.mesh.visible = false; continue; }
+      p.mesh.position.x += p.vx * dt;
+      p.mesh.position.y += p.vy * dt;
+      p.mesh.position.z += p.vz * dt;
+      p.vy -= 5.5 * dt;
+      const f = p.life / p.maxLife;
+      p.mesh.material.opacity = f * f;
+      p.mesh.scale.setScalar(0.2 + f * 0.8);
+    }
+
+    // ── Camera shake ────────────────────────────────────────────
+    if (shakeAmt > 0) {
+      shakeAmt = Math.max(0, shakeAmt - dt * 3.0);
+      camera.position.set(
+        CAM_POS.x + (Math.random() - 0.5) * shakeAmt * 0.42,
+        CAM_POS.y + (Math.random() - 0.5) * shakeAmt * 0.28,
+        CAM_POS.z
+      );
+    } else {
+      camera.position.copy(CAM_POS);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  window.addEventListener('resize', () => {
+    const w = window.innerWidth, h = window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  });
+
+  tick();
+  </script>
+</body>
+</html>

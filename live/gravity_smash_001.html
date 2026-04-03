@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>GRAVITY SMASH</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace;touch-action:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;right:0;padding:14px 18px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;z-index:10}
+#score{color:#fff;font-size:36px;font-weight:bold;text-shadow:0 0 14px #0ff,0 0 30px #0cf;line-height:1}
+#score-label{color:#336;font-size:11px;letter-spacing:3px;margin-top:2px}
+#level-block{text-align:right}
+#level{color:#af8;font-size:16px;letter-spacing:2px;text-shadow:0 0 8px #6f4}
+#blocks-left{color:#68a;font-size:13px;letter-spacing:1px;margin-top:4px;opacity:0.7}
+#combo-el{position:fixed;top:46%;left:50%;transform:translate(-50%,-50%);color:#ff0;font-size:30px;font-weight:bold;text-shadow:0 0 18px #ff0,0 0 36px #fa0;pointer-events:none;z-index:15;opacity:0;transition:opacity 0.15s;letter-spacing:2px;white-space:nowrap}
+#msg{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:44px;font-weight:bold;text-align:center;pointer-events:none;z-index:20;text-shadow:0 0 20px #0ff,0 0 40px #0cf;opacity:0;transition:opacity 0.3s;letter-spacing:3px}
+#hint{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);color:#335;font-size:12px;letter-spacing:4px;text-transform:uppercase;pointer-events:none;transition:opacity 0.8s;white-space:nowrap}
+#drag-zone{position:fixed;top:0;left:0;right:0;height:50%;pointer-events:auto;z-index:5}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div><div id="score">0</div><div id="score-label">SCORE</div></div>
+  <div id="level-block"><div id="level">LVL 1</div><div id="blocks-left"></div></div>
+</div>
+<div id="combo-el"></div>
+<div id="msg"></div>
+<div id="hint">DRAG ANCHOR · SWING · SMASH</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// GRAVITY SMASH | ga_physics_puzzle_20260326_2101
+// Mechanic: physics_puzzle — pendulum wrecking ball smashes colored blocks
+// Atoms: PENDULUM_PHYSICS, BLOCK_SHATTER, COLOR_CHAIN_COMBO, WRECKING_IMPACT, SHOCKWAVE_RING
+
+const W = window.innerWidth, H = window.innerHeight;
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(-W/2,W/2,H/2,-H/2,-100,100);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(W,H);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setClearColor(0x000612);
+document.body.appendChild(renderer.domElement);
+
+// ── CONSTANTS ──
+const GRAVITY   = 1100;           // px/s²  (ortho units = px)
+const CHAIN_LEN = H * 0.50;       // pendulum arm length
+const BALL_R    = 20;
+const BLOCK_W   = 56, BLOCK_H = 28;
+const GAP       = 7;
+const COLORS = [
+  {hex:0xff2244, tc:new THREE.Color(0xff2244)},
+  {hex:0x00ffcc, tc:new THREE.Color(0x00ffcc)},
+  {hex:0xffcc00, tc:new THREE.Color(0xffcc00)},
+  {hex:0xbb44ff, tc:new THREE.Color(0xbb44ff)},
+  {hex:0xff7700, tc:new THREE.Color(0xff7700)},
+];
+
+// ── STATE ──
+let score=0, displayScore=0, level=1, lastHitColor=-1, comboCount=0;
+let shakeX=0, shakeY=0;
+let levelCooldown=0;
+
+// ── STARS ──
+const starGeo = new THREE.BufferGeometry();
+const N=180, sp=new Float32Array(N*3);
+for(let i=0;i<N;i++){sp[i*3]=(Math.random()-.5)*W;sp[i*3+1]=(Math.random()-.5)*H;sp[i*3+2]=-50;}
+starGeo.setAttribute('position',new THREE.BufferAttribute(sp,3));
+scene.add(new THREE.Points(starGeo,new THREE.PointsMaterial({color:0x223344,size:2})));
+
+// ── PARTICLE SYSTEM (pooled) ──
+const MAX_P=500;
+const pGeo=new THREE.BufferGeometry();
+const pPos=new Float32Array(MAX_P*3), pCol=new Float32Array(MAX_P*3);
+pGeo.setAttribute('position',new THREE.BufferAttribute(pPos,3));
+pGeo.setAttribute('color',new THREE.BufferAttribute(pCol,3));
+scene.add(new THREE.Points(pGeo,new THREE.PointsMaterial({size:6,vertexColors:true,transparent:true,opacity:0.9})));
+let pPool=[];
+
+function burst(x,y,col,n=24){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, s=6+Math.random()*14;
+    pPool.push({x,y,z:5,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+      life:1,decay:0.022+Math.random()*0.04,r:col.r,g:col.g,b:col.b});
+    if(pPool.length>MAX_P) pPool.shift();
+  }
+}
+
+function tickParticles(){
+  for(let i=pPool.length-1;i>=0;i--){
+    const p=pPool[i];
+    p.x+=p.vx; p.y+=p.vy; p.vx*=0.91; p.vy*=0.91;
+    p.life-=p.decay;
+    if(p.life<=0){pPool.splice(i,1);}
+  }
+  for(let i=0;i<MAX_P;i++){
+    const p=pPool[i];
+    if(p){pPos[i*3]=p.x;pPos[i*3+1]=p.y;pPos[i*3+2]=p.z;
+      const a=Math.max(0,p.life);pCol[i*3]=p.r*a;pCol[i*3+1]=p.g*a;pCol[i*3+2]=p.b*a;
+    } else {pPos[i*3+2]=-9999;}
+  }
+  pGeo.attributes.position.needsUpdate=true;
+  pGeo.attributes.color.needsUpdate=true;
+}
+
+// ── SHOCKWAVE RINGS ──
+let rings=[];
+function addRing(x,y,col){
+  const geo=new THREE.RingGeometry(4,14,32);
+  const mat=new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const m=new THREE.Mesh(geo,mat); m.position.set(x,y,4); scene.add(m);
+  rings.push({m,mat,s:1,life:1});
+}
+function tickRings(){
+  for(let i=rings.length-1;i>=0;i--){
+    const r=rings[i]; r.s+=5.5; r.life-=0.055;
+    r.m.scale.set(r.s,r.s,1); r.mat.opacity=Math.max(0,r.life*0.7);
+    if(r.life<=0){scene.remove(r.m);rings.splice(i,1);}
+  }
+}
+
+// ── ANCHOR ──
+let anchor={x:0, y:H/2-70};
+const anchorMesh=new THREE.Mesh(
+  new THREE.CircleGeometry(10,20),
+  new THREE.MeshBasicMaterial({color:0x4488ff})
+);
+anchorMesh.position.set(0,0,3);
+scene.add(anchorMesh);
+const anchorGlowMat=new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:0.25});
+const anchorGlowMesh=new THREE.Mesh(new THREE.CircleGeometry(22,20),anchorGlowMat);
+anchorGlowMesh.position.z=2.5; scene.add(anchorGlowMesh);
+
+// ── CHAIN ──
+const chainPts=[new THREE.Vector3(),new THREE.Vector3()];
+const chainGeo=new THREE.BufferGeometry().setFromPoints(chainPts);
+const chainMat=new THREE.LineBasicMaterial({color:0x3366aa,transparent:true,opacity:0.75});
+const chainLine=new THREE.Line(chainGeo,chainMat); chainLine.position.z=2; scene.add(chainLine);
+
+// ── BALL ──
+let ball={x:anchor.x+CHAIN_LEN*0.75, y:anchor.y-CHAIN_LEN*0.65, vx:-180, vy:0};
+const ballGeo=new THREE.CircleGeometry(BALL_R,28);
+const ballMat=new THREE.MeshBasicMaterial({color:0x00eeff});
+const ballMesh=new THREE.Mesh(ballGeo,ballMat); ballMesh.position.z=4; scene.add(ballMesh);
+const ballGlowMat=new THREE.MeshBasicMaterial({color:0x00eeff,transparent:true,opacity:0.2});
+const ballGlowMesh=new THREE.Mesh(new THREE.CircleGeometry(BALL_R+16,28),ballGlowMat);
+ballGlowMesh.position.z=3.5; scene.add(ballGlowMesh);
+// Ball trail
+const TRAIL=20, trailPos=new Float32Array(TRAIL*3);
+const trailGeo=new THREE.BufferGeometry();
+trailGeo.setAttribute('position',new THREE.BufferAttribute(trailPos,3));
+const trailCol=new Float32Array(TRAIL*3);
+trailGeo.setAttribute('color',new THREE.BufferAttribute(trailCol,3));
+scene.add(new THREE.Points(trailGeo,new THREE.PointsMaterial({size:8,vertexColors:true,transparent:true})));
+let trailBuf=[];
+
+// ── BLOCKS ──
+let blocks=[];
+function makeBlock(x,y,ci){
+  const g=new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.PlaneGeometry(BLOCK_W-3,BLOCK_H-3),
+    new THREE.MeshBasicMaterial({color:COLORS[ci].hex})));
+  const eg=new THREE.EdgesGeometry(new THREE.BoxGeometry(BLOCK_W-3,BLOCK_H-3,1));
+  g.add(new THREE.LineSegments(eg,new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.25})));
+  g.position.set(x,y,0); scene.add(g);
+  return {g,ci,x,y,vx:0,vy:0,alive:true,dying:false,dt2:0};
+}
+
+function spawnBlocks(){
+  blocks.forEach(b=>{if(b.g)scene.remove(b.g);});
+  blocks=[];
+  const cols=Math.min(3+level,8), rows=Math.min(2+Math.floor(level/2),5);
+  const totalW=cols*(BLOCK_W+GAP), totalH=rows*(BLOCK_H+GAP);
+  const sx=-totalW/2+(BLOCK_W+GAP)/2;
+  // Place block grid center-left on screen, slightly above mid
+  const sy=H/6 + totalH/2 - (rows*(BLOCK_H+GAP))/2;
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const x=sx+c*(BLOCK_W+GAP);
+      const y=sy+r*(BLOCK_H+GAP);
+      blocks.push(makeBlock(x,y,Math.floor(Math.random()*COLORS.length)));
+    }
+  }
+  updateBL();
+}
+
+// ── UI HELPERS ──
+const scoreEl=document.getElementById('score');
+const levelEl=document.getElementById('level');
+const blocksLeftEl=document.getElementById('blocks-left');
+const comboEl=document.getElementById('combo-el');
+const msgEl=document.getElementById('msg');
+const hintEl=document.getElementById('hint');
+
+function updateBL(){
+  const n=blocks.filter(b=>b.alive).length;
+  blocksLeftEl.textContent=`${n} BLOCKS`;
+}
+function showMsg(t,d=1300){
+  msgEl.textContent=t; msgEl.style.opacity=1;
+  clearTimeout(msgEl._t); msgEl._t=setTimeout(()=>msgEl.style.opacity=0,d);
+}
+function showCombo(n){
+  if(n<2) return;
+  comboEl.textContent=`×${n} CHAIN!`; comboEl.style.opacity=1;
+  clearTimeout(comboEl._t); comboEl._t=setTimeout(()=>comboEl.style.opacity=0,900);
+}
+
+// ── INPUT ──
+let dragging=false;
+const toW=(cx,cy)=>({x:cx-W/2, y:-(cy-H/2)});
+
+function onPtrDown(e){
+  const src=e.touches?e.touches[0]:e;
+  const pos=toW(src.clientX,src.clientY);
+  // Only grab if in upper half (anchor control zone)
+  if(pos.y>-H/16){
+    dragging=true;
+    anchor.x=Math.max(-W/2+20,Math.min(W/2-20,pos.x));
+    anchor.y=Math.max(H/8,Math.min(H/2-30,pos.y));
+    hintEl.style.opacity=0;
+  }
+}
+function onPtrMove(e){
+  if(!dragging) return;
+  const src=e.touches?e.touches[0]:e;
+  const pos=toW(src.clientX,src.clientY);
+  anchor.x=Math.max(-W/2+20,Math.min(W/2-20,pos.x));
+  anchor.y=Math.max(H/8,Math.min(H/2-30,pos.y));
+}
+function onPtrUp(){ dragging=false; }
+
+renderer.domElement.addEventListener('mousedown',onPtrDown);
+renderer.domElement.addEventListener('mousemove',onPtrMove);
+renderer.domElement.addEventListener('mouseup',onPtrUp);
+renderer.domElement.addEventListener('touchstart',e=>{e.preventDefault();onPtrDown(e);},{passive:false});
+renderer.domElement.addEventListener('touchmove',e=>{e.preventDefault();onPtrMove(e);},{passive:false});
+renderer.domElement.addEventListener('touchend',onPtrUp);
+
+// ── COLLISION ──
+function checkCollisions(){
+  for(const b of blocks){
+    if(!b.alive) continue;
+    const dx=ball.x-b.x, dy=ball.y-b.y;
+    const hw=BLOCK_W/2+BALL_R, hh=BLOCK_H/2+BALL_R;
+    if(Math.abs(dx)<hw && Math.abs(dy)<hh){
+      // HIT
+      b.alive=false; b.dying=true; b.dt2=0;
+      // Fling the block
+      const spd=Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy);
+      b.vx=ball.vx*0.35+(Math.random()-.5)*6;
+      b.vy=ball.vy*0.35+Math.abs(ball.vy)*0.25+5;
+      // Bounce ball (reflect off nearest face)
+      if(Math.abs(dx)/hw > Math.abs(dy)/hh){ ball.vx*=-0.55; }
+      else { ball.vy*=-0.55; }
+      // Color combo
+      if(b.ci===lastHitColor){ comboCount++; } else { comboCount=1; lastHitColor=b.ci; }
+      score+=100*comboCount;
+      // Juice
+      burst(b.x,b.y,COLORS[b.ci].tc,28);
+      addRing(b.x,b.y,COLORS[b.ci].hex);
+      shakeX=(Math.random()-.5)*18; shakeY=(Math.random()-.5)*18;
+      showCombo(comboCount);
+      updateBL();
+    }
+  }
+}
+
+// ── MAIN LOOP ──
+spawnBlocks();
+const clock=new THREE.Clock();
+let t=0;
+
+function tick(){
+  requestAnimationFrame(tick);
+  const dt=Math.min(clock.getDelta(),0.05);
+  t+=dt;
+
+  // ── Pendulum physics ──
+  ball.vy-=GRAVITY*dt;   // gravity: +y is up, so subtract
+  ball.x+=ball.vx*dt;
+  ball.y+=ball.vy*dt;
+
+  // Constraint: enforce chain length
+  const cdx=ball.x-anchor.x, cdy=ball.y-anchor.y;
+  const dist=Math.sqrt(cdx*cdx+cdy*cdy);
+  if(dist>CHAIN_LEN){
+    const nx=cdx/dist, ny=cdy/dist;
+    ball.x=anchor.x+nx*CHAIN_LEN;
+    ball.y=anchor.y+ny*CHAIN_LEN;
+    const rv=ball.vx*nx+ball.vy*ny;
+    if(rv>0){ ball.vx-=rv*nx; ball.vy-=rv*ny; } // remove outward velocity
+  }
+
+  // Air drag (subtle)
+  ball.vx*=0.999; ball.vy*=0.999;
+
+  // Wall bounce
+  const hw=W/2-BALL_R, hh2=H/2-BALL_R;
+  if(ball.x<-hw){ball.x=-hw; ball.vx=Math.abs(ball.vx)*0.65;}
+  if(ball.x> hw){ball.x= hw; ball.vx=-Math.abs(ball.vx)*0.65;}
+  if(ball.y<-hh2){ball.y=-hh2; ball.vy=Math.abs(ball.vy)*0.55;}
+  if(ball.y> hh2){ball.y= hh2; ball.vy=-Math.abs(ball.vy)*0.65;}
+
+  // ── Collisions ──
+  checkCollisions();
+
+  // ── Dying blocks (fly-off animation) ──
+  for(const b of blocks){
+    if(!b.dying) continue;
+    b.dt2+=dt;
+    b.x+=b.vx; b.y+=b.vy; b.vy-=30*dt; b.vx*=0.96;
+    const s=Math.max(0,1-b.dt2*3.5);
+    b.g.scale.set(s,s,1);
+    b.g.position.set(b.x,b.y,0);
+    b.g.rotation.z+=b.vx*0.025;
+    if(b.dt2>0.38){scene.remove(b.g); b.dying=false;}
+  }
+
+  // ── Update anchor & chain visuals ──
+  anchorMesh.position.set(anchor.x,anchor.y,3);
+  anchorGlowMesh.position.set(anchor.x,anchor.y,2.5);
+  anchorGlowMat.opacity=0.18+Math.sin(t*5)*0.08;
+
+  chainPts[0].set(anchor.x,anchor.y,2);
+  chainPts[1].set(ball.x,ball.y,2);
+  chainGeo.setFromPoints(chainPts);
+
+  // ── Ball visuals ──
+  ballMesh.position.set(ball.x,ball.y,4);
+  ballGlowMesh.position.set(ball.x,ball.y,3.5);
+  ballGlowMat.opacity=0.18+Math.sin(t*8)*0.1;
+
+  // Trail
+  trailBuf.push({x:ball.x,y:ball.y});
+  if(trailBuf.length>TRAIL) trailBuf.shift();
+  for(let i=0;i<TRAIL;i++){
+    const p=trailBuf[i]||{x:ball.x,y:ball.y};
+    trailPos[i*3]=p.x; trailPos[i*3+1]=p.y; trailPos[i*3+2]=3.2;
+    const a=(i/TRAIL)*0.55;
+    trailCol[i*3]=0; trailCol[i*3+1]=a; trailCol[i*3+2]=a;
+  }
+  trailGeo.attributes.position.needsUpdate=true;
+  trailGeo.attributes.color.needsUpdate=true;
+
+  // ── Screen shake ──
+  if(Math.abs(shakeX)>0.3){
+    cam.position.x=shakeX; cam.position.y=shakeY;
+    shakeX*=0.65; shakeY*=0.65;
+  } else {
+    cam.position.x=0; cam.position.y=0; shakeX=0; shakeY=0;
+  }
+
+  // ── Particles & rings ──
+  tickParticles();
+  tickRings();
+
+  // ── Score counter ──
+  if(displayScore<score){
+    displayScore=Math.min(score,displayScore+Math.max(1,(score-displayScore)*0.14));
+    scoreEl.textContent=Math.floor(displayScore);
+  }
+
+  // ── Level check ──
+  if(levelCooldown>0){ levelCooldown-=dt; }
+  else if(blocks.every(b=>!b.alive&&!b.dying)){
+    levelCooldown=2.2;
+    level++;
+    levelEl.textContent=`LVL ${level}`;
+    showMsg(`LEVEL ${level}!`,1500);
+    setTimeout(()=>spawnBlocks(),750);
+  }
+
+  renderer.render(scene,cam);
+}
+
+tick();
+</script>
+</body>
+</html>

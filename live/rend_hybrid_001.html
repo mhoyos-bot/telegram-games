@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>NEON PULSE — Hybrid Canvas+CSS Renderer Exp</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #030510; overflow: hidden; touch-action: none; font-family: monospace; }
+    #game-canvas { display: block; position: fixed; top: 0; left: 0; z-index: 1; }
+
+    /* CSS layer — layered OVER canvas for UI effects */
+    #css-layer {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 2; pointer-events: none; overflow: hidden;
+    }
+
+    /* Score pops — CSS animated */
+    .score-pop {
+      position: absolute;
+      font: bold 28px monospace;
+      color: #fff;
+      pointer-events: none;
+      text-shadow: 0 0 14px currentColor;
+      animation: floatUp 0.7s ease-out forwards;
+    }
+    @keyframes floatUp {
+      0%   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+      100% { opacity: 0; transform: translate(-50%, -60px) scale(1.4); }
+    }
+
+    /* Hit ring — CSS pulsing circle */
+    .hit-ring {
+      position: absolute;
+      border-radius: 50%;
+      border: 2px solid currentColor;
+      animation: expandRing 0.4s ease-out forwards;
+      pointer-events: none;
+    }
+    @keyframes expandRing {
+      0%   { opacity: 0.9; transform: translate(-50%, -50%) scale(0); }
+      100% { opacity: 0; transform: translate(-50%, -50%) scale(3); }
+    }
+
+    /* Danger vignette */
+    #danger-vignette {
+      position: fixed; inset: 0; z-index: 2; pointer-events: none;
+      background: radial-gradient(ellipse at center, transparent 50%, rgba(255,30,60,0) 100%);
+      opacity: 0; transition: opacity 0.15s;
+    }
+
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 5; pointer-events: none;
+      padding: 14px 16px; display: flex; justify-content: space-between; align-items: center;
+    }
+    #score { color: #ffd040; font: bold 22px monospace; letter-spacing: 0.06em;
+      text-shadow: 0 0 12px rgba(255,208,64,0.9); }
+    #lives-bar { display: flex; gap: 6px; }
+    .life-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #ff4466; box-shadow: 0 0 8px #ff4466;
+      transition: all 0.2s;
+    }
+    .life-dot.lost { background: #1a0a10; box-shadow: none; }
+
+    #combo-hud {
+      position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+      z-index: 5; pointer-events: none;
+      color: #ffd040; font: bold 18px monospace; letter-spacing: 0.1em;
+      opacity: 0; transition: opacity 0.2s;
+      text-shadow: 0 0 14px rgba(255,208,64,0.9);
+    }
+
+    #hint {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      z-index: 5; color: rgba(255,255,255,0.3); font: 11px monospace;
+      letter-spacing: 0.18em; pointer-events: none;
+    }
+    #overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 20; background: rgba(3,5,16,0.95); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; color: white; text-align: center;
+    }
+    #overlay h1 { font: bold 26px monospace; color: #ffd040; margin-bottom: 8px;
+      letter-spacing: 0.1em; text-shadow: 0 0 20px rgba(255,208,64,0.9); }
+    #overlay .sub { font: 13px monospace; color: rgba(255,255,255,0.4); margin-bottom: 8px; }
+    #overlay button {
+      background: transparent; border: 1px solid rgba(255,208,64,0.5);
+      color: #ffd040; padding: 12px 34px; font: bold 14px monospace;
+      letter-spacing: 0.1em; cursor: pointer; margin-top: 14px;
+    }
+    #overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="css-layer"></div>
+  <div id="danger-vignette"></div>
+  <div id="hud">
+    <div id="score">0</div>
+    <div id="lives-bar">
+      <div class="life-dot" id="ld0"></div>
+      <div class="life-dot" id="ld1"></div>
+      <div class="life-dot" id="ld2"></div>
+      <div class="life-dot" id="ld3"></div>
+      <div class="life-dot" id="ld4"></div>
+    </div>
+  </div>
+  <div id="combo-hud"></div>
+  <div id="hint">HYBRID: CANVAS GAME + CSS EFFECTS</div>
+  <div id="overlay">
+    <h1>NEON PULSE</h1>
+    <div class="sub">EXP 05 · HYBRID CANVAS+CSS · RENDERER TEST</div>
+    <div class="sub" style="font-size:11px; color:rgba(255,255,255,0.2);">
+      canvas renders game · css layer renders juice
+    </div>
+    <button id="start-btn">TAP TO START</button>
+  </div>
+
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.expand();
+      window.Telegram.WebApp.ready();
+    }
+
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+    const cssLayer = document.getElementById('css-layer');
+    const scoreEl = document.getElementById('score');
+    const comboHud = document.getElementById('combo-hud');
+    const hintEl = document.getElementById('hint');
+    const overlay = document.getElementById('overlay');
+    const dangerVignette = document.getElementById('danger-vignette');
+
+    let W, H;
+    function resize() {
+      W = canvas.width = window.innerWidth;
+      H = canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // --- CANVAS GAME ---
+    let score = 0, lives = 5, combo = 0;
+    let wave = 1, running = false, frameCount = 0;
+    let nodes = [], beams = [], pulses = [];
+    let spawnTimer = 0;
+
+    const NODE_COLORS = ['#ffd040','#ff4466','#40d8ff','#b4ff50','#e040ff','#ff8030'];
+
+    function spawnNode() {
+      const margin = 50;
+      const x = margin + Math.random() * (W - margin*2);
+      const y = margin + Math.random() * (H * 0.75 - margin);
+      const r = 20 + Math.random() * 14;
+      const life = Math.max(60, 150 - wave * 6);
+      const color = NODE_COLORS[Math.floor(Math.random() * NODE_COLORS.length)];
+      nodes.push({ x, y, r, rMax: r, color, life, lifeMax: life, hit: false, pulse: 0 });
+    }
+
+    // Canvas: draw pulsing grid
+    function drawGrid(t) {
+      const gs = 44;
+      const pulse = Math.sin(t * 0.0008) * 0.5 + 0.5;
+      ctx.strokeStyle = `rgba(64,200,255,${0.03 + pulse * 0.02})`;
+      ctx.lineWidth = 1;
+      for (let x = 0; x < W; x += gs) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += gs) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+    }
+
+    // Canvas: draw nodes
+    function drawNodes() {
+      for (const n of nodes) {
+        if (n.hit) continue;
+        const frac = n.life / n.lifeMax;
+        n.r = n.rMax * frac;
+        const grd = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r * 2);
+        grd.addColorStop(0, n.color + 'cc');
+        grd.addColorStop(0.6, n.color + '33');
+        grd.addColorStop(1, n.color + '00');
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r * 2, 0, Math.PI*2);
+        ctx.fillStyle = grd;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r, 0, Math.PI*2);
+        ctx.fillStyle = n.color;
+        ctx.fill();
+
+        // Countdown ring
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r + 4, -Math.PI/2, -Math.PI/2 + Math.PI*2*frac);
+        ctx.strokeStyle = n.color + 'a0';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        // Urgent ring at <30%
+        if (frac < 0.3) {
+          const blink = Math.sin(Date.now() * 0.05) * 0.5 + 0.5;
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, n.r + 8, 0, Math.PI*2);
+          ctx.strokeStyle = `rgba(255,60,60,${blink * 0.8})`;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Canvas: draw beams between connected nodes (pure canvas effect)
+    function updateBeams() {
+      // Draw connection lines between nearby nodes (visual graph)
+      ctx.lineWidth = 1;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i+1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          if (a.hit || b.hit) continue;
+          const dx = a.x - b.x, dy = a.y - b.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < 140) {
+            const alpha = (1 - dist/140) * 0.15;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.strokeStyle = `rgba(64,200,255,${alpha})`;
+            ctx.stroke();
+          }
+        }
+      }
+    }
+
+    // CSS: spawn score pop
+    function cssScorePop(x, y, text, color) {
+      const el = document.createElement('div');
+      el.className = 'score-pop';
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.color = color || '#ffd040';
+      el.textContent = text;
+      cssLayer.appendChild(el);
+      setTimeout(() => el.remove(), 700);
+    }
+
+    // CSS: spawn hit ring
+    function cssHitRing(x, y, color) {
+      const el = document.createElement('div');
+      el.className = 'hit-ring';
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.width = '60px';
+      el.style.height = '60px';
+      el.style.color = color || '#ffd040';
+      el.style.borderColor = color || '#ffd040';
+      cssLayer.appendChild(el);
+      setTimeout(() => el.remove(), 400);
+    }
+
+    function onTap(cx, cy) {
+      if (!running) return;
+      let hit = false;
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        if (n.hit) continue;
+        const dx = cx - n.x, dy = cy - n.y;
+        if (dx*dx + dy*dy < (n.r + 14) * (n.r + 14)) {
+          n.hit = true;
+          combo++;
+          const pts = combo >= 4 ? combo * 3 : combo + 5;
+          score += pts;
+          scoreEl.textContent = score;
+
+          // CSS effects
+          cssScorePop(cx, cy - 10, `+${pts}`, n.color);
+          cssHitRing(cx, cy, n.color);
+
+          if (combo >= 3) {
+            comboHud.textContent = `×${combo} COMBO`;
+            comboHud.style.opacity = '1';
+            setTimeout(() => { comboHud.style.opacity = '0'; }, 600);
+          }
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) {
+        combo = 0;
+        comboHud.style.opacity = '0';
+        // CSS miss flash
+        const ring = document.createElement('div');
+        ring.className = 'hit-ring';
+        ring.style.left = `${cx}px`; ring.style.top = `${cy}px`;
+        ring.style.width = '40px'; ring.style.height = '40px';
+        ring.style.borderColor = 'rgba(255,60,60,0.6)';
+        cssLayer.appendChild(ring);
+        setTimeout(() => ring.remove(), 400);
+      }
+    }
+
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      onTap(t.clientX, t.clientY);
+    }, { passive: false });
+    canvas.addEventListener('mousedown', (e) => onTap(e.clientX, e.clientY));
+
+    function updateLivesUI() {
+      for (let i = 0; i < 5; i++) {
+        document.getElementById(`ld${i}`).classList.toggle('lost', i >= lives);
+      }
+      // CSS danger vignette
+      const danger = Math.max(0, (3 - lives) / 3);
+      dangerVignette.style.opacity = String(danger * 0.8);
+      if (danger > 0) {
+        dangerVignette.style.background = `radial-gradient(ellipse at center, transparent 40%, rgba(255,30,60,${danger * 0.4}) 100%)`;
+      }
+    }
+
+    function gameOver() {
+      running = false;
+      overlay.innerHTML = `
+        <h1 style="color:#ff4466">GAME OVER</h1>
+        <div class="sub">SCORE: ${score}</div>
+        <div class="sub" style="font-size:11px; color:rgba(255,255,255,0.2);">
+          HYBRID · CANVAS GAME + CSS JUICE · ${frameCount} frames
+        </div>
+        <button onclick="startGame()">PLAY AGAIN</button>
+      `;
+      overlay.classList.remove('hidden');
+    }
+
+    function startGame() {
+      score = 0; lives = 5; combo = 0; wave = 1; frameCount = 0;
+      nodes = []; spawnTimer = 0;
+      scoreEl.textContent = '0';
+      cssLayer.innerHTML = '';
+      updateLivesUI();
+      overlay.classList.add('hidden');
+      running = true;
+    }
+
+    document.getElementById('start-btn').addEventListener('click', startGame);
+
+    let spawnInterval = 70;
+    function loop() {
+      requestAnimationFrame(loop);
+      ctx.clearRect(0, 0, W, H);
+
+      drawGrid(Date.now());
+
+      if (!running) return;
+      frameCount++;
+
+      // Spawn
+      spawnTimer++;
+      if (spawnTimer >= spawnInterval) {
+        spawnTimer = 0;
+        const n = 1 + Math.floor(wave / 3);
+        for (let i = 0; i < n; i++) spawnNode();
+        spawnInterval = Math.max(25, 70 - wave * 4);
+      }
+
+      // Wave
+      if (score > wave * 25) {
+        wave++;
+        hintEl.textContent = `WAVE ${wave}`;
+        setTimeout(() => { hintEl.textContent = 'HYBRID: CANVAS GAME + CSS EFFECTS'; }, 1200);
+      }
+
+      updateBeams();
+
+      // Update nodes
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        if (n.hit) {
+          n.r *= 0.85;
+          if (n.r < 1) nodes.splice(i, 1);
+          continue;
+        }
+        n.life--;
+        if (n.life <= 0) {
+          lives--;
+          combo = 0;
+          comboHud.style.opacity = '0';
+          updateLivesUI();
+          nodes.splice(i, 1);
+          if (lives <= 0) { gameOver(); return; }
+          continue;
+        }
+      }
+      drawNodes();
+    }
+    loop();
+  </script>
+</body>
+</html>

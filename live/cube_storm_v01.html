@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>CUBE STORM</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; font-family:'Courier New',monospace; }
+canvas { display:block; position:fixed; top:0; left:0; width:100%; height:100%; }
+#hud { position:fixed; inset:0; pointer-events:none; z-index:10; }
+#score-el {
+  position:absolute; top:16px; left:50%; transform:translateX(-50%);
+  color:#fff; font-size:30px; font-weight:900;
+  text-shadow:0 0 12px #f0f, 0 0 24px #f0f; letter-spacing:2px;
+}
+#dist-el {
+  position:absolute; top:54px; left:50%; transform:translateX(-50%);
+  color:#888; font-size:13px; letter-spacing:1px;
+}
+#hp-el {
+  position:absolute; top:16px; left:16px;
+  font-size:22px; color:#ff4466; text-shadow:0 0 8px #f44;
+}
+#combo-el {
+  position:absolute; bottom:60px; left:50%; transform:translateX(-50%);
+  color:#ff0; font-size:16px; font-weight:900; letter-spacing:2px;
+  text-shadow:0 0 10px #ff0; opacity:0; transition:opacity 0.3s;
+}
+#mods-el {
+  position:absolute; top:16px; right:14px;
+  font-size:18px; line-height:1.4; text-align:right;
+}
+#flash { position:fixed; inset:0; pointer-events:none; z-index:20; opacity:0; }
+#cards {
+  position:fixed; inset:0; background:rgba(5,0,15,0.9);
+  display:none; flex-direction:column; align-items:center; justify-content:center;
+  z-index:50; gap:14px;
+}
+#cards h2 {
+  color:#f0f; font-size:20px; letter-spacing:4px; margin-bottom:8px;
+  text-shadow:0 0 20px #f0f;
+}
+#cards p { color:#666; font-size:11px; letter-spacing:2px; margin-top:-6px; margin-bottom:6px; }
+.card {
+  width:min(260px,80vw); padding:18px 20px; border:2px solid #440066;
+  background:rgba(60,0,100,0.55); border-radius:16px;
+  cursor:pointer; pointer-events:all; text-align:center; transition:all 0.15s;
+}
+.card:active { border-color:#f0f; background:rgba(120,0,180,0.7); transform:scale(0.97); }
+.card-icon { font-size:28px; margin-bottom:6px; }
+.card-name { color:#fff; font-size:16px; font-weight:700; margin-bottom:5px; letter-spacing:1px; }
+.card-desc { color:#999; font-size:12px; }
+#start {
+  position:fixed; inset:0; background:#0a0015;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:100;
+}
+#start h1 {
+  color:#f0f; font-size:min(52px,12vw); font-weight:900; letter-spacing:4px;
+  text-shadow:0 0 20px #f0f, 0 0 50px #80f; margin-bottom:10px;
+}
+#start .sub { color:#555; font-size:12px; letter-spacing:3px; margin-bottom:14px; }
+#start .hint { color:#777; font-size:13px; letter-spacing:1px; margin-bottom:36px; text-align:center; padding:0 24px; }
+#start button {
+  background:linear-gradient(135deg,#6600ff,#ff00aa); border:none; border-radius:20px;
+  padding:16px 56px; font-size:20px; font-weight:900; color:#fff; cursor:pointer;
+  letter-spacing:2px; box-shadow:0 0 24px #6600ff,0 0 48px #ff00aa;
+}
+#over {
+  position:fixed; inset:0; background:rgba(0,0,0,0.92);
+  display:none; flex-direction:column; align-items:center; justify-content:center;
+  z-index:100; gap:12px;
+}
+#over h2 { color:#f44; font-size:42px; font-weight:900; letter-spacing:4px; text-shadow:0 0 20px #f44; }
+#over .final { color:#fff; font-size:24px; font-weight:700; }
+#over .best { color:#666; font-size:14px; letter-spacing:2px; }
+#over .max-combo { color:#ff0; font-size:13px; letter-spacing:1px; }
+#over button {
+  background:linear-gradient(135deg,#6600ff,#ff00aa); border:none; border-radius:16px;
+  padding:14px 48px; font-size:18px; font-weight:900; color:#fff; cursor:pointer;
+  pointer-events:all; margin-top:8px; letter-spacing:1px;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div id="score-el">0</div>
+  <div id="dist-el">0m</div>
+  <div id="hp-el">♥♥♥</div>
+  <div id="combo-el">COMBO ×1</div>
+  <div id="mods-el"></div>
+</div>
+<div id="flash"></div>
+
+<div id="cards">
+  <h2>— UPGRADE —</h2>
+  <p>CHOOSE ONE</p>
+  <div id="card0" class="card"></div>
+  <div id="card1" class="card"></div>
+  <div id="card2" class="card"></div>
+</div>
+
+<div id="start">
+  <h1>CUBE STORM</h1>
+  <div class="sub">ROGUELIKE RUNNER</div>
+  <div class="hint">Swipe or tap left/right to dodge.<br>Collect gems. Pick upgrades.</div>
+  <button id="start-btn">TAP TO RUN</button>
+</div>
+
+<div id="over">
+  <h2>WRECKED</h2>
+  <div class="final" id="over-score">Score: 0</div>
+  <div class="best" id="over-best">Best: 0</div>
+  <div class="max-combo" id="over-combo">Max Combo: 0</div>
+  <button id="retry-btn">TRY AGAIN</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ─── Telegram ───────────────────────────────────────────────────────────────
+var tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch(_e) { console.warn('[TG] init failed:', _e); } }
+function haptic(type) {
+  try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(type || 'medium'); }
+  catch(_e) { console.warn('[haptic] error:', _e); }
+}
+
+// ─── DOM ─────────────────────────────────────────────────────────────────────
+var cvs    = document.getElementById('c');
+var scoreEl = document.getElementById('score-el');
+var distEl  = document.getElementById('dist-el');
+var hpEl    = document.getElementById('hp-el');
+var comboEl = document.getElementById('combo-el');
+var modsEl  = document.getElementById('mods-el');
+var flashEl = document.getElementById('flash');
+var cardsEl = document.getElementById('cards');
+var overEl  = document.getElementById('over');
+var startEl = document.getElementById('start');
+
+// ─── Three.js ────────────────────────────────────────────────────────────────
+var W = window.innerWidth, H = window.innerHeight;
+var renderer = new THREE.WebGLRenderer({ canvas: cvs, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.shadowMap.enabled = false;
+
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060010);
+scene.fog = new THREE.FogExp2(0x060010, 0.022);
+
+var camera = new THREE.PerspectiveCamera(68, W / H, 0.1, 200);
+camera.position.set(0, 3.8, -6);
+camera.lookAt(0, 0, 20);
+
+// Lights
+var ambLight = new THREE.AmbientLight(0x330055, 0.9);
+scene.add(ambLight);
+var dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+dirLight.position.set(5, 15, -5);
+scene.add(dirLight);
+var pLight = new THREE.PointLight(0xaa00ff, 3.5, 10);
+scene.add(pLight);
+var pLight2 = new THREE.PointLight(0x0055ff, 1.5, 15);
+pLight2.position.set(0, 2, 15);
+scene.add(pLight2);
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+var LANES    = [-2, 0, 2];
+var TRACK_W  = 6.6;
+var TILE_D   = 10;
+var TILE_N   = 24;
+var SPAWN_Z  = 95;
+var DEAD_Z   = -12;
+
+// ─── Track tiles ─────────────────────────────────────────────────────────────
+var tileGeo = new THREE.BoxGeometry(TRACK_W, 0.22, TILE_D);
+var tileMat = new THREE.MeshPhongMaterial({ color: 0x0d0024, emissive: 0x050012, shininess: 80 });
+var edgeMat = new THREE.MeshPhongMaterial({ color: 0xff00ff, emissive: 0xff00ff, emissiveIntensity: 0.6, shininess: 120 });
+var edgeGeo = new THREE.BoxGeometry(0.08, 0.3, TILE_D);
+var lDivGeo = new THREE.BoxGeometry(0.05, 0.12, TILE_D);
+var lDivMat = new THREE.MeshBasicMaterial({ color: 0x330044, transparent: true, opacity: 0.5 });
+
+var trackTiles = [];
+for (var ti = 0; ti < TILE_N; ti++) {
+  var tm = new THREE.Mesh(tileGeo, tileMat);
+  tm.position.set(0, 0, ti * TILE_D);
+  scene.add(tm);
+  var eL = new THREE.Mesh(edgeGeo, edgeMat);
+  eL.position.set(-TRACK_W / 2 + 0.04, 0.26, 0);
+  tm.add(eL);
+  var eR = new THREE.Mesh(edgeGeo, edgeMat);
+  eR.position.set(TRACK_W / 2 - 0.04, 0.26, 0);
+  tm.add(eR);
+  var d1 = new THREE.Mesh(lDivGeo, lDivMat);
+  d1.position.set(-1, 0.17, 0); tm.add(d1);
+  var d2 = new THREE.Mesh(lDivGeo, lDivMat);
+  d2.position.set(1, 0.17, 0); tm.add(d2);
+  trackTiles.push({ mesh: tm, z: ti * TILE_D });
+}
+
+// Horizon glow plane
+var horizGeo = new THREE.PlaneGeometry(200, 4);
+var horizMat = new THREE.MeshBasicMaterial({ color: 0x220033, transparent: true, opacity: 0.7, side: THREE.FrontSide });
+var horiz = new THREE.Mesh(horizGeo, horizMat);
+horiz.rotation.x = -Math.PI / 2;
+horiz.position.set(0, 0.01, 80);
+scene.add(horiz);
+
+// ─── Player ──────────────────────────────────────────────────────────────────
+var playerGeo = new THREE.BoxGeometry(0.88, 0.88, 0.88);
+var playerMat = new THREE.MeshPhongMaterial({ color: 0xcc00ff, emissive: 0x6600cc, emissiveIntensity: 0.5, shininess: 130 });
+var playerMesh = new THREE.Mesh(playerGeo, playerMat);
+playerMesh.position.set(0, 0.9, 0);
+scene.add(playerMesh);
+
+var ringGeo = new THREE.TorusGeometry(0.72, 0.055, 8, 22);
+var ringMat = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+var ring = new THREE.Mesh(ringGeo, ringMat);
+ring.rotation.x = Math.PI / 2;
+ring.position.y = -0.46;
+playerMesh.add(ring);
+
+// ─── Obstacle pool ───────────────────────────────────────────────────────────
+var OBS_N = 24;
+var obsPool = [];
+var obsGeo  = new THREE.BoxGeometry(1.55, 1.55, 1.55);
+for (var oi = 0; oi < OBS_N; oi++) {
+  var om = new THREE.Mesh(obsGeo, new THREE.MeshPhongMaterial({ color: 0xee1133, emissive: 0x770011, shininess: 90 }));
+  om.position.set(0, 0.8, -80);
+  om.visible = false;
+  scene.add(om);
+  obsPool.push({ mesh: om, active: false, lane: 1, z: -80 });
+}
+
+// ─── Gem pool ────────────────────────────────────────────────────────────────
+var GEM_N  = 36;
+var gemPool = [];
+var gemGeo  = new THREE.OctahedronGeometry(0.34, 0);
+var GEM_COLORS = [0xffff00, 0x00ffff, 0xff6600, 0x44ff44, 0xff44ff, 0xffffff];
+for (var gi = 0; gi < GEM_N; gi++) {
+  var gc = GEM_COLORS[gi % GEM_COLORS.length];
+  var gm = new THREE.Mesh(gemGeo, new THREE.MeshPhongMaterial({ color: gc, emissive: gc, emissiveIntensity: 0.5, shininess: 160 }));
+  gm.position.set(0, 0.9, -80);
+  gm.visible = false;
+  scene.add(gm);
+  gemPool.push({ mesh: gm, mat: gm.material, active: false, lane: 1, z: -80, color: gc });
+}
+
+// ─── Trail pool ──────────────────────────────────────────────────────────────
+var TRAIL_N = 64;
+var trailPool = [];
+var trailGeo  = new THREE.BoxGeometry(0.28, 0.28, 0.28);
+for (var tri = 0; tri < TRAIL_N; tri++) {
+  var trm = new THREE.Mesh(trailGeo, new THREE.MeshBasicMaterial({ color: 0xaa00ff, transparent: true, opacity: 0 }));
+  trm.visible = false;
+  scene.add(trm);
+  trailPool.push({ mesh: trm, mat: trm.material, life: 0, maxLife: 0 });
+}
+
+// ─── Burst pool ──────────────────────────────────────────────────────────────
+var BURST_N = 90;
+var burstPool = [];
+var burstGeo  = new THREE.SphereGeometry(0.13, 4, 4);
+for (var bi = 0; bi < BURST_N; bi++) {
+  var bm = new THREE.Mesh(burstGeo, new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0 }));
+  bm.visible = false;
+  scene.add(bm);
+  burstPool.push({ mesh: bm, mat: bm.material, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0 });
+}
+var burstIdx = 0;
+
+// ─── Game state ──────────────────────────────────────────────────────────────
+var gs = {
+  running: false, paused: false,
+  speed: 10, lane: 1, laneX: 0,
+  score: 0, dist: 0, hp: 3, maxHp: 3,
+  combo: 0, maxCombo: 0,
+  gemMult: 1, scoreMult: 1,
+  magnet: false, shield: false,
+  nextCardAt: 500, invincible: 0,
+  trailT: 0, obsT: 0, gemT: 0,
+  shake: 0,
+  upgrades: []
+};
+
+var best = parseInt(localStorage.getItem('cs_best') || '0', 10);
+document.getElementById('over-best').textContent = 'Best: ' + best;
+
+// ─── Upgrade cards ──────────────────────────────────────────────────────────
+var ALL_CARDS = [
+  {
+    icon: '❤️', name: 'EXTRA LIFE', desc: 'Gain +1 heart. Max 5.',
+    apply: function() { gs.hp = Math.min(5, gs.hp + 1); gs.maxHp = Math.max(gs.maxHp, gs.hp); updateHpUI(); }
+  },
+  {
+    icon: '🧲', name: 'MAGNET', desc: 'Gems auto-pull from nearby lanes.',
+    apply: function() { gs.magnet = true; }
+  },
+  {
+    icon: '🛡️', name: 'SHIELD', desc: 'Absorb the next obstacle hit.',
+    apply: function() { gs.shield = true; playerMat.emissive.setHex(0x0066ff); playerMat.emissiveIntensity = 1.0; }
+  },
+  {
+    icon: '💎', name: 'GEM RUSH', desc: 'All gems worth 2× (stacks).',
+    apply: function() { gs.gemMult = Math.min(8, gs.gemMult * 2); }
+  },
+  {
+    icon: '⚡', name: 'SPEED BOOST', desc: 'Permanently run 15% faster.',
+    apply: function() { gs.speed = Math.min(30, gs.speed * 1.15 + 1); }
+  },
+  {
+    icon: '🔥', name: 'INFERNO', desc: 'Triple score for the next 20 seconds.',
+    apply: function() {
+      gs.scoreMult = 3;
+      setTimeout(function() { gs.scoreMult = 1; updateModsUI(); }, 20000);
+    }
+  },
+  {
+    icon: '👻', name: 'GHOST DASH', desc: 'Phase through the next 2 obstacles.',
+    apply: function() { gs.ghostHits = (gs.ghostHits || 0) + 2; }
+  },
+  {
+    icon: '✨', name: 'STAR SHOWER', desc: 'Spawn 8 bonus gems immediately.',
+    apply: function() {
+      for (var i = 0; i < 8; i++) {
+        (function(delay) {
+          setTimeout(function() { if (gs.running) spawnGem(); }, delay);
+        })(i * 120);
+      }
+    }
+  }
+];
+
+function shuffle(arr) {
+  var a = arr.slice();
+  for (var i = a.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+  return a;
+}
+
+function showCards() {
+  gs.paused = true;
+  var picks = shuffle(ALL_CARDS).slice(0, 3);
+  for (var i = 0; i < 3; i++) {
+    (function(idx, card) {
+      var el = document.getElementById('card' + idx);
+      el.innerHTML = '<div class="card-icon">' + card.icon + '</div>' +
+        '<div class="card-name">' + card.name + '</div>' +
+        '<div class="card-desc">' + card.desc + '</div>';
+      el.onclick = function() {
+        try { card.apply(); } catch(_e) { console.warn('[card] apply error:', _e); }
+        gs.upgrades.push(card.name);
+        cardsEl.style.display = 'none';
+        gs.paused = false;
+        gs.nextCardAt = gs.score + 700 + Math.floor(gs.score * 0.12);
+        haptic('heavy');
+        updateModsUI();
+      };
+    })(i, picks[i]);
+  }
+  cardsEl.style.display = 'flex';
+  haptic('medium');
+}
+
+// ─── Spawn helpers ───────────────────────────────────────────────────────────
+function spawnObs() {
+  var p = null;
+  for (var i = 0; i < OBS_N; i++) {
+    if (!obsPool[i].active) { p = obsPool[i]; break; }
+  }
+  if (!p) return;
+  var lane = Math.floor(Math.random() * 3);
+  p.lane = lane; p.z = SPAWN_Z; p.active = true;
+  p.mesh.position.set(LANES[lane], 0.8, SPAWN_Z);
+  p.mesh.rotation.set(Math.random(), Math.random(), Math.random());
+  p.mesh.visible = true;
+}
+
+function spawnGem() {
+  var p = null;
+  for (var i = 0; i < GEM_N; i++) {
+    if (!gemPool[i].active) { p = gemPool[i]; break; }
+  }
+  if (!p) return;
+  var lane = Math.floor(Math.random() * 3);
+  p.lane = lane; p.z = SPAWN_Z; p.active = true;
+  p.mesh.position.set(LANES[lane], 0.9, SPAWN_Z);
+  p.mesh.rotation.set(0, Math.random() * Math.PI * 2, 0);
+  p.mesh.visible = true;
+}
+
+function killObs(o) { o.active = false; o.mesh.visible = false; o.mesh.position.z = -80; }
+function killGem(g) { g.active = false; g.mesh.visible = false; g.mesh.position.z = -80; }
+
+// ─── Burst ───────────────────────────────────────────────────────────────────
+function burst(x, y, z, col, count) {
+  var c = new THREE.Color(col || 0xffff00);
+  var n = count || 10;
+  for (var i = 0; i < n; i++) {
+    var bp = burstPool[burstIdx % BURST_N];
+    burstIdx++;
+    bp.mesh.position.set(x, y, z);
+    bp.mat.color.copy(c);
+    bp.mat.opacity = 1;
+    bp.mesh.visible = true;
+    var spd = 2 + Math.random() * 4;
+    var ang = Math.random() * Math.PI * 2;
+    var vt  = (Math.random() - 0.35) * Math.PI;
+    bp.vx = Math.cos(ang) * Math.cos(vt) * spd;
+    bp.vy = Math.sin(vt) * spd + 1.5;
+    bp.vz = Math.sin(ang) * Math.cos(vt) * spd;
+    bp.maxLife = 0.35 + Math.random() * 0.3;
+    bp.life = bp.maxLife;
+  }
+}
+
+// ─── Flash ───────────────────────────────────────────────────────────────────
+function flash(color, dur) {
+  flashEl.style.background = color || 'rgba(255,0,0,0.35)';
+  flashEl.style.transition = 'none';
+  flashEl.style.opacity = '1';
+  requestAnimationFrame(function() {
+    flashEl.style.transition = 'opacity ' + (dur || 0.3) + 's ease-out';
+    flashEl.style.opacity = '0';
+  });
+}
+
+// ─── Trail spawn ─────────────────────────────────────────────────────────────
+function spawnTrail() {
+  for (var i = 0; i < TRAIL_N; i++) {
+    if (trailPool[i].life <= 0) {
+      var tp = trailPool[i];
+      tp.mesh.position.copy(playerMesh.position);
+      tp.mesh.position.z -= 0.3;
+      var sc = 0.4 + Math.random() * 0.55;
+      tp.mesh.scale.set(sc, sc, sc);
+      tp.mesh.visible = true;
+      var hue = 0.75 + Math.random() * 0.15;
+      tp.mat.color.setHSL(hue, 1, 0.6);
+      tp.maxLife = 0.22;
+      tp.life = tp.maxLife;
+      return;
+    }
+  }
+}
+
+// ─── UI ──────────────────────────────────────────────────────────────────────
+function updateScoreUI() { scoreEl.textContent = gs.score; }
+function updateDistUI()  { distEl.textContent  = Math.floor(gs.dist) + 'm'; }
+function updateHpUI() {
+  var s = '';
+  for (var i = 0; i < gs.hp; i++) s += '♥';
+  for (var i = gs.hp; i < gs.maxHp; i++) s += '♡';
+  hpEl.textContent = s;
+}
+function updateComboUI() {
+  if (gs.combo > 1) {
+    comboEl.textContent = 'COMBO ×' + gs.combo;
+    comboEl.style.opacity = '1';
+  } else {
+    comboEl.style.opacity = '0';
+  }
+}
+function updateModsUI() {
+  var parts = [];
+  if (gs.magnet)           parts.push('🧲');
+  if (gs.shield)           parts.push('🛡️');
+  if (gs.scoreMult > 1)    parts.push('🔥×' + gs.scoreMult);
+  if (gs.ghostHits > 0)    parts.push('👻×' + gs.ghostHits);
+  if (gs.gemMult > 1)      parts.push('💎×' + gs.gemMult);
+  modsEl.innerHTML = parts.join('<br>');
+}
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+var inputCooldown = 0;
+var touchX0 = 0, touchY0 = 0;
+
+function moveLeft() {
+  if (!gs.running || gs.paused || inputCooldown > 0) return;
+  if (gs.lane > 0) {
+    gs.lane--;
+    inputCooldown = 0.15;
+    haptic('light');
+    playerMesh.rotation.z = 0.45;
+  }
+}
+function moveRight() {
+  if (!gs.running || gs.paused || inputCooldown > 0) return;
+  if (gs.lane < 2) {
+    gs.lane++;
+    inputCooldown = 0.15;
+    haptic('light');
+    playerMesh.rotation.z = -0.45;
+  }
+}
+
+window.addEventListener('keydown', function(e) {
+  if (e.key === 'ArrowLeft'  || e.key === 'a') moveLeft();
+  if (e.key === 'ArrowRight' || e.key === 'd') moveRight();
+});
+
+cvs.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  touchX0 = e.touches[0].clientX;
+  touchY0 = e.touches[0].clientY;
+}, { passive: false });
+
+cvs.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  var dx = e.changedTouches[0].clientX - touchX0;
+  var dy = e.changedTouches[0].clientY - touchY0;
+  if (Math.abs(dx) >= Math.abs(dy) && Math.abs(dx) > 18) {
+    if (dx < 0) moveLeft(); else moveRight();
+  }
+}, { passive: false });
+
+cvs.addEventListener('click', function(e) {
+  if (!gs.running || gs.paused) return;
+  if (e.clientX < W / 2) moveLeft(); else moveRight();
+});
+
+// ─── Game over ───────────────────────────────────────────────────────────────
+function gameOver() {
+  gs.running = false;
+  haptic('heavy');
+  flash('rgba(255,0,0,0.5)', 0.12);
+  burst(playerMesh.position.x, playerMesh.position.y, playerMesh.position.z, 0xff2244, 22);
+  playerMesh.visible = false;
+  if (gs.score > best) { best = gs.score; localStorage.setItem('cs_best', best); }
+  setTimeout(function() {
+    overEl.style.display = 'flex';
+    document.getElementById('over-score').textContent = 'Score: ' + gs.score;
+    document.getElementById('over-best').textContent  = 'Best: '  + best;
+    document.getElementById('over-combo').textContent = 'Max Combo: ' + gs.maxCombo;
+  }, 900);
+}
+
+// ─── Init game ───────────────────────────────────────────────────────────────
+function initGame() {
+  for (var i = 0; i < OBS_N;   i++) killObs(obsPool[i]);
+  for (var i = 0; i < GEM_N;   i++) killGem(gemPool[i]);
+  for (var i = 0; i < BURST_N; i++) { burstPool[i].life = 0; burstPool[i].mesh.visible = false; }
+  for (var i = 0; i < TRAIL_N; i++) { trailPool[i].life = 0; trailPool[i].mesh.visible = false; }
+
+  gs.running = true; gs.paused = false;
+  gs.speed = 10; gs.lane = 1; gs.laneX = 0;
+  gs.score = 0; gs.dist = 0; gs.hp = 3; gs.maxHp = 3;
+  gs.combo = 0; gs.maxCombo = 0;
+  gs.gemMult = 1; gs.scoreMult = 1;
+  gs.magnet = false; gs.shield = false;
+  gs.ghostHits = 0;
+  gs.nextCardAt = 500; gs.invincible = 0;
+  gs.trailT = 0; gs.obsT = 0; gs.gemT = 0;
+  gs.shake = 0; gs.upgrades = [];
+  inputCooldown = 0;
+
+  playerMesh.visible = true;
+  playerMesh.position.set(0, 0.9, 0);
+  playerMesh.rotation.set(0, 0, 0);
+  playerMat.emissive.setHex(0x6600cc);
+  playerMat.emissiveIntensity = 0.5;
+
+  for (var ti = 0; ti < TILE_N; ti++) {
+    trackTiles[ti].z = ti * TILE_D;
+    trackTiles[ti].mesh.position.z = ti * TILE_D;
+  }
+
+  updateScoreUI(); updateDistUI(); updateHpUI(); updateComboUI(); updateModsUI();
+  overEl.style.display = 'none';
+  cardsEl.style.display = 'none';
+}
+
+// ─── Buttons ─────────────────────────────────────────────────────────────────
+document.getElementById('start-btn').addEventListener('click', function() {
+  startEl.style.display = 'none';
+  initGame();
+});
+document.getElementById('retry-btn').addEventListener('click', function() {
+  overEl.style.display = 'none';
+  initGame();
+});
+
+// ─── Main loop ───────────────────────────────────────────────────────────────
+var lastT = 0;
+function loop(ts) {
+  requestAnimationFrame(loop);
+  var dt = Math.min((ts - lastT) / 1000, 0.05);
+  lastT = ts;
+
+  if (!gs.running || gs.paused) {
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // Speed ramp: gradual increase with distance
+  var targetSpeed = Math.min(28, 10 + gs.dist * 0.009);
+  gs.speed += (targetSpeed - gs.speed) * dt * 0.5;
+
+  var dz = gs.speed * dt;
+  gs.dist += dz;
+
+  // Input cooldown
+  if (inputCooldown > 0) {
+    inputCooldown -= dt;
+    if (inputCooldown <= 0) {
+      inputCooldown = 0;
+      playerMesh.rotation.z += (0 - playerMesh.rotation.z) * 0.4;
+    }
+  } else {
+    playerMesh.rotation.z *= 0.8;
+  }
+
+  // Track scroll
+  for (var ti = 0; ti < TILE_N; ti++) {
+    trackTiles[ti].z -= dz;
+    trackTiles[ti].mesh.position.z = trackTiles[ti].z;
+    if (trackTiles[ti].z < DEAD_Z) {
+      trackTiles[ti].z += TILE_N * TILE_D;
+      trackTiles[ti].mesh.position.z = trackTiles[ti].z;
+    }
+  }
+
+  // Player smooth lane move
+  var targetX = LANES[gs.lane];
+  gs.laneX += (targetX - gs.laneX) * Math.min(1, dt * 16);
+  playerMesh.position.x = gs.laneX;
+  playerMesh.position.y = 0.9 + Math.sin(ts * 0.0028) * 0.07;
+  playerMesh.rotation.y += dt * 1.6;
+  ring.rotation.z += dt * 2.2;
+
+  // Point light follows player
+  pLight.position.set(playerMesh.position.x, playerMesh.position.y + 0.6, playerMesh.position.z + 0.5);
+
+  // Spawn obstacles
+  gs.obsT -= dt;
+  if (gs.obsT <= 0) {
+    spawnObs();
+    var interval = Math.max(0.55, 1.9 - gs.dist * 0.0009);
+    gs.obsT = interval * (0.75 + Math.random() * 0.5);
+    // Occasionally spawn 2 in different lanes (after 300m)
+    if (gs.dist > 300 && Math.random() < 0.25) {
+      (function() { setTimeout(function() { if (gs.running && !gs.paused) spawnObs(); }, 300); })();
+    }
+  }
+
+  // Spawn gems
+  gs.gemT -= dt;
+  if (gs.gemT <= 0) {
+    spawnGem();
+    gs.gemT = 0.38 + Math.random() * 0.42;
+    if (Math.random() < 0.55) {
+      (function() {
+        setTimeout(function() { if (gs.running && !gs.paused) spawnGem(); }, 180);
+        setTimeout(function() { if (gs.running && !gs.paused) spawnGem(); }, 360);
+      })();
+    }
+  }
+
+  // Update obstacles
+  for (var oi = 0; oi < OBS_N; oi++) {
+    var o = obsPool[oi];
+    if (!o.active) continue;
+    o.z -= dz;
+    o.mesh.position.z = o.z;
+    o.mesh.rotation.x += dt * 1.1;
+    o.mesh.rotation.z += dt * 0.75;
+
+    // Collision
+    if (o.z < 1.6 && o.z > -1.6 && Math.abs(LANES[o.lane] - playerMesh.position.x) < 1.15) {
+      if (gs.invincible <= 0) {
+        if (gs.ghostHits > 0) {
+          gs.ghostHits--;
+          flash('rgba(150,0,255,0.3)', 0.2);
+          updateModsUI();
+          haptic('light');
+          burst(o.mesh.position.x, o.mesh.position.y, o.mesh.position.z, 0xaa00ff, 10);
+        } else if (gs.shield) {
+          gs.shield = false;
+          playerMat.emissive.setHex(0x6600cc);
+          playerMat.emissiveIntensity = 0.5;
+          flash('rgba(0,100,255,0.45)', 0.22);
+          haptic('heavy');
+          burst(o.mesh.position.x, o.mesh.position.y, o.mesh.position.z, 0x0088ff, 14);
+          updateModsUI();
+        } else {
+          gs.hp--;
+          gs.combo = 0;
+          gs.invincible = 1.6;
+          updateHpUI(); updateComboUI();
+          flash('rgba(255,0,0,0.45)', 0.22);
+          gs.shake = 0.45;
+          haptic('heavy');
+          burst(o.mesh.position.x, o.mesh.position.y, o.mesh.position.z, 0xff2244, 16);
+          if (gs.hp <= 0) { killObs(o); gameOver(); return; }
+        }
+      }
+      killObs(o);
+      continue;
+    }
+    if (o.z < DEAD_Z) killObs(o);
+  }
+
+  // Update gems
+  for (var gi = 0; gi < GEM_N; gi++) {
+    var g = gemPool[gi];
+    if (!g.active) continue;
+    g.z -= dz;
+    g.mesh.position.z = g.z;
+    g.mesh.rotation.y += dt * 2.2;
+    g.mesh.rotation.x += dt * 0.9;
+
+    // Magnet pull
+    if (gs.magnet && g.z > -3 && g.z < 14) {
+      var mdx = playerMesh.position.x - g.mesh.position.x;
+      if (Math.abs(mdx) > 0.05) g.mesh.position.x += mdx * dt * 6;
+    }
+
+    // Collect
+    var cdx = Math.abs(g.mesh.position.x - playerMesh.position.x);
+    if (cdx < 1.05 && g.z < 1.5 && g.z > -1.5) {
+      var pts = Math.floor(10 * gs.gemMult * gs.scoreMult * (1 + gs.combo * 0.1));
+      gs.score += pts;
+      gs.combo++;
+      if (gs.combo > gs.maxCombo) gs.maxCombo = gs.combo;
+      burst(g.mesh.position.x, g.mesh.position.y, g.mesh.position.z, g.color, 9);
+      haptic('light');
+      updateScoreUI(); updateComboUI();
+      killGem(g);
+      if (gs.score >= gs.nextCardAt) showCards();
+      continue;
+    }
+
+    if (g.z < DEAD_Z) {
+      if (gs.combo > 0) { gs.combo = 0; updateComboUI(); }
+      killGem(g);
+    }
+  }
+
+  // Invincibility blink
+  if (gs.invincible > 0) {
+    gs.invincible -= dt;
+    playerMesh.visible = (Math.floor(ts * 0.025) % 2 === 0);
+    if (gs.invincible <= 0) playerMesh.visible = true;
+  }
+
+  // Trail
+  gs.trailT -= dt;
+  if (gs.trailT <= 0) { spawnTrail(); gs.trailT = 0.042; }
+
+  for (var tri2 = 0; tri2 < TRAIL_N; tri2++) {
+    var tp = trailPool[tri2];
+    if (tp.life <= 0) continue;
+    tp.life -= dt;
+    tp.mat.opacity = Math.max(0, (tp.life / tp.maxLife) * 0.55);
+    if (tp.life <= 0) tp.mesh.visible = false;
+  }
+
+  // Burst particles
+  for (var bi2 = 0; bi2 < BURST_N; bi2++) {
+    var bp = burstPool[bi2];
+    if (bp.life <= 0) continue;
+    bp.life -= dt;
+    bp.mat.opacity = Math.max(0, bp.life / bp.maxLife);
+    bp.mesh.position.x += bp.vx * dt;
+    bp.mesh.position.y += bp.vy * dt;
+    bp.mesh.position.z += bp.vz * dt;
+    bp.vy -= 8 * dt;
+    if (bp.life <= 0) bp.mesh.visible = false;
+  }
+
+  // Camera shake
+  if (gs.shake > 0) {
+    gs.shake -= dt * 3.5;
+    if (gs.shake < 0) gs.shake = 0;
+    camera.position.x = (Math.random() - 0.5) * gs.shake * 0.55;
+    camera.position.y = 3.8 + (Math.random() - 0.5) * gs.shake * 0.3;
+  } else {
+    camera.position.x *= 0.85;
+    camera.position.y += (3.8 - camera.position.y) * 0.12;
+  }
+
+  updateDistUI();
+  renderer.render(scene, camera);
+}
+
+// ─── Resize ──────────────────────────────────────────────────────────────────
+window.addEventListener('resize', function() {
+  W = window.innerWidth; H = window.innerHeight;
+  renderer.setSize(W, H);
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+});
+
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html><head>
+<!-- STD-031 EXCEPTION: Single-file HTML game build per STD-025.
+     Splitting across files is prohibited by build standard.
+     Line count: ~480 justified (Three.js scene, pools, upgrade system,
+     UI logic, input handling — all tightly coupled in module scope). -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>ROGUE RUNNER</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#000;touch-action:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;font-family:'Arial Black',Arial,sans-serif}
+#score{position:absolute;top:16px;left:50%;transform:translateX(-50%);color:#14f195;font-size:26px;font-weight:900;text-shadow:0 0 14px #14f195}
+#hearts{position:absolute;top:18px;right:14px;color:#ff4466;font-size:20px;letter-spacing:1px}
+#depth{position:absolute;top:18px;left:14px;color:#aabbcc;font-size:12px;font-weight:900}
+#room{position:absolute;top:36px;left:14px;color:#14f195;font-size:10px;font-weight:900;opacity:0.75}
+#combo{position:absolute;top:56px;left:50%;transform:translateX(-50%);color:#ffd700;font-size:18px;font-weight:900;opacity:0}
+#floats{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden}
+#upgrade{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,4,12,0.96);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;font-family:'Arial Black',Arial,sans-serif}
+#upgrade h2{color:#14f195;font-size:20px;text-shadow:0 0 16px #14f195;margin-bottom:4px}
+.ubtn{width:80%;max-width:320px;padding:14px 16px;border:2px solid #14f195;background:rgba(20,241,149,0.07);color:#fff;font-family:'Arial Black',Arial,sans-serif;font-size:14px;font-weight:900;border-radius:6px;cursor:pointer;pointer-events:all;text-align:left}
+.ubtn:active{background:rgba(20,241,149,0.22)}
+.uname{color:#14f195;font-size:15px}
+.udesc{color:#8899aa;font-size:11px;margin-top:2px;font-weight:normal;font-family:Arial,sans-serif}
+#gameover{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,8,0.95);display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:'Arial Black',Arial,sans-serif}
+#gameover h1{color:#ff4466;font-size:40px;text-shadow:0 0 24px #ff4466}
+.go-stat{color:#fff;font-size:18px}
+.go-sub{color:#7788aa;font-size:13px}
+#rbtn{margin-top:12px;padding:13px 44px;background:#14f195;color:#000;font-size:18px;font-weight:900;border:none;border-radius:8px;cursor:pointer;pointer-events:all;font-family:'Arial Black',Arial,sans-serif}
+</style>
+</head><body>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="hearts">♥♥♥</div>
+  <div id="depth">0m</div>
+  <div id="room">ROOM 1</div>
+  <div id="combo"></div>
+</div>
+<div id="floats"></div>
+<div id="upgrade"><h2>⚔ RUNE FOUND ⚔</h2></div>
+<div id="gameover">
+  <h1>SLAIN</h1>
+  <div class="go-stat" id="go-score">0</div>
+  <div class="go-sub" id="go-depth">0m · Room 1</div>
+  <button id="rbtn">RUN AGAIN</button>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170/build/three.module.min.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Telegram integration (optional)
+const tg = window.Telegram?.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch (_e) { console.warn('[WARN] Telegram init:', _e); } }
+const haptic = (t = 'light') => tg?.HapticFeedback?.impactOccurred(t);
+
+// === RENDERER ===
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x00030c);
+scene.fog = new THREE.FogExp2(0x00030c, 0.055);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 80);
+camera.position.set(0, 2.0, 10);
+camera.lookAt(0, -0.5, 0);
+
+// Lighting: 1 ambient + 1 directional (STD-025)
+scene.add(new THREE.AmbientLight(0x0a1830, 3.2));
+const dLight = new THREE.DirectionalLight(0x14f195, 2.8);
+dLight.position.set(2, 5, 4);
+scene.add(dLight);
+
+// === CONSTANTS ===
+const PX = -3.5;    // player fixed x
+const GY = -2.0;    // ground y
+const GRAV = -22;
+const JUMP_V = 11.5;
+const TILE_W = 5.5;
+const N_TILES = 10;
+
+// === GAME STATE ===
+const G = {
+  score: 0, hp: 3, combo: 0, comboT: 0, depth: 0,
+  room: 1, kills: 0, killRoom: 10,
+  speed: 4.0, speedMax: 12,
+  spawnT: 1.0, spawnInterval: 1.6,
+  fireT: 0, fireRate: 0.28,
+  shake: 0, running: true, paused: false,
+  upg: { dj: false, magnet: false, rapid: false, shield: false, nova: false }
+};
+let novaCount = 0;
+
+// === PLAYER ===
+const pGroup = new THREE.Group();
+scene.add(pGroup);
+pGroup.position.set(PX, GY + 0.5, 0);
+
+// Armored diamond body
+const pBodyGeo = (() => {
+  try {
+    const g = new THREE.OctahedronGeometry(0.38, 0);
+    g.rotateZ(Math.PI / 4);
+    return g;
+  } catch (_e) {
+    console.warn('[WARN] pBodyGeo:', _e);
+    return new THREE.BoxGeometry(0.5, 0.5, 0.5);
+  }
+})();
+const pBody = new THREE.Mesh(pBodyGeo, new THREE.MeshLambertMaterial({ color: 0x14f195 }));
+pGroup.add(pBody);
+
+// Visor
+const visor = new THREE.Mesh(
+  new THREE.BoxGeometry(0.22, 0.10, 0.32),
+  new THREE.MeshBasicMaterial({ color: 0xffffff })
+);
+visor.position.set(0.26, 0.12, 0);
+pGroup.add(visor);
+
+// Cape trail (line)
+const CAPE_LEN = 18;
+const capePts = Array.from({ length: CAPE_LEN }, () => new THREE.Vector3(PX, GY + 0.5, 0));
+const capeGeo = new THREE.BufferGeometry();
+const capeBuf = new Float32Array(CAPE_LEN * 3);
+capeGeo.setAttribute('position', new THREE.BufferAttribute(capeBuf, 3));
+scene.add(new THREE.Line(capeGeo, new THREE.LineBasicMaterial({ color: 0x14f195, transparent: true, opacity: 0.4 })));
+
+// Shield ring
+const shieldRing = new THREE.Mesh(
+  new THREE.TorusGeometry(0.65, 0.04, 6, 20),
+  new THREE.MeshBasicMaterial({ color: 0x00ffaa })
+);
+shieldRing.visible = false;
+pGroup.add(shieldRing);
+
+let pVy = 0, grounded = true, dblJump = false;
+let shieldOn = false, shieldCD = 0;
+
+// === GROUND TILES ===
+const tileMat = new THREE.MeshLambertMaterial({ color: 0x001520 });
+const tileEdgeMat = new THREE.MeshBasicMaterial({ color: 0x14f195 });
+const tiles = [];
+for (let i = 0; i < N_TILES; i++) {
+  const t = new THREE.Mesh(new THREE.BoxGeometry(TILE_W, 0.35, 3.0), tileMat);
+  t.position.set(i * TILE_W - 20, GY - 0.35, 0);
+  scene.add(t);
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(TILE_W, 0.045, 3.01), tileEdgeMat);
+  edge.position.set(0, 0.2, 0);
+  t.add(edge);
+  tiles.push(t);
+}
+
+// Grid lines
+for (let i = 0; i < 20; i++) {
+  try {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-20 + i * 2, GY - 0.18, -1.5),
+      new THREE.Vector3(-20 + i * 2, GY - 0.18,  1.5)
+    ]);
+    scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x003322, transparent: true, opacity: 0.55 })));
+  } catch (_e) {
+    console.warn('[WARN] grid line:', _e);
+  }
+}
+
+// Starfield
+const STARS = 90;
+const starGeo = new THREE.BufferGeometry();
+const starBuf = new Float32Array(STARS * 3);
+const starVx = [];
+for (let i = 0; i < STARS; i++) {
+  starBuf[i * 3]     = (Math.random() - 0.5) * 32;
+  starBuf[i * 3 + 1] = (Math.random() - 0.5) * 16;
+  starBuf[i * 3 + 2] = -2 + Math.random() * 0.5;
+  starVx.push(-(0.2 + Math.random() * 0.9));
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starBuf, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0x224466, size: 0.065 })));
+
+// === OBJECT POOLS ===
+// Bullets
+const BMAX = 30;
+const bullets = [];
+const bGeo = new THREE.SphereGeometry(0.09, 4, 4);
+for (let i = 0; i < BMAX; i++) {
+  const m = new THREE.Mesh(bGeo, new THREE.MeshBasicMaterial({ color: 0x00ffee }));
+  m.visible = false;
+  scene.add(m);
+  bullets.push({ m, active: false });
+}
+
+// Enemy type definitions
+const E_TYPES = [
+  { col: 0xff3355, hp: 1, spd: 1.0, y: GY + 0.6,  pts: 10, tag: 'GRUNT'  },
+  { col: 0xff7700, hp: 1, spd: 1.5, y: GY + 2.4,  pts: 15, tag: 'WRAITH' },
+  { col: 0xaa00ff, hp: 2, spd: 0.7, y: GY + 0.7,  pts: 25, tag: 'BRUTE'  },
+  { col: 0xffcc00, hp: 1, spd: 2.5, y: GY + 1.6,  pts: 20, tag: 'SPRITE' },
+];
+const EMAX = 16;
+const enemies = [];
+for (let i = 0; i < EMAX; i++) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.58, 0.58, 0.48),
+    new THREE.MeshLambertMaterial({ color: 0xff3355 })
+  );
+  g.add(body);
+  const eye = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09, 5, 5),
+    new THREE.MeshBasicMaterial({ color: 0xff0000 })
+  );
+  eye.position.set(0.24, 0.14, 0.25);
+  g.add(eye);
+  g.visible = false;
+  scene.add(g);
+  enemies.push({ g, body, eye, active: false, hp: 0, spd: 0, type: 0, t: 0, pts: 0, dy: 1.4 });
+}
+
+// Runes (collectibles)
+const RMAX = 20;
+const runes = [];
+const runeGeo = new THREE.OctahedronGeometry(0.20, 0);
+for (let i = 0; i < RMAX; i++) {
+  const m = new THREE.Mesh(runeGeo, new THREE.MeshBasicMaterial({ color: 0xffd700 }));
+  m.visible = false;
+  scene.add(m);
+  runes.push({ m, active: false, vy: 0 });
+}
+
+// Particles
+const PMAX = 80;
+const parts = [];
+const pGeo = new THREE.SphereGeometry(0.10, 4, 4);
+for (let i = 0; i < PMAX; i++) {
+  const m = new THREE.Mesh(pGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true }));
+  m.visible = false;
+  scene.add(m);
+  parts.push({ m, vx: 0, vy: 0, vz: 0, life: 0, max: 0, active: false });
+}
+
+// === UI REFS ===
+const elScore  = document.getElementById('score');
+const elHearts = document.getElementById('hearts');
+const elDepth  = document.getElementById('depth');
+const elRoom   = document.getElementById('room');
+const elCombo  = document.getElementById('combo');
+const elFloats = document.getElementById('floats');
+const elUpg    = document.getElementById('upgrade');
+const elGO     = document.getElementById('gameover');
+
+function drawHearts() {
+  elHearts.textContent = '♥'.repeat(G.hp) + '♡'.repeat(Math.max(0, 3 - G.hp));
+}
+
+function floatText(txt, wx, wy, wz, col) {
+  try {
+    const v = new THREE.Vector3(wx, wy, wz).project(camera);
+    const sx = (v.x + 1) / 2 * innerWidth;
+    const sy = (1 - v.y) / 2 * innerHeight;
+    const d = document.createElement('div');
+    d.textContent = txt;
+    d.style.cssText = `position:absolute;left:${sx}px;top:${sy}px;color:${col};font-family:'Arial Black',Arial,sans-serif;font-size:15px;font-weight:900;text-shadow:0 0 8px ${col};pointer-events:none;transform:translateX(-50%)`;
+    elFloats.appendChild(d);
+    let t = 0;
+    const tick = () => {
+      t++;
+      d.style.top = (sy - t * 1.5) + 'px';
+      d.style.opacity = String(1 - t / 32);
+      if (t < 32) requestAnimationFrame(tick); else d.remove();
+    };
+    requestAnimationFrame(tick);
+  } catch (_e) {
+    console.warn('[WARN] floatText:', _e);
+  }
+}
+
+// === UPGRADES ===
+const UPGRADES = [
+  { id: 'dj',     name: 'DOUBLE JUMP',  desc: 'Tap again mid-air for a second leap' },
+  { id: 'magnet', name: 'RUNE MAGNET',  desc: 'Runes pulled from 2× the range' },
+  { id: 'rapid',  name: 'RAPID SHOT',   desc: 'Fire rate doubled' },
+  { id: 'shield', name: 'WARD',         desc: 'Auto-shield absorbs one hit, 4s recharge' },
+  { id: 'nova',   name: 'DEATH NOVA',   desc: 'Every 8th kill erupts in a nova blast' },
+];
+
+function showUpgrade() {
+  G.paused = true;
+  const avail = UPGRADES.filter(u => !G.upg[u.id]);
+  if (!avail.length) { G.paused = false; return; }
+  const choices = avail.sort(() => Math.random() - 0.5).slice(0, Math.min(3, avail.length));
+  elUpg.innerHTML = '<h2>⚔ RUNE FOUND ⚔</h2>';
+  elUpg.style.display = 'flex';
+  choices.forEach(u => {
+    const btn = document.createElement('button');
+    btn.className = 'ubtn';
+    btn.innerHTML = `<div class="uname">${u.name}</div><div class="udesc">${u.desc}</div>`;
+    btn.onclick = () => {
+      try {
+        G.upg[u.id] = true;
+        if (u.id === 'rapid') G.fireRate *= 0.45;
+        elUpg.style.display = 'none';
+        G.paused = false;
+        G.killRoom += 12;
+        G.room++;
+        elRoom.textContent = `ROOM ${G.room}`;
+      } catch (_e) {
+        console.warn('[WARN] upgrade select:', _e);
+        G.paused = false;
+        elUpg.style.display = 'none';
+      }
+    };
+    elUpg.appendChild(btn);
+  });
+}
+
+// === PARTICLES ===
+function burst(x, y, z, col, n) {
+  n = n || 10;
+  let spawned = 0;
+  for (let i = 0; i < PMAX && spawned < n; i++) {
+    const p = parts[i];
+    if (p.active) continue;
+    const a = (Math.PI * 2 / n) * spawned + Math.random() * 0.5;
+    const spd = 1.4 + Math.random() * 2.5;
+    p.m.position.set(x, y, z);
+    p.m.material.color.setHex(col);
+    p.m.material.opacity = 1;
+    p.m.visible = true;
+    p.vx = Math.cos(a) * spd;
+    p.vy = Math.sin(a) * spd + 1.0;
+    p.vz = (Math.random() - 0.5) * 1.6;
+    p.life = 0;
+    p.max = 16 + Math.random() * 12;
+    p.active = true;
+    spawned++;
+  }
+}
+
+function shake(amt) { G.shake = Math.max(G.shake, amt); }
+
+// === SPAWN ===
+function spawnEnemy() {
+  const e = enemies.find(e => !e.active);
+  if (!e) return;
+  const td = E_TYPES[Math.floor(Math.random() * E_TYPES.length)];
+  e.g.position.set(8.5, td.y, 0);
+  e.body.material.color.setHex(td.col);
+  e.eye.material.color.setHex(0xffffff);
+  e.active = true; e.g.visible = true;
+  e.hp = td.hp; e.spd = td.spd;
+  e.type = E_TYPES.indexOf(td); e.pts = td.pts;
+  e.t = 0; e.dy = 1.4;
+}
+
+function spawnRune(x, y) {
+  const r = runes.find(r => !r.active);
+  if (!r) return;
+  r.m.position.set(x, y, 0);
+  r.vy = 3.0 + Math.random() * 2;
+  r.active = true; r.m.visible = true;
+}
+
+function fireBullet() {
+  const b = bullets.find(b => !b.active);
+  if (!b) return;
+  b.m.position.set(pGroup.position.x + 0.5, pGroup.position.y + 0.1, 0);
+  b.active = true; b.m.visible = true;
+}
+
+// === COMBAT ===
+function killEnemy(e) {
+  const { x, y, z } = e.g.position;
+  burst(x, y, z, [0xff3355, 0xff7700, 0xaa00ff, 0xffcc00][e.type], 12);
+  spawnRune(x, y);
+  G.kills++; G.combo++; G.comboT = 2.2;
+  const mult = Math.min(G.combo, 6);
+  const pts = e.pts * mult;
+  G.score += pts;
+  elScore.textContent = G.score;
+  if (G.combo >= 3) { elCombo.textContent = `×${G.combo} COMBO`; elCombo.style.opacity = '1'; }
+  floatText(`+${pts}`, x, y + 0.6, z, G.combo >= 4 ? '#ffd700' : '#00ffee');
+  if (G.upg.nova) {
+    novaCount++;
+    if (novaCount >= 8) { novaCount = 0; triggerNova(); }
+  }
+  if (G.kills >= G.killRoom) showUpgrade();
+  shake(0.14);
+  haptic('medium');
+  e.active = false; e.g.visible = false;
+}
+
+function triggerNova() {
+  shake(0.48); haptic('heavy');
+  enemies.forEach(e => {
+    if (!e.active) return;
+    burst(e.g.position.x, e.g.position.y, e.g.position.z, 0xffd700, 14);
+    e.active = false; e.g.visible = false;
+  });
+}
+
+function playerHit() {
+  if (shieldOn) {
+    shieldOn = false; shieldCD = 4.0;
+    shieldRing.visible = false;
+    shake(0.22); haptic('heavy');
+    floatText('BLOCKED!', pGroup.position.x, pGroup.position.y + 0.8, 0, '#00ffaa');
+    return;
+  }
+  G.hp--; drawHearts();
+  G.combo = 0; elCombo.style.opacity = '0';
+  shake(0.44); haptic('heavy');
+  if (G.hp <= 0) gameOver();
+}
+
+// === GAME CONTROL ===
+function resetPools() {
+  bullets.forEach(b => { b.active = false; b.m.visible = false; });
+  enemies.forEach(e => { e.active = false; e.g.visible = false; });
+  runes.forEach(r => { r.active = false; r.m.visible = false; });
+  parts.forEach(p => { p.active = false; p.m.visible = false; });
+}
+
+function startGame() {
+  elGO.style.display = 'none';
+  elUpg.style.display = 'none';
+  Object.assign(G, {
+    score: 0, hp: 3, combo: 0, comboT: 0, depth: 0,
+    room: 1, kills: 0, killRoom: 10,
+    speed: 4.0, spawnT: 1.0, spawnInterval: 1.6,
+    fireT: 0, fireRate: 0.28, shake: 0, running: true, paused: false,
+    upg: { dj: false, magnet: false, rapid: false, shield: false, nova: false }
+  });
+  novaCount = 0;
+  pGroup.position.set(PX, GY + 0.5, 0);
+  pVy = 0; grounded = true; dblJump = false;
+  shieldOn = false; shieldCD = 0;
+  shieldRing.visible = false;
+  resetPools();
+  drawHearts();
+  elScore.textContent = '0';
+  elDepth.textContent = '0m';
+  elRoom.textContent = 'ROOM 1';
+  elCombo.style.opacity = '0';
+}
+
+function gameOver() {
+  G.running = false;
+  document.getElementById('go-score').textContent = `Score: ${G.score}`;
+  document.getElementById('go-depth').textContent = `${Math.floor(G.depth)}m · Room ${G.room}`;
+  elGO.style.display = 'flex';
+}
+
+document.getElementById('rbtn').onclick = () => { try { startGame(); } catch (_e) { console.warn('[WARN] rbtn:', _e); } };
+
+// Input: jump (no start screen — drop directly into gameplay per hook spec)
+document.addEventListener('pointerdown', () => {
+  try {
+    if (G.paused || !G.running) return;
+    if (grounded) {
+      pVy = JUMP_V; grounded = false;
+      dblJump = G.upg.dj;
+      haptic('light');
+      burst(pGroup.position.x, pGroup.position.y, 0, 0x14f195, 5);
+    } else if (dblJump) {
+      pVy = JUMP_V * 0.82; dblJump = false;
+      haptic('medium');
+      burst(pGroup.position.x, pGroup.position.y, 0, 0x00aaff, 7);
+    }
+  } catch (_e) {
+    console.warn('[WARN] pointerdown:', _e);
+  }
+});
+
+// === MAIN LOOP ===
+let prev = performance.now();
+startGame(); // Immediate start — no splash, no "tap to play"
+
+function loop(now) {
+  try {
+    requestAnimationFrame(loop);
+    const dt = Math.min((now - prev) / 1000, 0.05);
+    prev = now;
+
+    if (!G.running || G.paused) { renderer.render(scene, camera); return; }
+
+    // Speed ramp
+    G.speed = Math.min(G.speedMax, G.speed + 0.25 * dt);
+    const ws = G.speed;
+
+    // Depth
+    G.depth += ws * dt;
+    elDepth.textContent = Math.floor(G.depth) + 'm';
+
+    // Starfield scroll
+    const sp = starGeo.attributes.position;
+    for (let i = 0; i < STARS; i++) {
+      sp.array[i * 3] += starVx[i] * dt * 0.5;
+      if (sp.array[i * 3] < -16) sp.array[i * 3] = 16;
+    }
+    sp.needsUpdate = true;
+
+    // Ground treadmill
+    tiles.forEach(t => {
+      t.position.x -= ws * dt;
+      if (t.position.x < -22) t.position.x += N_TILES * TILE_W;
+    });
+
+    // Camera shake — subtle on impact, decays fast
+    if (G.shake > 0.003) {
+      camera.position.x = (Math.random() - 0.5) * G.shake;
+      camera.position.y = 2.0 + (Math.random() - 0.5) * G.shake;
+      G.shake *= 0.78;
+    } else {
+      camera.position.x = 0;
+      camera.position.y = 2.0;
+      G.shake = 0;
+    }
+
+    // Shield regen
+    if (!shieldOn && G.upg.shield) {
+      shieldCD -= dt;
+      if (shieldCD <= 0) { shieldOn = true; shieldRing.visible = true; }
+    }
+    shieldRing.rotation.z += dt * 2.2;
+
+    // Combo decay
+    if (G.combo > 0) {
+      G.comboT -= dt;
+      if (G.comboT <= 0) { G.combo = 0; elCombo.style.opacity = '0'; }
+    }
+
+    // Player physics
+    if (!grounded) {
+      pVy += GRAV * dt;
+      pGroup.position.y += pVy * dt;
+      if (pGroup.position.y <= GY + 0.5) {
+        pGroup.position.y = GY + 0.5;
+        pVy = 0; grounded = true;
+        burst(pGroup.position.x, pGroup.position.y - 0.3, 0, 0x14f195, 3);
+      }
+    }
+
+    // Player tilt
+    pGroup.rotation.z = grounded ? 0 : Math.max(-0.2, Math.min(0.2, pVy * 0.018));
+    // Visor pulse
+    visor.material.color.setHSL(0.42, 1, 0.5 + 0.2 * Math.sin(now * 0.005));
+
+    // Cape trail
+    for (let i = CAPE_LEN - 1; i > 0; i--) capePts[i].copy(capePts[i - 1]);
+    capePts[0].copy(pGroup.position);
+    for (let i = 0; i < CAPE_LEN; i++) {
+      capeBuf[i * 3]     = capePts[i].x;
+      capeBuf[i * 3 + 1] = capePts[i].y;
+      capeBuf[i * 3 + 2] = capePts[i].z;
+    }
+    capeGeo.attributes.position.needsUpdate = true;
+
+    // Auto-fire
+    G.fireT -= dt;
+    if (G.fireT <= 0) { fireBullet(); G.fireT = G.fireRate; }
+
+    // Bullets
+    bullets.forEach(b => {
+      if (!b.active) return;
+      b.m.position.x += (10.5 + ws * 0.35) * dt;
+      if (b.m.position.x > 10) { b.active = false; b.m.visible = false; }
+    });
+
+    // Enemy spawn
+    G.spawnT -= dt;
+    if (G.spawnT <= 0) {
+      spawnEnemy();
+      G.spawnInterval = Math.max(0.6, 1.6 - (ws - 4) * 0.1);
+      G.spawnT = G.spawnInterval + (Math.random() - 0.5) * 0.4;
+    }
+
+    // Enemy update
+    const magRange = G.upg.magnet ? 5.0 : 2.5;
+    enemies.forEach(e => {
+      if (!e.active) return;
+      e.g.position.x -= (ws + e.spd) * dt;
+      e.t += dt;
+
+      // Type behaviors
+      if (e.type === 1) {
+        e.g.position.y = E_TYPES[1].y + Math.sin(e.t * 2.2) * 0.7; // WRAITH hover
+      } else if (e.type === 3) {
+        e.g.position.y += e.dy * dt * 3.0; // SPRITE zigzag
+        if (e.g.position.y > GY + 3.2) e.dy = -Math.abs(e.dy);
+        if (e.g.position.y < GY + 0.5)  e.dy =  Math.abs(e.dy);
+      }
+      e.g.rotation.y += dt * 2.2;
+
+      if (e.g.position.x < -10) { e.active = false; e.g.visible = false; return; }
+
+      // Bullet collision
+      let dead = false;
+      bullets.forEach(b => {
+        if (!b.active || dead) return;
+        const dx = b.m.position.x - e.g.position.x;
+        const dy = b.m.position.y - e.g.position.y;
+        if (Math.abs(dx) < 0.52 && Math.abs(dy) < 0.52) {
+          b.active = false; b.m.visible = false;
+          e.hp--;
+          if (e.hp <= 0) { killEnemy(e); dead = true; }
+        }
+      });
+
+      // Player collision
+      if (!e.active) return;
+      const pdx = pGroup.position.x - e.g.position.x;
+      const pdy = pGroup.position.y - e.g.position.y;
+      if (Math.abs(pdx) < 0.56 && Math.abs(pdy) < 0.56) {
+        e.active = false; e.g.visible = false;
+        playerHit();
+      }
+    });
+
+    // Rune update
+    runes.forEach(r => {
+      if (!r.active) return;
+      r.m.rotation.y += dt * 3.0;
+      r.vy -= 8 * dt;
+      r.m.position.y += r.vy * dt;
+      if (r.m.position.y < GY + 0.2) { r.m.position.y = GY + 0.2; r.vy = 0; }
+      r.m.position.x -= ws * 0.35 * dt;
+      if (r.m.position.x < -10) { r.active = false; r.m.visible = false; return; }
+
+      const dx = pGroup.position.x - r.m.position.x;
+      const dy = pGroup.position.y - r.m.position.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < magRange) {
+        const pull = (magRange / dist) * 5.5 * dt;
+        r.m.position.x += dx * pull;
+        r.m.position.y += dy * pull;
+      }
+      if (dist < 0.55) {
+        r.active = false; r.m.visible = false;
+        G.score += 5;
+        elScore.textContent = G.score;
+        floatText('+5', r.m.position.x, r.m.position.y + 0.4, 0, '#ffd700');
+      }
+    });
+
+    // Particle update
+    parts.forEach(p => {
+      if (!p.active) return;
+      p.m.position.x += p.vx * dt;
+      p.m.position.y += p.vy * dt;
+      p.m.position.z += p.vz * dt;
+      p.vy -= 6 * dt;
+      p.life++;
+      const prog = p.life / p.max;
+      p.m.material.opacity = 1 - prog;
+      p.m.scale.setScalar(1 - prog * 0.6);
+      if (p.life >= p.max) { p.active = false; p.m.visible = false; }
+    });
+
+    renderer.render(scene, camera);
+  } catch (_e) {
+    console.warn('[WARN] loop tick:', _e);
+  }
+}
+
+window.addEventListener('resize', () => {
+  try {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  } catch (_e) {
+    console.warn('[WARN] resize:', _e);
+  }
+});
+
+requestAnimationFrame(loop);
+</script>
+</body></html>

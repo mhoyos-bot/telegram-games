@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NOVA TAP</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; touch-action: none; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: 14px 20px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none;
+  }
+  #score {
+    color: #fff; font-size: 32px; font-weight: bold;
+    text-shadow: 0 0 12px rgba(100,180,255,0.8);
+    letter-spacing: 2px;
+  }
+  #best {
+    color: rgba(255,255,255,0.35); font-size: 15px;
+    letter-spacing: 1px; margin-top: 4px;
+  }
+  #combo-display {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 42px; font-weight: bold; letter-spacing: 4px;
+    pointer-events: none; opacity: 0;
+    transition: opacity 0.15s ease-in;
+    text-shadow: 0 0 20px currentColor;
+  }
+  #tap-hint {
+    position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.35); font-size: 13px;
+    letter-spacing: 3px; text-transform: uppercase;
+  }
+  #tap-hint.fade { animation: hintPulse 2.2s ease-in-out infinite; }
+  @keyframes hintPulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.7; }
+  }
+  #multiplier-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    height: 3px; background: rgba(255,255,255,0.08);
+    pointer-events: none;
+  }
+  #multiplier-fill {
+    height: 100%; width: 0%; background: linear-gradient(90deg, #4af, #f4a);
+    transition: width 0.1s linear;
+    box-shadow: 0 0 6px rgba(100,180,255,0.8);
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div>
+    <div id="score">0</div>
+    <div id="best">BEST: 0</div>
+  </div>
+</div>
+<div id="combo-display"></div>
+<div id="tap-hint" class="fade">TAP TO LAUNCH</div>
+<div id="multiplier-bar"><div id="multiplier-fill"></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+/* ============================================================
+   NOVA TAP — Lane 004 Rando's House
+   Mechanic: physics_puzzle / orbital shockwave
+   Feel: juice | Hook: instant_start
+   Build: lc_lane_004_unknown_3ad83f
+   ============================================================ */
+
+const W = window.innerWidth;
+const H = window.innerHeight;
+
+// --- SCENE ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x040812);
+scene.fog = new THREE.FogExp2(0x040812, 0.025);
+
+const camera = new THREE.PerspectiveCamera(60, W / H, 0.1, 100);
+camera.position.set(0, 0, 16);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+// --- LIGHTS ---
+const ambient = new THREE.AmbientLight(0x112244, 0.6);
+scene.add(ambient);
+
+const dirA = new THREE.DirectionalLight(0x88bbff, 1.8);
+dirA.position.set(4, 8, 6);
+scene.add(dirA);
+
+const dirB = new THREE.DirectionalLight(0xff6688, 0.8);
+dirB.position.set(-6, -4, 4);
+scene.add(dirB);
+
+// Point lights that slowly drift
+const ptLights = [
+  new THREE.PointLight(0x4488ff, 3, 18),
+  new THREE.PointLight(0xff4488, 2, 14),
+  new THREE.PointLight(0x44ff88, 2, 16),
+];
+ptLights[0].position.set(-4, 5, 3);
+ptLights[1].position.set(6, -3, 2);
+ptLights[2].position.set(0, -6, 4);
+ptLights.forEach(l => scene.add(l));
+
+// --- PALETTE ---
+const COLORS = [
+  0xff4455, 0xff8844, 0xffdd33, 0x44ff88,
+  0x33ddff, 0x8855ff, 0xff44cc, 0x88ff33,
+];
+const COLOR3 = COLORS.map(c => new THREE.Color(c));
+
+// --- GEOMETRIES POOL ---
+const GEOS = [
+  new THREE.IcosahedronGeometry(0.65, 0),
+  new THREE.OctahedronGeometry(0.75, 0),
+  new THREE.TetrahedronGeometry(0.85, 0),
+  new THREE.DodecahedronGeometry(0.58, 0),
+  new THREE.ConeGeometry(0.5, 1.1, 5, 1),
+  new THREE.BoxGeometry(0.72, 0.72, 0.72),
+];
+
+// --- GAME STATE ---
+let score = 0;
+let bestScore = parseInt(localStorage.getItem('novaTapBest') || '0', 10);
+let combo = 0;
+let comboDecay = null;
+let firstTap = false;
+
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const comboEl = document.getElementById('combo-display');
+const hintEl = document.getElementById('tap-hint');
+const multFill = document.getElementById('multiplier-fill');
+
+bestEl.textContent = `BEST: ${bestScore}`;
+
+// --- STARFIELD ---
+(function buildStars() {
+  const count = 250;
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    pos[i * 3]     = (Math.random() - 0.5) * 50;
+    pos[i * 3 + 1] = (Math.random() - 0.5) * 50;
+    pos[i * 3 + 2] = -8 - Math.random() * 12;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.06, color: 0x99aacc, transparent: true, opacity: 0.5,
+  });
+  scene.add(new THREE.Points(geo, mat));
+})();
+
+// --- BOUNDARY RING (visual) ---
+(function buildBoundaryRing() {
+  const geo = new THREE.RingGeometry(8.9, 9.0, 80);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x334466, transparent: true, opacity: 0.25,
+    side: THREE.DoubleSide,
+  });
+  const ring = new THREE.Mesh(geo, mat);
+  ring.lookAt(camera.position);
+  scene.add(ring);
+})();
+
+// ============================================================
+// SHAPES
+// ============================================================
+const SHAPE_COUNT = 12;
+const ORBIT_RADIUS_MIN = 2.5;
+const ORBIT_RADIUS_MAX = 6.5;
+const BOUNDARY_RADIUS = 9.0;
+
+class Shape {
+  constructor() {
+    const gIdx = Math.floor(Math.random() * GEOS.length);
+    const cIdx = Math.floor(Math.random() * COLORS.length);
+    this.cIdx = cIdx;
+    const col = COLOR3[cIdx];
+
+    const mat = new THREE.MeshPhongMaterial({
+      color: COLORS[cIdx],
+      emissive: new THREE.Color(COLORS[cIdx]).multiplyScalar(0.18),
+      shininess: 90,
+      specular: new THREE.Color(0xffffff),
+      flatShading: true,
+    });
+    this.mesh = new THREE.Mesh(GEOS[gIdx], mat.clone());
+    this.mesh.userData.shape = this;
+
+    this.vel = new THREE.Vector3();
+    this.rotVel = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.06,
+      (Math.random() - 0.5) * 0.06,
+      (Math.random() - 0.5) * 0.04,
+    );
+    this.alive = true;
+    this._spawnDelay = Math.random() * 0.5; // stagger initial spawn
+    this._ready = false;
+    this.reset(true);
+    scene.add(this.mesh);
+  }
+
+  reset(initial = false) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = ORBIT_RADIUS_MIN + Math.random() * (ORBIT_RADIUS_MAX - ORBIT_RADIUS_MIN) * 0.6;
+    const z = (Math.random() - 0.5) * 3;
+    this.mesh.position.set(Math.cos(angle) * r, Math.sin(angle) * r, z);
+
+    // Orbital tangential velocity
+    const tangent = new THREE.Vector3(-Math.sin(angle), Math.cos(angle), 0);
+    const speed = 0.025 + Math.random() * 0.02;
+    this.vel.copy(tangent).multiplyScalar(speed);
+    this.vel.z = (Math.random() - 0.5) * 0.008;
+
+    this.alive = true;
+    this.mesh.visible = true;
+
+    if (initial) {
+      this.mesh.scale.setScalar(0.01);
+      this._ready = false;
+    } else {
+      this.mesh.scale.setScalar(0.01);
+      this._scaleIn = 0;
+      this._ready = false;
+    }
+  }
+
+  update(dt) {
+    if (!this.alive) return false;
+
+    // Scale-in animation on spawn
+    if (!this._ready) {
+      this._scaleIn = (this._scaleIn || 0) + dt * 3;
+      const s = Math.min(this._scaleIn, 1);
+      this.mesh.scale.setScalar(s * s * (3 - 2 * s)); // smoothstep
+      if (s >= 1) { this._ready = true; this.mesh.scale.setScalar(1); }
+      return false;
+    }
+
+    // Gravity toward center
+    const pos = this.mesh.position;
+    const dist = pos.length();
+    if (dist > 0.01) {
+      const gravStr = 0.0005 * Math.max(dist - 1.5, 0.1);
+      const toCenter = pos.clone().normalize().negate();
+      this.vel.addScaledVector(toCenter, gravStr);
+    }
+
+    // Soft inner boundary push (keep shapes from clustering at center)
+    if (dist < ORBIT_RADIUS_MIN) {
+      const outward = pos.clone().normalize();
+      this.vel.addScaledVector(outward, 0.002);
+    }
+
+    // Damping
+    this.vel.multiplyScalar(0.993);
+
+    // Integrate
+    const dtScale = dt * 60;
+    pos.x += this.vel.x * dtScale;
+    pos.y += this.vel.y * dtScale;
+    pos.z += this.vel.z * dtScale;
+
+    // Rotation
+    this.mesh.rotation.x += this.rotVel.x;
+    this.mesh.rotation.y += this.rotVel.y;
+    this.mesh.rotation.z += this.rotVel.z;
+
+    // Check boundary — score event
+    if (pos.length() > BOUNDARY_RADIUS) {
+      this._die();
+      return true; // scored
+    }
+
+    return false;
+  }
+
+  applyImpulse(dir, force) {
+    this.vel.addScaledVector(dir, force);
+    // Spin kick
+    this.rotVel.x += (Math.random() - 0.5) * 0.08;
+    this.rotVel.y += (Math.random() - 0.5) * 0.08;
+  }
+
+  _die() {
+    if (!this.alive) return;
+    this.alive = false;
+    this.mesh.visible = false;
+    spawnExplosion(this.mesh.position.clone(), this.cIdx, 28);
+    setTimeout(() => {
+      this._scaleIn = 0;
+      this.reset();
+    }, 1800 + Math.random() * 1200);
+  }
+}
+
+const shapes = Array.from({ length: SHAPE_COUNT }, () => new Shape());
+// Stagger initial scale-in
+shapes.forEach((s, i) => { s._scaleIn = -(i * 0.12); });
+
+// ============================================================
+// RIPPLE SYSTEM
+// ============================================================
+const RIPPLE_POOL = 6;
+const RIPPLE_SPEED = 9;
+const RIPPLE_MAX_R = 13;
+
+class Ripple {
+  constructor() {
+    // Outer glow ring
+    const geo = new THREE.RingGeometry(1, 1.08, 72);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.mesh = new THREE.Mesh(geo, mat);
+    this.active = false;
+    this.radius = 0;
+    this.origin = new THREE.Vector3();
+    // Billboard always faces camera
+    scene.add(this.mesh);
+  }
+
+  fire(worldPos) {
+    this.active = true;
+    this.radius = 0.1;
+    this.origin.copy(worldPos);
+    this.mesh.position.copy(worldPos);
+    this.mesh.material.color.setHex(0xffffff);
+    this.mesh.material.opacity = 1.0;
+    this.hitShapes = new Set();
+  }
+
+  update(dt) {
+    if (!this.active) return;
+
+    this.radius += RIPPLE_SPEED * dt;
+
+    const s = this.radius;
+    this.mesh.scale.set(s, s, 1);
+    this.mesh.quaternion.copy(camera.quaternion); // billboard
+    this.mesh.material.opacity = Math.max(0, 1.0 - (this.radius / RIPPLE_MAX_R));
+
+    // Push shapes when ring passes through them
+    shapes.forEach(shape => {
+      if (!shape.alive || !shape._ready) return;
+      if (this.hitShapes.has(shape)) return;
+
+      const dx = shape.mesh.position.x - this.origin.x;
+      const dy = shape.mesh.position.y - this.origin.y;
+      const dxy = Math.sqrt(dx * dx + dy * dy);
+
+      if (Math.abs(dxy - this.radius) < 0.7) {
+        this.hitShapes.add(shape);
+        const dir = new THREE.Vector3(dx, dy, shape.mesh.position.z - this.origin.z).normalize();
+        const proximity = 1.0 - (this.radius / RIPPLE_MAX_R);
+        const force = 0.10 + 0.08 * proximity;
+        shape.applyImpulse(dir, force);
+        // Small impact flash
+        spawnExplosion(shape.mesh.position.clone(), shape.cIdx, 6);
+      }
+    });
+
+    if (this.radius >= RIPPLE_MAX_R) {
+      this.active = false;
+      this.mesh.material.opacity = 0;
+    }
+  }
+}
+
+const ripples = Array.from({ length: RIPPLE_POOL }, () => new Ripple());
+
+function fireRipple(worldPos) {
+  const free = ripples.find(r => !r.active);
+  if (free) free.fire(worldPos.clone());
+}
+
+// ============================================================
+// PARTICLE SYSTEM
+// ============================================================
+const MAX_PARTICLES = 500;
+
+const pPos = new Float32Array(MAX_PARTICLES * 3);
+const pCol = new Float32Array(MAX_PARTICLES * 3);
+
+// Initialize all offscreen
+for (let i = 0; i < MAX_PARTICLES; i++) pPos[i * 3 + 1] = -999;
+
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+
+const pMat = new THREE.PointsMaterial({
+  size: 0.18, vertexColors: true, transparent: true, opacity: 0.95,
+  blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+});
+
+scene.add(new THREE.Points(pGeo, pMat));
+
+const _pVel = Array.from({ length: MAX_PARTICLES }, () => new THREE.Vector3());
+const _pLife = new Float32Array(MAX_PARTICLES);
+const _pMaxLife = new Float32Array(MAX_PARTICLES);
+const _pBaseColor = Array.from({ length: MAX_PARTICLES }, () => new THREE.Color());
+
+let pCursor = 0;
+
+function spawnExplosion(pos, cIdx, count) {
+  const base = COLOR3[cIdx];
+  for (let i = 0; i < count; i++) {
+    const idx = pCursor % MAX_PARTICLES;
+    pCursor++;
+
+    pPos[idx * 3]     = pos.x;
+    pPos[idx * 3 + 1] = pos.y;
+    pPos[idx * 3 + 2] = pos.z;
+
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const spd   = 0.04 + Math.random() * 0.12;
+    _pVel[idx].set(
+      Math.sin(phi) * Math.cos(theta) * spd,
+      Math.sin(phi) * Math.sin(theta) * spd,
+      Math.cos(phi) * spd,
+    );
+
+    const life = 0.5 + Math.random() * 0.7;
+    _pLife[idx] = life;
+    _pMaxLife[idx] = life;
+
+    const c = base.clone();
+    c.offsetHSL((Math.random() - 0.5) * 0.12, 0, (Math.random() - 0.5) * 0.2);
+    _pBaseColor[idx].copy(c);
+    pCol[idx * 3]     = c.r;
+    pCol[idx * 3 + 1] = c.g;
+    pCol[idx * 3 + 2] = c.b;
+  }
+}
+
+function updateParticles(dt) {
+  const dtScaled = dt * 60;
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    if (_pLife[i] <= 0) {
+      pPos[i * 3 + 1] = -999;
+      continue;
+    }
+    _pLife[i] -= dt;
+    _pVel[i].y -= 0.002 * dtScaled; // soft gravity
+    _pVel[i].multiplyScalar(0.975);
+    pPos[i * 3]     += _pVel[i].x * dtScaled;
+    pPos[i * 3 + 1] += _pVel[i].y * dtScaled;
+    pPos[i * 3 + 2] += _pVel[i].z * dtScaled;
+    const fade = Math.max(0, _pLife[i] / _pMaxLife[i]);
+    pCol[i * 3]     = _pBaseColor[i].r * fade;
+    pCol[i * 3 + 1] = _pBaseColor[i].g * fade;
+    pCol[i * 3 + 2] = _pBaseColor[i].b * fade;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.color.needsUpdate = true;
+}
+
+// ============================================================
+// SCORE / COMBO
+// ============================================================
+const COMBO_TIMEOUT_MS = 2200;
+const COMBO_COLORS = ['#fff', '#ffd', '#fd4', '#fa2', '#f62', '#f0f', '#0ff'];
+
+function scoreEvent() {
+  combo++;
+  clearTimeout(comboDecay);
+  comboDecay = setTimeout(() => { combo = 0; updateMultBar(); }, COMBO_TIMEOUT_MS);
+
+  const mult = Math.min(combo, 8);
+  const pts = 100 * mult;
+  score += pts;
+
+  if (score > bestScore) {
+    bestScore = score;
+    localStorage.setItem('novaTapBest', bestScore);
+    bestEl.textContent = `BEST: ${bestScore}`;
+  }
+
+  scoreEl.textContent = score;
+  updateMultBar();
+
+  if (combo >= 2) {
+    const colIdx = Math.min(combo - 2, COMBO_COLORS.length - 1);
+    comboEl.style.color = COMBO_COLORS[colIdx];
+    comboEl.style.textShadow = `0 0 20px ${COMBO_COLORS[colIdx]}`;
+    comboEl.textContent = combo >= 8 ? `ULTRA x${combo}!!` : `COMBO x${combo}!`;
+    comboEl.style.opacity = '1';
+    clearTimeout(comboEl._hide);
+    comboEl._hide = setTimeout(() => { comboEl.style.opacity = '0'; }, 900);
+    shakeAmount = Math.min(shakeAmount + 0.15 * mult, 1.8);
+  }
+}
+
+function updateMultBar() {
+  const pct = combo > 0 ? Math.min((COMBO_TIMEOUT_MS - 200) / COMBO_TIMEOUT_MS * 100, 100) : 0;
+  // Animate bar width based on combo level
+  const fill = Math.min(combo / 8, 1) * 100;
+  multFill.style.width = fill + '%';
+}
+
+// ============================================================
+// SCREEN SHAKE
+// ============================================================
+let shakeAmount = 0;
+const camBasePos = new THREE.Vector3(0, 0, 16);
+
+// ============================================================
+// INPUT
+// ============================================================
+const raycaster = new THREE.Raycaster();
+const _mouse = new THREE.Vector2();
+const _plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const _hitPoint = new THREE.Vector3();
+
+function worldFromPointer(cx, cy) {
+  _mouse.set((cx / W) * 2 - 1, -(cy / H) * 2 + 1);
+  raycaster.setFromCamera(_mouse, camera);
+  raycaster.ray.intersectPlane(_plane, _hitPoint);
+  return _hitPoint.clone();
+}
+
+function onTap(cx, cy) {
+  if (!firstTap) {
+    firstTap = true;
+    hintEl.classList.remove('fade');
+    hintEl.style.opacity = '0';
+  }
+
+  const wp = worldFromPointer(cx, cy);
+  fireRipple(wp);
+
+  // Instant area push for shapes very close to tap
+  shapes.forEach(s => {
+    if (!s.alive || !s._ready) return;
+    const dx = s.mesh.position.x - wp.x;
+    const dy = s.mesh.position.y - wp.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < 1.8) {
+      const dir = new THREE.Vector3(dx, dy, 0).normalize();
+      s.applyImpulse(dir, 0.08 * (1.8 - d) / 1.8);
+    }
+  });
+
+  // Visual flash at tap point
+  spawnExplosion(wp, Math.floor(Math.random() * COLORS.length), 10);
+  shakeAmount = Math.min(shakeAmount + 0.06, 1.8);
+}
+
+renderer.domElement.addEventListener('click', e => onTap(e.clientX, e.clientY));
+renderer.domElement.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onTap(t.clientX, t.clientY);
+}, { passive: false });
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+let lastTime = performance.now();
+let elapsed = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  elapsed += dt;
+
+  // Update shapes
+  shapes.forEach(s => {
+    if (s.update(dt)) scoreEvent();
+  });
+
+  // Update ripples
+  ripples.forEach(r => r.update(dt));
+
+  // Update particles
+  updateParticles(dt);
+
+  // Drift point lights
+  ptLights[0].position.x = Math.sin(elapsed * 0.3) * 5;
+  ptLights[0].position.y = Math.cos(elapsed * 0.2) * 5;
+  ptLights[1].position.x = Math.cos(elapsed * 0.25) * 6;
+  ptLights[1].position.y = Math.sin(elapsed * 0.35) * 4;
+  ptLights[2].position.x = Math.sin(elapsed * 0.18) * 4;
+  ptLights[2].position.y = Math.cos(elapsed * 0.28) * 6;
+
+  // Screen shake
+  if (shakeAmount > 0.005) {
+    camera.position.x = camBasePos.x + (Math.random() - 0.5) * shakeAmount * 0.15;
+    camera.position.y = camBasePos.y + (Math.random() - 0.5) * shakeAmount * 0.15;
+    shakeAmount *= 0.82;
+  } else {
+    camera.position.x = camBasePos.x;
+    camera.position.y = camBasePos.y;
+  }
+
+  // Slow camera Z breathe
+  camera.position.z = 16 + Math.sin(elapsed * 0.15) * 0.6;
+
+  renderer.render(scene, camera);
+}
+
+// Resize
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+
+// Boot
+animate();
+</script>
+</body>
+</html>

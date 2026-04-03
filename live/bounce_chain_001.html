@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>BOUNCE CHAIN</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;touch-action:none;font-family:'Arial',sans-serif}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;right:0;padding:14px 16px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
+#score{color:#fff;font-size:34px;font-weight:700;text-shadow:0 0 18px #0ff,0 0 4px #0ff;letter-spacing:2px}
+#combo{color:#ff0;font-size:22px;font-weight:700;text-shadow:0 0 14px #ff0;opacity:0;transition:opacity .25s}
+#lives{display:flex;gap:5px;padding-top:4px}
+.heart{font-size:22px;transition:all .3s}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;gap:12px}
+#title{color:#0ff;font-size:42px;font-weight:700;text-shadow:0 0 30px #0ff,0 0 60px #0ff;letter-spacing:4px;opacity:0;transition:opacity .4s}
+#sub{color:#fff;font-size:17px;opacity:0;transition:opacity .4s;text-align:center;line-height:1.6}
+#best{color:#ff0;font-size:20px;font-weight:700;text-shadow:0 0 12px #ff0;opacity:0;transition:opacity .4s}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="combo"></div>
+  <div id="lives">
+    <span class="heart" id="h0">♥</span>
+    <span class="heart" id="h1">♥</span>
+    <span class="heart" id="h2">♥</span>
+  </div>
+</div>
+<div id="overlay">
+  <div id="title">BOUNCE CHAIN</div>
+  <div id="sub"></div>
+  <div id="best"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// BOUNCE CHAIN — lane_004_unknown_798c24
+// Mechanic: tap below ball to spawn platform → ball bounces → chain multiplier
+// Atoms: PLATFORM_SPAWN_TAP, BOUNCE_CHAIN_COMBO, FALL_DEATH, COMBO_JUICE
+
+const W = window.innerWidth, H = window.innerHeight;
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04030f);
+scene.fog = new THREE.FogExp2(0x04030f, 0.04);
+
+const camera = new THREE.PerspectiveCamera(58, W/H, 0.1, 120);
+camera.position.set(0, 4, 16);
+camera.lookAt(0, 2, 0);
+
+// Lights
+scene.add(new THREE.AmbientLight(0x112244, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 0.4);
+sun.position.set(4, 12, 6);
+sun.castShadow = true;
+scene.add(sun);
+const ballLight = new THREE.PointLight(0x00ffff, 3.5, 14);
+scene.add(ballLight);
+const platLight = new THREE.PointLight(0xff00ff, 2.0, 10);
+scene.add(platLight);
+
+// Scrolling grid floor
+const grid = new THREE.GridHelper(60, 60, 0x001133, 0x000a22);
+grid.position.y = -8;
+scene.add(grid);
+
+// Side wall glow planes
+for (const sx of [-8.5, 8.5]) {
+  const wg = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.15, 80),
+    new THREE.MeshBasicMaterial({color: sx < 0 ? 0x002266 : 0x002266, transparent:true, opacity:0.35, side:THREE.DoubleSide})
+  );
+  wg.position.set(sx, 0, 0);
+  scene.add(wg);
+}
+
+// ─── BALL ───
+const ballGeo = new THREE.SphereGeometry(0.42, 20, 20);
+const ballMat = new THREE.MeshPhongMaterial({color:0x00ffff, emissive:0x007777, shininess:120});
+const ball = new THREE.Mesh(ballGeo, ballMat);
+ball.castShadow = true;
+scene.add(ball);
+
+// Ball inner glow
+const innerGeo = new THREE.SphereGeometry(0.28, 12, 12);
+const innerMat = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.55});
+const inner = new THREE.Mesh(innerGeo, innerMat);
+ball.add(inner);
+
+// Ball outer halo
+const haloGeo = new THREE.SphereGeometry(0.68, 10, 10);
+const haloMat = new THREE.MeshBasicMaterial({color:0x00ffff, transparent:true, opacity:0.08, side:THREE.BackSide});
+ball.add(new THREE.Mesh(haloGeo, haloMat));
+
+// ─── TRAIL ───
+const TRAIL_LEN = 24;
+const trail = [];
+for (let i = 0; i < TRAIL_LEN; i++) {
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(0.38*(1-i/TRAIL_LEN), 8, 8),
+    new THREE.MeshBasicMaterial({color:0x00ffff, transparent:true, opacity:0.35*(1-i/TRAIL_LEN)})
+  );
+  m.visible = false;
+  scene.add(m);
+  trail.push({mesh:m, pos:new THREE.Vector3()});
+}
+
+// ─── PLATFORMS ───
+const MAX_PLAT = 10;
+const plats = [];
+const PLAT_W = 3.2, PLAT_H = 0.22, PLAT_D = 0.9;
+const platGeo = new THREE.BoxGeometry(PLAT_W, PLAT_H, PLAT_D);
+for (let i = 0; i < MAX_PLAT; i++) {
+  const mat = new THREE.MeshPhongMaterial({color:0xff00ff, emissive:0x440044, shininess:90, transparent:true, opacity:1});
+  const m = new THREE.Mesh(platGeo, mat);
+  m.visible = false;
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+
+  // Plat edge glow strip
+  const strip = new THREE.Mesh(
+    new THREE.BoxGeometry(PLAT_W+0.1, 0.05, PLAT_D+0.1),
+    new THREE.MeshBasicMaterial({color:0xff44ff, transparent:true, opacity:0})
+  );
+  strip.position.y = 0.13;
+  m.add(strip);
+
+  plats.push({mesh:m, strip, active:false, age:0, maxAge:2.2, bounce:false});
+}
+
+// ─── PARTICLES ───
+const MAX_PART = 280;
+const parts = [];
+const pGeos = [
+  new THREE.SphereGeometry(0.1, 4, 4),
+  new THREE.BoxGeometry(0.11, 0.11, 0.11),
+  new THREE.TetrahedronGeometry(0.1)
+];
+for (let i = 0; i < MAX_PART; i++) {
+  const mat = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:1});
+  const m = new THREE.Mesh(pGeos[i%3], mat);
+  m.visible = false;
+  scene.add(m);
+  parts.push({mesh:m, vel:new THREE.Vector3(), life:0, maxLife:0});
+}
+
+function spawnParticles(pos, n, color, spd) {
+  let k = 0;
+  for (const p of parts) {
+    if (k >= n) break;
+    if (p.mesh.visible) continue;
+    p.mesh.visible = true;
+    p.mesh.position.copy(pos);
+    p.mesh.material.color.setHex(color);
+    const ang = Math.random()*Math.PI*2;
+    const elev = (Math.random()-0.3)*Math.PI;
+    p.vel.set(
+      Math.cos(ang)*Math.cos(elev)*spd*(0.5+Math.random()),
+      Math.sin(elev)*spd*(0.5+Math.random())+spd*0.4,
+      Math.sin(ang)*Math.cos(elev)*spd*0.4*(Math.random()-0.5)
+    );
+    p.life = 0;
+    p.maxLife = 0.35+Math.random()*0.45;
+    p.mesh.material.opacity = 1;
+    k++;
+  }
+}
+
+// ─── SCORE RING BURST ───
+const rings = [];
+const ringColors = [0x00ffff, 0xff00ff, 0xffff00];
+for (let i = 0; i < 3; i++) {
+  const m = new THREE.Mesh(
+    new THREE.TorusGeometry(0.9+i*0.35, 0.04, 6, 28),
+    new THREE.MeshBasicMaterial({color:ringColors[i], transparent:true, opacity:0})
+  );
+  ball.add(m);
+  rings.push({mesh:m, phase: i*Math.PI*0.66, spin:0});
+}
+
+// ─── STATE ───
+let state = 'start'; // start | play | dead
+let score = 0, combo = 0, lives = 3, highScore = 0;
+let ballPos = new THREE.Vector3(0, 4, 0);
+let ballVel = new THREE.Vector3(0, 0, 0);
+let cameraShake = 0, camTargetY = 4;
+let gameTime = 0, trailTick = 0;
+let trailBuf = [];
+const GRAVITY = -14;
+const BOUNCE_V = 9.2;
+const WALL_X = 7.8;
+const DEATH_Y = -14;
+
+// UI refs
+const scoreEl = document.getElementById('score');
+const comboEl = document.getElementById('combo');
+const titleEl = document.getElementById('title');
+const subEl   = document.getElementById('sub');
+const bestEl  = document.getElementById('best');
+const hearts  = [document.getElementById('h0'), document.getElementById('h1'), document.getElementById('h2')];
+
+function setHearts() {
+  hearts.forEach((h,i) => {
+    h.style.color = i < lives ? '#f06' : '#222';
+    h.style.textShadow = i < lives ? '0 0 10px #f06' : 'none';
+    h.style.opacity = i < lives ? '1' : '0.25';
+  });
+}
+
+function showCombo(n) {
+  if (n < 2) return;
+  comboEl.textContent = (n >= 5 ? '🔥 ' : '') + 'x'+n+' CHAIN!';
+  comboEl.style.opacity = '1';
+  clearTimeout(comboEl._t);
+  comboEl._t = setTimeout(() => comboEl.style.opacity='0', 900);
+}
+
+// ─── PLATFORM PLACEMENT ───
+function placePlatform(sx, sy) {
+  if (state !== 'play') return;
+  // Map screen X → world X
+  const ndcX = (sx/W)*2 - 1;
+  const worldX = Math.max(-WALL_X+1.8, Math.min(WALL_X-1.8, ndcX*7.5));
+  // Place platform below ball with small offset so player aims
+  const wy = ballPos.y - 1.4;
+
+  let slot = null;
+  let oldest = -1;
+  for (const p of plats) {
+    if (!p.active) { slot = p; break; }
+    if (p.age > oldest) { oldest = p.age; slot = p; }
+  }
+  if (!slot) return;
+
+  slot.active = true;
+  slot.age = 0;
+  slot.maxAge = 2.4;
+  slot.bounce = false;
+  slot.mesh.visible = true;
+  slot.mesh.position.set(worldX, wy, 0);
+  slot.mesh.scale.set(1, 1, 1);
+  slot.mesh.material.opacity = 1;
+  slot.mesh.material.color.setHex(0xff00ff);
+  slot.mesh.material.emissive.setHex(0x440044);
+  slot.strip.material.opacity = 0.9;
+
+  // Small spawn pulse
+  spawnParticles(new THREE.Vector3(worldX, wy+0.15, 0), 6, 0xff44ff, 3.5);
+  platLight.position.set(worldX, wy+0.5, 0);
+}
+
+// ─── BOUNCE CHECK ───
+const PART_COLORS = [0x00ffff, 0xff00ff, 0xffff00, 0xff8800, 0x44ff44, 0xff4444];
+
+function checkBounce() {
+  if (ballVel.y >= 0) return; // only check when falling
+  for (const p of plats) {
+    if (!p.active) continue;
+    const px = p.mesh.position.x;
+    const py = p.mesh.position.y;
+    const dy = ballPos.y - py;
+    if (dy > 0.55 && dy < 1.1) {
+      const dx = Math.abs(ballPos.x - px);
+      if (dx < PLAT_W*0.5 + 0.42) {
+        // BOUNCE
+        ballVel.y = BOUNCE_V + Math.min(combo*0.15, 1.5);
+        ballPos.y = py + 0.55 + 0.42;
+
+        if (!p.bounce) {
+          p.bounce = true;
+          combo++;
+          const pts = combo * 10;
+          score += pts;
+          scoreEl.textContent = score;
+          showCombo(combo);
+
+          // Color by combo
+          const hue = (combo*40)%360;
+          p.mesh.material.color.setHSL(hue/360, 1, 0.62);
+          p.mesh.material.emissive.setHSL(hue/360, 1, 0.15);
+          p.strip.material.opacity = 1;
+
+          // Shorten platform life after first bounce
+          p.maxAge = Math.max(p.maxAge - p.age + 0.7, 0.7);
+
+          // Particles
+          const col = PART_COLORS[combo % PART_COLORS.length];
+          const pcount = Math.min(20 + combo*3, 55);
+          spawnParticles(new THREE.Vector3(px, py+0.2, 0), pcount, col, 5+combo*0.4);
+
+          // Screen shake
+          cameraShake = Math.min(0.28 + combo*0.04, 0.72);
+
+          // Rings pulse
+          rings.forEach((r,i) => {
+            r.mesh.material.opacity = 0.9;
+            r.spin = (combo+i) * 1.4;
+          });
+
+          // Ball color flash
+          ballMat.emissive.setHex(col);
+          clearTimeout(ball._ct);
+          ball._ct = setTimeout(()=>ballMat.emissive.setHex(0x007777), 180);
+
+          // Point light pop
+          ballLight.color.setHex(col);
+          ballLight.intensity = 6;
+          setTimeout(()=>{ ballLight.color.setHex(0x00ffff); ballLight.intensity=3.5; }, 150);
+        }
+        return;
+      }
+    }
+  }
+  // Missed — reset combo
+  if (combo > 0) combo = 0;
+}
+
+// ─── LOSE LIFE ───
+function loseLife() {
+  lives--;
+  setHearts();
+  combo = 0;
+  spawnParticles(ballPos.clone(), 40, 0xff3333, 9);
+  cameraShake = 0.6;
+
+  if (lives <= 0) {
+    state = 'dead';
+    if (score > highScore) highScore = score;
+    showDead();
+  } else {
+    // Respawn ball
+    ballPos.set(0, camTargetY + 4, 0);
+    ballVel.set(0, -1, 0);
+  }
+}
+
+function showDead() {
+  titleEl.textContent = 'GAME OVER';
+  titleEl.style.opacity = '1';
+  subEl.innerHTML = 'Score: <b style="color:#0ff">' + score + '</b>';
+  subEl.style.opacity = '1';
+  bestEl.textContent = 'BEST: ' + highScore;
+  bestEl.style.opacity = highScore > 0 ? '1' : '0';
+  setTimeout(()=>{
+    subEl.innerHTML += '<br><span style="opacity:.6;font-size:15px">tap to play again</span>';
+  }, 600);
+}
+
+function showStart() {
+  titleEl.textContent = 'BOUNCE CHAIN';
+  titleEl.style.opacity = '1';
+  subEl.innerHTML = 'Tap below the ball<br>to place platforms';
+  subEl.style.opacity = '1';
+  bestEl.style.opacity = '0';
+}
+
+function startGame() {
+  state = 'play';
+  score = 0; combo = 0; lives = 3;
+  gameTime = 0; trailBuf = [];
+  cameraShake = 0;
+  ballPos.set(0, 4, 0);
+  ballVel.set((Math.random()-0.5)*1.5, -2, 0);
+  camTargetY = 4;
+  camera.position.y = 8;
+
+  plats.forEach(p => { p.active = false; p.mesh.visible = false; });
+  parts.forEach(p => { p.mesh.visible = false; });
+  trail.forEach(t => { t.mesh.visible = false; });
+
+  scoreEl.textContent = '0';
+  comboEl.style.opacity = '0';
+  titleEl.style.opacity = '0';
+  subEl.style.opacity = '0';
+  bestEl.style.opacity = '0';
+  setHearts();
+
+  // Spawn starter platform
+  setTimeout(()=>{
+    if (state === 'play') {
+      const slot = plats.find(p=>!p.active);
+      if (slot) {
+        slot.active = true; slot.age = 0; slot.maxAge = 3.5; slot.bounce = false;
+        slot.mesh.visible = true;
+        slot.mesh.position.set(0, ballPos.y-1.8, 0);
+        slot.mesh.scale.set(1,1,1);
+        slot.mesh.material.opacity = 1;
+        slot.mesh.material.color.setHex(0x00ffff);
+        slot.mesh.material.emissive.setHex(0x003333);
+        slot.strip.material.opacity = 0.8;
+      }
+    }
+  }, 300);
+}
+
+// ─── INPUT ───
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (state === 'start') { startGame(); return; }
+  if (state === 'dead')  {
+    titleEl.style.opacity='0'; subEl.style.opacity='0';
+    setTimeout(startGame, 250);
+    return;
+  }
+  placePlatform(e.clientX, e.clientY);
+}, {passive:false});
+
+// Resize
+window.addEventListener('resize', () => {
+  const w=window.innerWidth, h=window.innerHeight;
+  renderer.setSize(w,h);
+  camera.aspect = w/h;
+  camera.updateProjectionMatrix();
+});
+
+// ─── GAME LOOP ───
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  gameTime += dt;
+
+  // Rings spin & fade
+  rings.forEach((r, i) => {
+    r.phase += dt*(2+i*0.5);
+    r.mesh.rotation.x = Math.sin(r.phase)*Math.PI*0.6;
+    r.mesh.rotation.y = Math.cos(r.phase*0.8)*Math.PI;
+    r.mesh.rotation.z += dt*(r.spin+i*0.3);
+    r.mesh.material.opacity = Math.max(0, r.mesh.material.opacity*0.88);
+    if (r.spin > 0) r.spin *= 0.94;
+  });
+
+  // Inner glow pulse
+  innerMat.opacity = 0.45 + Math.sin(gameTime*5)*0.1;
+
+  // Grid scroll
+  grid.position.y = camTargetY - 14;
+
+  if (state === 'play') {
+    // Physics
+    ballVel.y += GRAVITY*dt;
+    if (ballVel.y < -22) ballVel.y = -22;
+    ballPos.x += ballVel.x*dt;
+    ballPos.y += ballVel.y*dt;
+
+    // Wall bounce
+    if (ballPos.x > WALL_X) { ballPos.x = WALL_X; ballVel.x = -Math.abs(ballVel.x)*0.9; spawnParticles(ballPos.clone(),8,0x4488ff,4); }
+    if (ballPos.x < -WALL_X) { ballPos.x = -WALL_X; ballVel.x = Math.abs(ballVel.x)*0.9; spawnParticles(ballPos.clone(),8,0x4488ff,4); }
+
+    // Bounce check
+    checkBounce();
+
+    // Fall death
+    if (ballPos.y < camTargetY - 12) {
+      loseLife();
+    }
+
+    // Camera target — follow ball up, drift down slowly
+    if (ballPos.y > camTargetY) camTargetY = ballPos.y;
+    else camTargetY -= dt*0.8;
+
+    // Update platforms
+    for (const p of plats) {
+      if (!p.active) continue;
+      p.age += dt;
+      const t = p.age / p.maxAge;
+      if (t >= 1) {
+        p.active = false; p.mesh.visible = false; continue;
+      }
+      // Fade last 30%
+      if (t > 0.7) {
+        const fade = 1-(t-0.7)/0.3;
+        p.mesh.material.opacity = fade;
+        p.mesh.scale.x = fade*0.85+0.15;
+        p.strip.material.opacity = fade;
+      }
+      // Pulsing strip
+      p.strip.material.opacity = Math.max(0, p.strip.material.opacity) * (0.94 + Math.sin(gameTime*6)*0.04);
+    }
+
+    // Particles
+    for (const p of parts) {
+      if (!p.mesh.visible) continue;
+      p.life += dt;
+      if (p.life >= p.maxLife) { p.mesh.visible = false; continue; }
+      p.vel.y += GRAVITY*dt*0.25;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      p.mesh.material.opacity = 1 - p.life/p.maxLife;
+      p.mesh.rotation.x += dt*3;
+      p.mesh.rotation.z += dt*2;
+    }
+
+    // Trail
+    trailTick += dt;
+    if (trailTick > 0.018) {
+      trailTick = 0;
+      trailBuf.unshift(ballPos.clone());
+      if (trailBuf.length > TRAIL_LEN) trailBuf.pop();
+    }
+    trail.forEach((t,i) => {
+      if (i < trailBuf.length) {
+        t.mesh.visible = true;
+        t.mesh.position.copy(trailBuf[i]);
+        t.mesh.material.opacity = 0.32*(1-i/TRAIL_LEN);
+      } else {
+        t.mesh.visible = false;
+      }
+    });
+  }
+
+  // Ball mesh + rolling
+  ball.position.copy(ballPos);
+  ball.rotation.z += ballVel.x*dt*0.18;
+  ball.rotation.x += Math.abs(ballVel.y)*dt*0.06;
+
+  // Ball light
+  ballLight.position.copy(ballPos);
+  ballLight.position.y += 0.5;
+
+  // Camera smooth follow
+  const camY = camTargetY + 5;
+  camera.position.y += (camY - camera.position.y)*dt*5.5;
+  camera.lookAt(0, camera.position.y-3, 0);
+
+  // Screen shake
+  if (cameraShake > 0) {
+    camera.position.x = (Math.random()-0.5)*cameraShake;
+    camera.position.z = 16 + (Math.random()-0.5)*cameraShake*0.5;
+    cameraShake -= dt*5;
+    if (cameraShake < 0) { cameraShake=0; camera.position.x=0; camera.position.z=16; }
+  }
+
+  renderer.render(scene, camera);
+}
+
+// Init
+showStart();
+setHearts();
+animate();
+</script>
+</body>
+</html>

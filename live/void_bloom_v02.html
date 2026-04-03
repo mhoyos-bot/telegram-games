@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>VOID BLOOM</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #060110; overflow: hidden; touch-action: none; font-family: monospace; }
+    canvas { display: block; }
+    @keyframes shake-sm {
+      0%,100% { transform: translate(0,0) rotate(0deg); }
+      20% { transform: translate(-3px,2px) rotate(-0.4deg); }
+      50% { transform: translate(3px,-2px) rotate(0.4deg); }
+      80% { transform: translate(-2px,1px) rotate(-0.2deg); }
+    }
+    @keyframes shake-hard {
+      0%,100% { transform: translate(0,0) rotate(0deg); }
+      15% { transform: translate(-5px,4px) rotate(-0.8deg); }
+      35% { transform: translate(5px,-4px) rotate(0.8deg); }
+      55% { transform: translate(-4px,5px) rotate(-0.6deg); }
+      75% { transform: translate(4px,-2px) rotate(0.5deg); }
+    }
+    canvas.sh-sm   { animation: shake-sm   0.25s ease-out; }
+    canvas.sh-hard { animation: shake-hard 0.35s ease-out; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none;
+    }
+    #score { color: #fff; font: bold 26px/1 monospace; text-shadow: 0 0 18px rgba(160,80,255,0.9); }
+    #combo { color: rgba(80,255,200,0.95); font: bold 17px/1 monospace;
+             text-shadow: 0 0 12px rgba(80,255,200,0.6); min-width: 80px; text-align: center; }
+    #lives { color: rgba(255,100,160,0.9); font: 22px/1 monospace; letter-spacing: 4px; }
+    #feedback {
+      position: fixed; top: 42%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 34px/1 monospace; pointer-events: none; opacity: 0;
+      transition: opacity 0.12s; white-space: nowrap; text-shadow: 0 0 20px currentColor;
+    }
+    #hint {
+      position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.22); font: 11px/1 monospace; letter-spacing: 0.12em;
+      pointer-events: none; transition: opacity 1.5s;
+    }
+    #hint.faded { opacity: 0; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(6,1,16,0.85);
+    }
+    #overlay h1 { color: #fff; font: bold 42px/1.3 monospace; margin-bottom: 8px;
+                  text-shadow: 0 0 24px rgba(160,80,255,0.9); }
+    #overlay .sub  { color: rgba(255,255,255,0.45); font: 14px/1 monospace; margin-bottom: 6px; }
+    #overlay .final { color: rgba(80,255,200,0.9); font: bold 22px/1 monospace; margin: 16px 0 24px; }
+    #restart {
+      background: rgba(160,80,255,0.12); border: 1px solid rgba(160,80,255,0.4);
+      color: rgba(160,80,255,0.9); font: bold 18px/1 monospace; padding: 13px 36px;
+      cursor: pointer; letter-spacing: 0.1em;
+    }
+    #restart:active { background: rgba(160,80,255,0.25); }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div id="score">00000</div>
+    <div id="combo"></div>
+    <div id="lives">♥♥♥</div>
+  </div>
+  <div id="feedback"></div>
+  <div id="hint">TAP AT FULL BLOOM FOR PERFECT</div>
+  <div id="overlay" style="display:none">
+    <h1 id="ov-title">BLOOM FADED</h1>
+    <div class="sub" id="ov-sub">THE VOID RECLAIMS</div>
+    <div class="final" id="ov-score">SCORE: 00000</div>
+    <button id="restart">BLOOM AGAIN</button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  // ── STATE ──────────────────────────────────────────────────────────
+  let score = 0, combo = 0, lives = 3, gameActive = false;
+  let blooms = [], particles = [];
+  let spawnTick = 0, diffTick = 0;
+  let spawnInterval = 1900, bloomLifetime = 3000;
+  let camShake = 0, feedbackTimer = 0;
+  const usedSlots = new Set();
+  const camBase = new THREE.Vector3(0, 13, 16);
+
+  // ── RENDERER ────────────────────────────────────────────────────────
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.insertBefore(renderer.domElement, document.getElementById('hud'));
+  const cvs = renderer.domElement;
+
+  // ── CSS SHAKE ───────────────────────────────────────────────────────
+  function cssShake(cls) {
+    cvs.classList.remove('sh-sm', 'sh-hard');
+    void cvs.offsetWidth; // force reflow to restart animation
+    cvs.classList.add(cls);
+    cvs.addEventListener('animationend', () => cvs.classList.remove(cls), { once: true });
+  }
+
+  // ── SCENE ───────────────────────────────────────────────────────────
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x060110);
+  scene.fog = new THREE.Fog(0x060110, 16, 38);
+
+  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 80);
+  camera.position.copy(camBase);
+  camera.lookAt(0, 0, 0);
+
+  // ── LIGHTS ──────────────────────────────────────────────────────────
+  scene.add(new THREE.AmbientLight(0x200830, 3.5));
+  const sun = new THREE.DirectionalLight(0xc060ff, 1.2);
+  sun.position.set(8, 14, 6); scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x40ffc0, 0.55);
+  fill.position.set(-8, 6, -8); scene.add(fill);
+  const rim = new THREE.DirectionalLight(0xff4080, 0.35);
+  rim.position.set(0, 4, -12); scene.add(rim);
+
+  // ── GROUND ──────────────────────────────────────────────────────────
+  const gGeo = new THREE.PlaneGeometry(30, 30, 26, 26);
+  const gPos = gGeo.attributes.position;
+  for (let i = 0; i < gPos.count; i++) {
+    const x = gPos.getX(i), z = gPos.getZ(i);
+    if (Math.sqrt(x * x + z * z) > 5) gPos.setY(i, (Math.random() - 0.5) * 0.9);
+  }
+  gGeo.computeVertexNormals();
+  const ground = new THREE.Mesh(gGeo, new THREE.MeshLambertMaterial({ color: 0x100822, flatShading: true }));
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+
+  // Central glow disc — adds contrast to screenshot
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(5.8, 32),
+    new THREE.MeshBasicMaterial({ color: 0x1e0850, transparent: true, opacity: 0.6 })
+  );
+  disc.rotation.x = -Math.PI / 2; disc.position.y = 0.02; scene.add(disc);
+
+  // Cracks (brighter purple)
+  for (let i = 0; i < 14; i++) {
+    const a = Math.random() * Math.PI * 2, r = 1 + Math.random() * 10, len = 0.5 + Math.random() * 2;
+    const cm = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.02, len),
+      new THREE.MeshBasicMaterial({ color: 0x6020b0 })
+    );
+    cm.position.set(Math.cos(a) * r, 0.01, Math.sin(a) * r);
+    cm.rotation.y = a + Math.random() * 0.8;
+    scene.add(cm);
+  }
+
+  // Rocks
+  for (let i = 0; i < 18; i++) {
+    const r = 5 + Math.random() * 9, a = Math.random() * Math.PI * 2, s = 0.25 + Math.random() * 0.55;
+    const rock = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(s, 0),
+      new THREE.MeshLambertMaterial({ color: 0x1e0c32, flatShading: true })
+    );
+    rock.position.set(Math.cos(a) * r, s * 0.4, Math.sin(a) * r);
+    rock.rotation.set(Math.random(), Math.random() * 2, Math.random());
+    scene.add(rock);
+  }
+
+  // Dead trees
+  function deadTree(x, z) {
+    const g = new THREE.Group();
+    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x140a24, flatShading: true });
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.18, 1.8, 5), trunkMat);
+    trunk.position.y = 0.9; g.add(trunk);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2 + Math.random() * 0.5, len = 0.5 + Math.random() * 0.8;
+      const br = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.08, len, 4), trunkMat);
+      br.position.set(Math.cos(a) * 0.35, 1.5 + Math.random() * 0.3, Math.sin(a) * 0.35);
+      br.rotation.z = (Math.random() - 0.5) * 0.8; g.add(br);
+    }
+    g.position.set(x, 0, z); scene.add(g);
+  }
+  [[-7,-6],[7,-7],[-8,4],[9,5],[-5,8],[6,9],[-9,-1],[10,-4],[0,-9],[3,-7]].forEach(([x,z])=>deadTree(x,z));
+
+  // ── STARS (visual diversity — always visible) ───────────────────────
+  const starCols = [0xffffff, 0xd0a8ff, 0x80ffee, 0xff90c0, 0xffe880, 0x80c8ff];
+  for (let i = 0; i < 70; i++) {
+    const a = Math.random() * Math.PI * 2, el = Math.random() * 0.55 + 0.2, r = 12 + Math.random() * 7;
+    const star = new THREE.Mesh(
+      new THREE.SphereGeometry(0.08 + Math.random() * 0.09, 4, 4),
+      new THREE.MeshBasicMaterial({ color: starCols[Math.floor(Math.random() * starCols.length)] })
+    );
+    star.position.set(Math.cos(a) * r * Math.cos(el), r * Math.sin(el), Math.sin(a) * r * Math.cos(el));
+    scene.add(star);
+  }
+
+  // ── SPAWN SLOTS ─────────────────────────────────────────────────────
+  const SLOTS = [
+    [-2.8,0,-2.6],[2.8,0,-2.6],[-3.6,0,0.4],[3.6,0,0.4],[-2.0,0,3.2],[2.0,0,3.2],[0,0,-4.0]
+  ];
+
+  SLOTS.forEach(([x,,z]) => {
+    // Glowing ring under each slot — boosts contrast
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.62, 0.88, 18),
+      new THREE.MeshBasicMaterial({ color: 0x7030d0, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+    );
+    ring.rotation.x = -Math.PI / 2; ring.position.set(x, 0.03, z); scene.add(ring);
+    // Stones
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const st = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.07, 0.11, 0.28, 5),
+        new THREE.MeshLambertMaterial({ color: 0x3a1860, flatShading: true })
+      );
+      st.position.set(x + Math.cos(a) * 0.75, 0.14, z + Math.sin(a) * 0.75);
+      st.rotation.set(Math.random() * 0.25, Math.random() * Math.PI, 0);
+      scene.add(st);
+    }
+  });
+
+  // ── BLOOM PALETTES ──────────────────────────────────────────────────
+  const PALETTES = [
+    { core: 0xb050ff, glow: new THREE.Color(0xb050ff), petals: 0xdd99ff },
+    { core: 0x28ffcc, glow: new THREE.Color(0x28ffcc), petals: 0x80ffee },
+    { core: 0xff2888, glow: new THREE.Color(0xff2888), petals: 0xff80c0 },
+    { core: 0x28aaff, glow: new THREE.Color(0x28aaff), petals: 0x80d4ff },
+    { core: 0xffcc08, glow: new THREE.Color(0xffcc08), petals: 0xffe060 },
+    { core: 0xff5818, glow: new THREE.Color(0xff5818), petals: 0xffaa60 },
+    { core: 0x18ff58, glow: new THREE.Color(0x18ff58), petals: 0x80ffaa },
+  ];
+
+  // ── SPAWN BLOOM ─────────────────────────────────────────────────────
+  function spawnBloom() {
+    if (!gameActive) return;
+    const avail = SLOTS.map((_, i) => i).filter(i => !usedSlots.has(i));
+    if (!avail.length) return;
+    const slotIdx = avail[Math.floor(Math.random() * avail.length)];
+    const [sx, sy, sz] = SLOTS[slotIdx];
+    usedSlots.add(slotIdx);
+    const pal = PALETTES[Math.floor(Math.random() * PALETTES.length)];
+    const group = new THREE.Group();
+
+    const stem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.1, 1.2, 5),
+      new THREE.MeshLambertMaterial({ color: pal.core, flatShading: true, emissive: pal.glow, emissiveIntensity: 0.28 })
+    );
+    stem.position.y = 0.6; group.add(stem);
+
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const petal = new THREE.Mesh(
+        new THREE.ConeGeometry(0.18, 0.55, 4),
+        new THREE.MeshLambertMaterial({ color: pal.petals, flatShading: true, emissive: pal.glow, emissiveIntensity: 0.5 })
+      );
+      petal.position.set(Math.cos(a) * 0.38, 1.3, Math.sin(a) * 0.38);
+      petal.rotation.z = Math.PI * 0.55; petal.rotation.y = a;
+      group.add(petal);
+    }
+
+    const bulb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.22, 5, 4),
+      new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: pal.glow, emissiveIntensity: 1.3, flatShading: true })
+    );
+    bulb.position.y = 1.3; group.add(bulb);
+
+    const pLight = new THREE.PointLight(pal.glow, 0, 5.5);
+    pLight.position.y = 1.3; group.add(pLight);
+
+    group.position.set(sx, -0.4, sz);
+    group.scale.setScalar(0.01);
+    scene.add(group);
+
+    const life = bloomLifetime;
+    blooms.push({
+      group, pLight, slotIdx, pal, age: 0, life,
+      riseEnd: life * 0.25, peakEnd: life * 0.75,
+      perfStart: life * 0.38, perfEnd: life * 0.62,
+      baseY: sy, hit: false, state: 'rising', riseTrailTick: 0
+    });
+  }
+
+  // ── PARTICLES ───────────────────────────────────────────────────────
+  function burst(pos, color, n, speed) {
+    const spd = speed || 1;
+    for (let i = 0; i < n; i++) {
+      const sz = 0.055 + Math.random() * 0.08;
+      const useRing = Math.random() < 0.28;
+      const geo = useRing
+        ? new THREE.RingGeometry(sz * 0.5, sz, 6)
+        : new THREE.OctahedronGeometry(sz, 0);
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1, side: THREE.DoubleSide });
+      const m = new THREE.Mesh(geo, mat);
+      m.position.copy(pos); scene.add(m);
+      const vel = new THREE.Vector3(
+        (Math.random() - 0.5) * 6 * spd,
+        (Math.random() * 7 + 2) * spd,
+        (Math.random() - 0.5) * 6 * spd
+      );
+      particles.push({ m, vel, life: 0, max: 500 + Math.random() * 400 });
+    }
+  }
+
+  function ringExplosion(pos, color) {
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const m = new THREE.Mesh(
+        new THREE.RingGeometry(0.1, 0.24, 8),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+      );
+      m.position.copy(pos); m.rotation.x = Math.PI / 2; scene.add(m);
+      const vel = new THREE.Vector3(Math.cos(a) * 4.5, 0.8 + Math.random() * 2, Math.sin(a) * 4.5);
+      particles.push({ m, vel, life: 0, max: 380 });
+    }
+  }
+
+  function riseTrail(pos, color) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(0.038 + Math.random() * 0.03, 3, 3),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.75 })
+    );
+    m.position.copy(pos).add(new THREE.Vector3((Math.random()-0.5)*0.3, 0, (Math.random()-0.5)*0.3));
+    scene.add(m);
+    particles.push({
+      m,
+      vel: new THREE.Vector3((Math.random()-0.5)*0.4, 0.9+Math.random()*0.6, (Math.random()-0.5)*0.4),
+      life: 0, max: 350 + Math.random() * 200
+    });
+  }
+
+  function missParticles(pos) {
+    const cols = [0xff1838, 0x880018, 0xff5870];
+    for (let i = 0; i < 20; i++) {
+      const m = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.065 + Math.random() * 0.055, 0),
+        new THREE.MeshBasicMaterial({ color: cols[Math.floor(Math.random()*cols.length)], transparent: true, opacity: 1 })
+      );
+      m.position.copy(pos); scene.add(m);
+      const vel = new THREE.Vector3(
+        (Math.random()-0.5)*6, Math.random()*4+1, (Math.random()-0.5)*6
+      );
+      particles.push({ m, vel, life: 0, max: 420 + Math.random() * 200 });
+    }
+  }
+
+  // ── HIT DETECTION ───────────────────────────────────────────────────
+  const ray = new THREE.Raycaster();
+  const mUV = new THREE.Vector2();
+
+  function onPointer(e) {
+    if (!gameActive) return;
+    const cx = e.clientX ?? e.touches?.[0]?.clientX;
+    const cy = e.clientY ?? e.touches?.[0]?.clientY;
+    if (cx == null) return;
+    mUV.x =  (cx / innerWidth)  * 2 - 1;
+    mUV.y = -(cy / innerHeight) * 2 + 1;
+    ray.setFromCamera(mUV, camera);
+    const targets = [];
+    for (const b of blooms) {
+      if (!b.hit && b.state !== 'fading') {
+        for (const ch of b.group.children) targets.push(ch);
+      }
+    }
+    const hits = ray.intersectObjects(targets);
+    if (!hits.length) return;
+    const hitChild = hits[0].object;
+    const bloom = blooms.find(b => b.group.children.includes(hitChild));
+    if (bloom && !bloom.hit) tapBloom(bloom);
+  }
+
+  // ── TAP BLOOM ───────────────────────────────────────────────────────
+  const feedbackEl = document.getElementById('feedback');
+  function showFeedback(txt, col) {
+    feedbackEl.textContent = txt;
+    feedbackEl.style.color = col;
+    feedbackEl.style.opacity = '1';
+    feedbackTimer = 600;
+  }
+
+  function tapBloom(bloom) {
+    bloom.hit = true;
+    const perfect = bloom.age >= bloom.perfStart && bloom.age <= bloom.perfEnd;
+    combo++;
+    score += (perfect ? 25 : 10) * combo;
+    const bPos = new THREE.Vector3().copy(bloom.group.position).add(new THREE.Vector3(0, 1.3, 0));
+
+    if (perfect) {
+      showFeedback('PERFECT!', 'rgba(80,255,200,0.95)');
+      camShake = 0.32; cssShake('sh-sm');
+      burst(bPos, bloom.pal.glow, 36, 1.25);
+      ringExplosion(bPos, bloom.pal.core);
+    } else {
+      showFeedback(combo > 1 ? `GOOD ×${combo}` : 'GOOD', 'rgba(200,150,255,0.95)');
+      camShake = 0.16; cssShake('sh-sm');
+      burst(bPos, bloom.pal.glow, 20, 1.0);
+    }
+    updateHUD(); removeBloom(bloom);
+  }
+
+  function missBloom(bloom) {
+    if (!gameActive) return;
+    lives--; combo = 0;
+    camShake = 0.45; cssShake('sh-hard');
+    showFeedback('MISS', 'rgba(255,80,120,0.95)');
+    missParticles(new THREE.Vector3().copy(bloom.group.position).add(new THREE.Vector3(0, 0.8, 0)));
+    updateHUD(); removeBloom(bloom);
+    if (lives <= 0) endGame();
+  }
+
+  function removeBloom(bloom) {
+    usedSlots.delete(bloom.slotIdx);
+    scene.remove(bloom.group);
+    blooms = blooms.filter(b => b !== bloom);
+  }
+
+  // ── HUD ─────────────────────────────────────────────────────────────
+  const scoreEl = document.getElementById('score');
+  const comboEl = document.getElementById('combo');
+  const livesEl = document.getElementById('lives');
+  function updateHUD() {
+    scoreEl.textContent = String(score).padStart(5, '0');
+    comboEl.textContent = combo > 1 ? `×${combo}` : '';
+    livesEl.textContent = '♥'.repeat(Math.max(0, lives)) + '♡'.repeat(Math.max(0, 3 - lives));
+  }
+
+  // ── GAME FLOW ────────────────────────────────────────────────────────
+  function startGame() {
+    score = 0; combo = 0; lives = 3;
+    spawnInterval = 1900; bloomLifetime = 3000;
+    gameActive = true;
+    blooms.forEach(b => scene.remove(b.group)); blooms = [];
+    usedSlots.clear();
+    particles.forEach(p => scene.remove(p.m)); particles = [];
+    document.getElementById('overlay').style.display = 'none';
+    const hint = document.getElementById('hint');
+    hint.classList.remove('faded');
+    setTimeout(() => hint.classList.add('faded'), 3500);
+    updateHUD(); spawnTick = 0; diffTick = 0;
+    spawnBloom();
+  }
+
+  function endGame() {
+    gameActive = false;
+    document.getElementById('ov-title').textContent = 'BLOOM FADED';
+    document.getElementById('ov-sub').textContent  = score >= 500 ? 'THE VOID IS IMPRESSED' : 'THE VOID RECLAIMS';
+    document.getElementById('ov-score').textContent = `SCORE: ${String(score).padStart(5,'0')}`;
+    document.getElementById('overlay').style.display = 'flex';
+  }
+
+  // ── ANIMATE ─────────────────────────────────────────────────────────
+  let last = 0;
+  function animate(ts) {
+    requestAnimationFrame(animate);
+    const dt = Math.min(ts - last, 50); last = ts;
+    if (dt <= 0) return;
+
+    // Camera shake
+    if (camShake > 0.001) {
+      camera.position.x = camBase.x + (Math.random() - 0.5) * camShake * 1.2;
+      camera.position.y = camBase.y + (Math.random() - 0.5) * camShake * 0.6;
+      camShake *= 0.8;
+    } else {
+      camera.position.lerp(camBase, 0.15);
+    }
+
+    // Feedback fade
+    if (feedbackTimer > 0) { feedbackTimer -= dt; if (feedbackTimer <= 0) feedbackEl.style.opacity = '0'; }
+
+    // Spawn + difficulty
+    if (gameActive) {
+      spawnTick += dt;
+      if (spawnTick >= spawnInterval) {
+        spawnTick = 0; spawnBloom();
+        if (Math.random() < 0.22 + (3000 - bloomLifetime) / 10000)
+          setTimeout(spawnBloom, spawnInterval * 0.45);
+      }
+      diffTick += dt;
+      if (diffTick >= 8000) {
+        diffTick = 0;
+        spawnInterval = Math.max(700, spawnInterval - 160);
+        bloomLifetime  = Math.max(1700, bloomLifetime - 220);
+      }
+    }
+
+    // Update blooms
+    const expired = [];
+    for (const b of blooms) {
+      if (b.hit) continue;
+      b.age += dt;
+      if (b.age < b.riseEnd) {
+        b.state = 'rising';
+        const eased = 1 - Math.pow(1 - b.age / b.riseEnd, 3);
+        b.group.scale.setScalar(eased);
+        b.group.position.y = b.baseY + eased * 0.6;
+        b.pLight.intensity = eased * 1.5;
+        // Rise trail particles
+        b.riseTrailTick += dt;
+        if (b.riseTrailTick >= 80) {
+          b.riseTrailTick = 0;
+          riseTrail(new THREE.Vector3().copy(b.group.position).add(new THREE.Vector3(0, 0.6, 0)), b.pal.core);
+        }
+      } else if (b.age < b.peakEnd) {
+        b.state = 'peak';
+        const pulse = 1 + Math.sin(b.age * 0.007) * 0.08;
+        b.group.scale.setScalar(pulse);
+        b.group.position.y = b.baseY + 0.6;
+        b.group.rotation.y += 0.014;
+        b.pLight.intensity = 2.1 + Math.sin(b.age * 0.009) * 0.6;
+      } else if (b.age < b.life) {
+        b.state = 'fading';
+        const p = 1 - (b.age - b.peakEnd) / (b.life - b.peakEnd);
+        b.group.scale.setScalar(p);
+        b.group.position.y = b.baseY + p * 0.6;
+        b.pLight.intensity = p * 1.8;
+      } else {
+        expired.push(b);
+      }
+    }
+    expired.forEach(b => missBloom(b));
+
+    // Update particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life += dt;
+      const t = p.life / p.max;
+      p.vel.y -= 0.018 * dt;
+      p.m.position.addScaledVector(p.vel, dt * 0.001);
+      p.m.scale.setScalar(1 - t);
+      p.m.material.opacity = 1 - t;
+      if (t >= 1) { scene.remove(p.m); particles.splice(i, 1); }
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  // ── EVENTS ──────────────────────────────────────────────────────────
+  window.addEventListener('pointerdown', onPointer);
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+  document.getElementById('restart').addEventListener('click', startGame);
+
+  if (window.Telegram?.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
+
+  startGame();
+  animate(0);
+  </script>
+</body>
+</html>

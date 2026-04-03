@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>ROOT BURST</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #040c08; overflow: hidden; touch-action: none; font-family: 'Courier New', monospace; }
+    canvas { display: block; position: fixed; inset: 0; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 16px 20px; pointer-events: none;
+    }
+    #score { color: #4eff91; font: bold 32px/1 monospace; text-shadow: 0 0 20px rgba(78,255,145,0.8); }
+    #mult { color: #ffcc44; font: bold 15px/1 monospace; margin-top: 6px; min-height: 16px;
+            text-shadow: 0 0 12px rgba(255,204,68,0.7); }
+    #lives { color: rgba(255,100,80,0.9); font: 22px/1 monospace; letter-spacing: 4px; }
+    #level { color: rgba(140,210,170,0.55); font: 11px/1 monospace; margin-top: 4px;
+             letter-spacing: 0.18em; text-align: right; }
+    #pop {
+      position: fixed; z-index: 20; top: 35%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 42px/1 monospace; pointer-events: none; opacity: 0;
+      text-shadow: 0 0 28px currentColor; white-space: nowrap;
+    }
+    #flash { position: fixed; inset: 0; z-index: 5; pointer-events: none; opacity: 0; }
+    #hint {
+      position: fixed; z-index: 10; bottom: 32px; left: 50%; transform: translateX(-50%);
+      color: rgba(78,255,145,0.4); font: 12px/1 monospace; letter-spacing: 0.2em;
+      pointer-events: none; transition: opacity 2s;
+    }
+    #hint.gone { opacity: 0; }
+    #overlay {
+      position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(4,12,8,0.93);
+    }
+    #overlay h1 { color: #4eff91; font: bold 48px/1.1 monospace; margin-bottom: 8px;
+                  text-shadow: 0 0 32px rgba(78,255,145,0.7); letter-spacing: 0.08em; }
+    #overlay .sub { color: rgba(78,255,145,0.35); font: 11px/1 monospace;
+                    letter-spacing: 0.25em; margin-bottom: 30px; }
+    #final-score { color: #ffcc44; font: bold 18px/1.7 monospace; margin-bottom: 36px; text-align: center; }
+    #play-btn {
+      background: rgba(78,255,145,0.07); border: 1px solid rgba(78,255,145,0.4);
+      color: rgba(78,255,145,0.9); font: bold 15px/1 monospace; padding: 16px 52px;
+      cursor: pointer; letter-spacing: 0.18em;
+    }
+    #play-btn:active { background: rgba(78,255,145,0.2); }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <div>
+    <div id="score">0</div>
+    <div id="mult"></div>
+  </div>
+  <div style="text-align:right">
+    <div id="lives">♦♦♦</div>
+    <div id="level">DEPTH 1</div>
+  </div>
+</div>
+<div id="pop"></div>
+<div id="flash"></div>
+<div id="hint">TAP THE ROOTS WHEN THEY GLOW</div>
+<div id="overlay">
+  <h1>ROOT BURST</h1>
+  <div class="sub">WILD LANDS · SMASH THE ANCIENT ROOTS</div>
+  <div id="final-score"></div>
+  <button id="play-btn">DESCEND</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+'use strict';
+
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+// ── CONSTANTS ──────────────────────────────────────────────────────────────────
+const ROOT_SLOTS = [
+  [-3.5, 0, -1.5], [-1.0, 0, -2.5], [ 1.8, 0, -2.0], [ 3.6, 0, -1.0],
+  [-2.8, 0,  0.5], [ 0.0, 0,  0.0], [ 2.8, 0,  0.5],
+  [-3.2, 0,  2.2], [-0.6, 0,  2.8], [ 2.2, 0,  2.6],
+];
+const PEAK_HEIGHT    = 1.6;   // how high roots rise
+const RISE_TIME      = 0.38;  // seconds to rise to peak
+const HOLD_TIME      = 0.32;  // seconds at peak (tap window)
+const FALL_TIME      = 0.28;  // seconds to fall
+const BEAT_INTERVAL  = 1.6;   // base seconds between new roots
+const COLORS = [0x4eff91, 0x44ffdd, 0x88ff44, 0xaaffbb, 0x66ffaa];
+
+// ── STATE ──────────────────────────────────────────────────────────────────────
+const G = {
+  score: 0, combo: 0, maxCombo: 0, lives: 3,
+  depth: 1, running: false,
+  roots: [],       // active root objects
+  particles: [],   // burst particles
+  nextSpawn: 0.8,
+  spawnCount: 0,
+  shakeTime: 0,
+  shakeAmt: 0,
+  elapsed: 0,
+};
+
+// ── THREE SETUP ─────────────────────────────────────────────────────────────────
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x040c08);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x040c08, 0.055);
+
+const camera = new THREE.PerspectiveCamera(52, W / H, 0.1, 80);
+camera.position.set(0, 7, 11);
+camera.lookAt(0, 0.5, 0);
+
+// Lights
+const ambient = new THREE.AmbientLight(0x112208, 1.6);
+scene.add(ambient);
+const keyLight = new THREE.DirectionalLight(0x4eff91, 1.2);
+keyLight.position.set(3, 10, 5);
+scene.add(keyLight);
+const rimLight = new THREE.PointLight(0x226644, 2.0, 22);
+rimLight.position.set(-5, 4, -4);
+scene.add(rimLight);
+
+// ── GROUND ─────────────────────────────────────────────────────────────────────
+const groundGeo = new THREE.PlaneGeometry(22, 22, 12, 12);
+// Slightly randomize vertices for organic feel
+const groundPos = groundGeo.attributes.position;
+for (let i = 0; i < groundPos.count; i++) {
+  groundPos.setY(i, (Math.random() - 0.5) * 0.12);
+}
+groundPos.needsUpdate = true;
+groundGeo.computeVertexNormals();
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x0a1a0e });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// Ground rune circles at each slot
+ROOT_SLOTS.forEach(([x, , z]) => {
+  const rg = new THREE.RingGeometry(0.38, 0.44, 20);
+  const rm = new THREE.MeshBasicMaterial({
+    color: 0x1a3a22, side: THREE.DoubleSide, transparent: true, opacity: 0.7
+  });
+  const r = new THREE.Mesh(rg, rm);
+  r.rotation.x = -Math.PI / 2;
+  r.position.set(x, 0.01, z);
+  scene.add(r);
+});
+
+// ── TREES ───────────────────────────────────────────────────────────────────────
+const treeTrunkMat = new THREE.MeshLambertMaterial({ color: 0x0d1a0f });
+const treeLeafMat  = new THREE.MeshLambertMaterial({ color: 0x0e2012 });
+function makeTree(x, z, scale) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.1 * scale, 0.16 * scale, 1.2 * scale, 6),
+    treeTrunkMat
+  );
+  trunk.position.y = 0.6 * scale;
+  g.add(trunk);
+  const canopy = new THREE.Mesh(
+    new THREE.ConeGeometry(0.65 * scale, 1.8 * scale, 7),
+    treeLeafMat
+  );
+  canopy.position.y = 1.9 * scale;
+  g.add(canopy);
+  const cap = new THREE.Mesh(
+    new THREE.ConeGeometry(0.4 * scale, 1.1 * scale, 7),
+    treeLeafMat
+  );
+  cap.position.y = 3.0 * scale;
+  g.add(cap);
+  g.position.set(x, 0, z);
+  scene.add(g);
+}
+
+const treePositions = [
+  [-7,  -6, 0.9], [-9,  -2, 1.1], [-8,   2, 0.8], [-7,   6, 1.0],
+  [ 7,  -6, 1.0], [ 9,  -1, 0.9], [ 8,   3, 1.2], [ 6,   7, 0.8],
+  [-3,  -7, 0.7], [ 0,  -8, 1.1], [ 3,  -7, 0.9], [-4,   7, 0.8],
+  [ 2,   8, 1.0], [ 5,  -9, 0.7], [-6,  -9, 0.8],
+];
+treePositions.forEach(([x, z, s]) => makeTree(x, z, s));
+
+// Mossy rocks
+const rockMat = new THREE.MeshLambertMaterial({ color: 0x162010 });
+[[-5, 1.2], [5.5, -0.5], [-4.5, -2], [6, 2.8], [0, -5]].forEach(([x, z]) => {
+  const rg = new THREE.IcosahedronGeometry(0.35 + Math.random() * 0.25, 0);
+  const r = new THREE.Mesh(rg, rockMat);
+  r.position.set(x, 0.15, z);
+  r.rotation.y = Math.random() * Math.PI;
+  scene.add(r);
+});
+
+// ── ROOT OBJECT FACTORY ─────────────────────────────────────────────────────────
+function makeRootObj(slotIdx) {
+  const [sx, , sz] = ROOT_SLOTS[slotIdx];
+  const col = COLORS[Math.floor(Math.random() * COLORS.length)];
+  const group = new THREE.Group();
+
+  // Main spike (root shape)
+  const spikeMat = new THREE.MeshLambertMaterial({ color: col, emissive: col, emissiveIntensity: 0.2 });
+  const spike = new THREE.Mesh(new THREE.ConeGeometry(0.18, 1.4, 6), spikeMat);
+  spike.position.y = 0.7;
+  group.add(spike);
+
+  // Secondary tendrils
+  for (let i = 0; i < 3; i++) {
+    const tm = new THREE.MeshLambertMaterial({ color: col, emissive: col, emissiveIntensity: 0.15 });
+    const t = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.7, 5), tm);
+    const angle = (i / 3) * Math.PI * 2 + Math.random() * 0.4;
+    t.position.set(Math.cos(angle) * 0.22, 0.35, Math.sin(angle) * 0.22);
+    t.rotation.z = Math.random() * 0.6 - 0.3;
+    t.rotation.x = Math.random() * 0.4 - 0.2;
+    t.scale.y = 0.8 + Math.random() * 0.4;
+    group.add(t);
+  }
+
+  // Glow ring at base
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: col, side: THREE.DoubleSide, transparent: true, opacity: 0.8
+  });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.36, 20), ringMat);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.02;
+  group.add(ring);
+
+  group.position.set(sx, -1.6, sz); // start underground
+  scene.add(group);
+
+  return {
+    group,
+    spikeMat,
+    ringMat,
+    slotIdx,
+    col,
+    phase: 'rising',  // rising | peak | falling | dead
+    t: 0,
+    hit: false,
+    alive: true,
+  };
+}
+
+// ── PARTICLES ───────────────────────────────────────────────────────────────────
+function spawnBurst(x, y, z, col, count) {
+  for (let i = 0; i < count; i++) {
+    const geo = new THREE.IcosahedronGeometry(0.05 + Math.random() * 0.07, 0);
+    const mat = new THREE.MeshBasicMaterial({ color: col });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    const speed = 1.8 + Math.random() * 2.5;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.random() * Math.PI;
+    scene.add(m);
+    G.particles.push({
+      mesh: m,
+      vx: Math.sin(phi) * Math.cos(theta) * speed,
+      vy: Math.cos(phi) * speed * 0.7 + 1.5,
+      vz: Math.sin(phi) * Math.sin(theta) * speed,
+      life: 1.0,
+    });
+  }
+}
+
+function spawnGroundRing(x, z, col) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: col, side: THREE.DoubleSide, transparent: true, opacity: 0.9
+  });
+  const m = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.18, 20), mat);
+  m.rotation.x = -Math.PI / 2;
+  m.position.set(x, 0.04, z);
+  scene.add(m);
+  G.particles.push({ mesh: m, isRing: true, life: 1.0, scale: 0.1 });
+}
+
+// ── HUD HELPERS ─────────────────────────────────────────────────────────────────
+const $score = document.getElementById('score');
+const $mult  = document.getElementById('mult');
+const $lives = document.getElementById('lives');
+const $level = document.getElementById('level');
+const $pop   = document.getElementById('pop');
+const $flash = document.getElementById('flash');
+const $hint  = document.getElementById('hint');
+
+function showPop(text, color) {
+  $pop.textContent = text;
+  $pop.style.color = color;
+  $pop.style.opacity = '1';
+  $pop.style.transform = 'translate(-50%, -50%) scale(1.0)';
+  clearTimeout(showPop._t);
+  showPop._t = setTimeout(() => {
+    $pop.style.transition = 'opacity 0.4s, transform 0.4s';
+    $pop.style.opacity = '0';
+    $pop.style.transform = 'translate(-50%, -60%) scale(0.8)';
+  }, 350);
+}
+
+function flashScreen(color, strength) {
+  $flash.style.background = color;
+  $flash.style.opacity = String(strength);
+  $flash.style.transition = 'none';
+  requestAnimationFrame(() => {
+    $flash.style.transition = 'opacity 0.25s';
+    $flash.style.opacity = '0';
+  });
+}
+
+function updateHUD() {
+  $score.textContent = G.score;
+  $lives.textContent = '♦'.repeat(G.lives) + '◇'.repeat(Math.max(0, 3 - G.lives));
+  $level.textContent = `DEPTH ${G.depth}`;
+  $mult.textContent = G.combo >= 2 ? `×${G.combo} COMBO` : '';
+}
+
+// ── SHAKE ───────────────────────────────────────────────────────────────────────
+const camBase = camera.position.clone();
+function shake(amt, dur) {
+  G.shakeAmt = amt;
+  G.shakeTime = dur;
+}
+
+// ── OCCUPIED SLOTS TRACKING ──────────────────────────────────────────────────────
+const occupiedSlots = new Set();
+
+// ── SPAWN LOGIC ─────────────────────────────────────────────────────────────────
+function getSpawnInterval() {
+  // Gets faster and spawns more as depth increases
+  return Math.max(0.55, BEAT_INTERVAL - G.depth * 0.08);
+}
+
+function spawnRoot() {
+  const free = ROOT_SLOTS.map((_, i) => i).filter(i => !occupiedSlots.has(i));
+  if (free.length === 0) return;
+  const idx = free[Math.floor(Math.random() * free.length)];
+  occupiedSlots.add(idx);
+  G.roots.push(makeRootObj(idx));
+}
+
+// ── GAME OVER / RESTART ──────────────────────────────────────────────────────────
+function endGame() {
+  G.running = false;
+  // Clean up all roots
+  G.roots.forEach(r => { if (r.alive) { scene.remove(r.group); } });
+  G.roots = [];
+  G.particles.forEach(p => scene.remove(p.mesh));
+  G.particles = [];
+  occupiedSlots.clear();
+
+  const ov = document.getElementById('overlay');
+  const fs = document.getElementById('final-score');
+  fs.textContent = `SCORE: ${G.score}\nBEST COMBO: ×${G.maxCombo}`;
+  document.getElementById('play-btn').textContent = 'DESCEND AGAIN';
+  ov.style.display = 'flex';
+}
+
+function startGame() {
+  G.score = 0; G.combo = 0; G.maxCombo = 0; G.lives = 3;
+  G.depth = 1; G.running = true;
+  G.roots = []; G.particles = [];
+  G.nextSpawn = 0.6; G.spawnCount = 0; G.elapsed = 0;
+  occupiedSlots.clear();
+  updateHUD();
+  document.getElementById('overlay').style.display = 'none';
+  setTimeout(() => { $hint.classList.add('gone'); }, 3000);
+  // Spawn first root immediately
+  spawnRoot();
+}
+
+document.getElementById('play-btn').addEventListener('click', startGame);
+document.getElementById('play-btn').addEventListener('touchstart', e => {
+  e.preventDefault(); startGame();
+}, { passive: false });
+
+// ── TAP / CLICK HANDLING ─────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const pointer   = new THREE.Vector2();
+
+function onTap(cx, cy) {
+  if (!G.running) return;
+  pointer.x =  (cx / W) * 2 - 1;
+  pointer.y = -(cy / H) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+
+  // Collect all meshes from live roots (expanded hitbox)
+  let bestRoot = null, bestDist = Infinity;
+  G.roots.forEach(root => {
+    if (!root.alive || root.hit || root.phase === 'dead') return;
+    const [sx, , sz] = ROOT_SLOTS[root.slotIdx];
+    // Check distance in 2D screen space from slot center
+    const worldPos = new THREE.Vector3(sx, 1.0, sz);
+    worldPos.project(camera);
+    const sx2 = (worldPos.x * 0.5 + 0.5) * W;
+    const sy2 = (-worldPos.y * 0.5 + 0.5) * H;
+    const dist = Math.hypot(cx - sx2, cy - sy2);
+    if (dist < 80 && dist < bestDist) { // 80px touch radius
+      bestDist = dist;
+      bestRoot = root;
+    }
+  });
+
+  if (!bestRoot) return;
+
+  bestRoot.hit = true;
+  const isPeak = bestRoot.phase === 'peak';
+  const isRising = bestRoot.phase === 'rising' && bestRoot.t > 0.6;
+  const isFalling = bestRoot.phase === 'falling' && bestRoot.t < 0.4;
+
+  const [sx, , sz] = ROOT_SLOTS[bestRoot.slotIdx];
+
+  if (isPeak) {
+    // PERFECT
+    G.combo++;
+    G.maxCombo = Math.max(G.maxCombo, G.combo);
+    const pts = 100 * Math.min(G.combo, 8);
+    G.score += pts;
+    showPop(G.combo >= 3 ? `PERFECT ×${G.combo}` : 'PERFECT!', '#4eff91');
+    flashScreen('rgba(78,255,145,0.25)', 0.25);
+    spawnBurst(sx, 1.5, sz, bestRoot.col, 20);
+    spawnGroundRing(sx, sz, bestRoot.col);
+    shake(0.18, 0.22);
+  } else if (isRising || isFalling) {
+    // GOOD
+    G.combo++;
+    G.maxCombo = Math.max(G.maxCombo, G.combo);
+    const pts = 50 * Math.min(G.combo, 8);
+    G.score += pts;
+    showPop('GOOD', '#ffcc44');
+    spawnBurst(sx, 1.0, sz, bestRoot.col, 10);
+    shake(0.08, 0.12);
+  } else {
+    // Too early/late tap on rising from below
+    G.combo = 0;
+    showPop('EARLY', '#ff8844');
+  }
+
+  // Kill root visually
+  bestRoot.phase = 'dead';
+  scene.remove(bestRoot.group);
+  occupiedSlots.delete(bestRoot.slotIdx);
+  updateHUD();
+}
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  onTap(e.clientX, e.clientY);
+});
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
+let lastTime = 0;
+function animate(ts) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((ts - lastTime) / 1000, 0.08);
+  lastTime = ts;
+
+  if (!G.running) { renderer.render(scene, camera); return; }
+
+  G.elapsed += dt;
+  G.depth = 1 + Math.floor(G.elapsed / 20); // new depth every 20s
+
+  // Spawn
+  G.nextSpawn -= dt;
+  if (G.nextSpawn <= 0) {
+    // Spawn 1 root, or 2 at depth 3+
+    spawnRoot();
+    if (G.depth >= 3 && Math.random() < 0.35) spawnRoot();
+    G.nextSpawn = getSpawnInterval() + (Math.random() - 0.5) * 0.3;
+  }
+
+  // Update roots
+  const deadRoots = [];
+  G.roots.forEach(root => {
+    if (!root.alive) return;
+    if (root.phase === 'dead') { root.alive = false; return; }
+
+    root.t += dt;
+
+    let y, emissive;
+    if (root.phase === 'rising') {
+      const progress = root.t / RISE_TIME;
+      y = -1.6 + PEAK_HEIGHT * Math.min(progress, 1.0);
+      emissive = progress * 0.6;
+      if (root.t >= RISE_TIME) { root.phase = 'peak'; root.t = 0; }
+    } else if (root.phase === 'peak') {
+      y = -1.6 + PEAK_HEIGHT;
+      emissive = 0.8 + Math.sin(root.t * 12) * 0.2; // pulse at peak
+      if (root.t >= HOLD_TIME) { root.phase = 'falling'; root.t = 0; }
+    } else if (root.phase === 'falling') {
+      const progress = root.t / FALL_TIME;
+      y = (-1.6 + PEAK_HEIGHT) * (1.0 - progress);
+      emissive = 0.3 * (1 - progress);
+      if (root.t >= FALL_TIME && !root.hit) {
+        // MISS — lost a life
+        root.phase = 'dead';
+        root.alive = false;
+        occupiedSlots.delete(root.slotIdx);
+        scene.remove(root.group);
+        G.combo = 0;
+        G.lives--;
+        const [sx, , sz] = ROOT_SLOTS[root.slotIdx];
+        flashScreen('rgba(255,60,40,0.35)', 0.35);
+        showPop('MISSED!', '#ff4444');
+        shake(0.25, 0.3);
+        updateHUD();
+        if (G.lives <= 0) endGame();
+        return;
+      }
+    }
+
+    root.group.position.y = y;
+    root.spikeMat.emissiveIntensity = emissive;
+    root.ringMat.opacity = emissive * 0.9;
+  });
+
+  G.roots = G.roots.filter(r => r.alive);
+
+  // Update particles
+  const deadParts = [];
+  G.particles.forEach(p => {
+    p.life -= dt * 2.2;
+    if (p.life <= 0) {
+      scene.remove(p.mesh);
+      deadParts.push(p);
+      return;
+    }
+    if (p.isRing) {
+      p.scale += dt * 5.0;
+      p.mesh.scale.setScalar(p.scale);
+      p.mesh.material.opacity = p.life * 0.9;
+    } else {
+      p.vy -= 6 * dt;
+      p.mesh.position.x += p.vx * dt;
+      p.mesh.position.y += p.vy * dt;
+      p.mesh.position.z += p.vz * dt;
+      p.mesh.material.opacity !== undefined
+        ? (p.mesh.material.opacity = p.life)
+        : null;
+    }
+  });
+  G.particles = G.particles.filter(p => !deadParts.includes(p));
+
+  // Camera shake
+  if (G.shakeTime > 0) {
+    G.shakeTime -= dt;
+    const s = G.shakeAmt * (G.shakeTime / 0.3);
+    camera.position.set(
+      camBase.x + (Math.random() - 0.5) * s,
+      camBase.y + (Math.random() - 0.5) * s * 0.5,
+      camBase.z + (Math.random() - 0.5) * s
+    );
+  } else {
+    camera.position.copy(camBase);
+  }
+
+  // Subtle ambient crown animation
+  const t = ts * 0.001;
+  rimLight.intensity = 1.8 + Math.sin(t * 0.7) * 0.4;
+
+  renderer.render(scene, camera);
+}
+
+// ── RESIZE ─────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  const nw = window.innerWidth, nh = window.innerHeight;
+  camera.aspect = nw / nh;
+  camera.updateProjectionMatrix();
+  renderer.setSize(nw, nh);
+});
+
+// ── START ──────────────────────────────────────────────────────────────────────
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

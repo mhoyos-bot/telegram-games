@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>SOLAR FANG</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#00000a;overflow:hidden;touch-action:none;font-family:monospace;user-select:none;-webkit-user-select:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;right:0;z-index:10;pointer-events:none;padding:max(env(safe-area-inset-top,0px),12px) 16px 0}
+#row1{display:flex;justify-content:space-between;align-items:flex-start}
+#score{color:#00ffcc;font:bold 34px/1 monospace;text-shadow:0 0 16px #00ffcc}
+#wave{color:#ffaa00;font:11px monospace;opacity:.9;padding-top:6px;letter-spacing:1px;text-shadow:0 0 8px #ffaa00}
+#hp{display:flex;gap:5px;padding-top:5px}
+.hd{font-size:20px}
+#xb{position:fixed;bottom:0;left:0;right:0;height:3px;background:#001122;z-index:10}
+#xf{height:100%;background:#00ffcc;width:0%;box-shadow:0 0 7px #00ffcc;transition:width 0.12s}
+#combo{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);color:#ffaa00;font:bold 22px/1 monospace;text-shadow:0 0 14px #ffaa00;opacity:0;z-index:10;pointer-events:none;white-space:nowrap;transition:opacity 0.12s}
+#lvl{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(0,0,10,0.92);z-index:20;backdrop-filter:blur(6px)}
+#lvl h2{color:#00ffcc;font:bold 28px monospace;text-shadow:0 0 22px #00ffcc;letter-spacing:3px}
+#lvl .sub{color:#336655;font:12px monospace;margin-top:-8px}
+#lvcards{display:flex;flex-direction:column;gap:11px;align-items:center;width:100%}
+.uc{background:rgba(0,255,204,0.05);border:1.5px solid rgba(0,255,204,0.5);color:#ccffee;font:bold 14px/1.5 monospace;padding:12px 20px;border-radius:8px;cursor:pointer;width:82%;max-width:300px;text-align:center;transition:background .13s;display:block}
+.uc:active,.uc:hover{background:rgba(0,255,204,0.14)}
+.ui2{font-size:24px;display:block;margin-bottom:3px}
+.un{font-size:15px;color:#00ffcc;display:block}
+.ud{font-size:11px;color:#336655;display:block;margin-top:2px}
+#go{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(0,0,8,0.97);z-index:20}
+#go h1{color:#00ffcc;font:bold 42px monospace;text-shadow:0 0 28px #00ffcc;letter-spacing:5px}
+#go .sub{color:#ffaa00;font:bold 16px monospace;text-shadow:0 0 10px #ffaa00}
+#go .sc{color:#888;font:17px monospace}
+#rb{background:#00ffcc;color:#000;font:bold 18px monospace;padding:13px 42px;border:none;border-radius:8px;cursor:pointer;letter-spacing:3px;margin-top:4px;box-shadow:0 0 18px #00ffcc}
+.sfloat{position:fixed;pointer-events:none;font:bold 16px monospace;z-index:15;transition:none}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="row1">
+    <div id="score">0</div>
+    <div id="wave">WAVE 1</div>
+  </div>
+  <div id="hp"></div>
+</div>
+<div id="combo"></div>
+<div id="xb"><div id="xf"></div></div>
+
+<div id="lvl">
+  <h2>LEVEL UP</h2>
+  <div class="sub">CHOOSE UPGRADE</div>
+  <div id="lvcards"></div>
+</div>
+
+<div id="go">
+  <h1>SOLAR FANG</h1>
+  <div class="sub">GAME OVER</div>
+  <div class="sc" id="gsc"></div>
+  <div class="sc" id="gbst"></div>
+  <button id="rb">RETRY</button>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── SOLAR FANG — roguelike_run_005 ─────────────────────────────────────────────
+// Atoms: ORBITAL_MOVEMENT, CORE_DEFENDER_LOOP, RADIAL_AUTO_FIRE, COMBO_PROXIMITY_BURST
+// Mechanic: roguelike_run | Feel: juice | Time-to-fun: <10s
+// Distinct from 004 (3-lane auto-runner): radial orbit, defend-the-core loop, hold-to-orbit
+
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const imp = v => tg?.HapticFeedback?.impactOccurred?.(v);
+const ntf = v => tg?.HapticFeedback?.notificationOccurred?.(v);
+
+// ── RENDERER ──────────────────────────────────────────────────────────────────
+const W = () => window.innerWidth, H = () => window.innerHeight;
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W(), H());
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  renderer.setSize(W(), H());
+  cam.aspect = W()/H();
+  cam.updateProjectionMatrix();
+});
+
+// ── SCENE ─────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x00000a, 0.028);
+
+// ── CAMERA ────────────────────────────────────────────────────────────────────
+const cam = new THREE.PerspectiveCamera(55, W()/H(), 0.1, 120);
+cam.position.set(0, 19, 9);
+cam.lookAt(0, 0, 0);
+const CAM_BASE = {x:0, y:19, z:9};
+
+// ── LIGHTS ────────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x112233, 3));
+const dir = new THREE.DirectionalLight(0x33ccff, 1.2);
+dir.position.set(0, 10, 5);
+scene.add(dir);
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const ORBIT_R         = 4.5;
+const ORBIT_SPD_BASE  = 2.6; // rad/s
+const SPAWN_R_MIN     = 11;
+const SPAWN_R_MAX     = 15;
+const CORE_HIT_R      = 1.3;
+const NOVA_INT        = 10;
+const E_COLS          = [0xff3300, 0xff6600, 0xcc0055, 0xaa00dd, 0xff0044, 0xff5500];
+
+// ── STAR FIELD ────────────────────────────────────────────────────────────────
+{
+  const geo = new THREE.BufferGeometry();
+  const n = 200;
+  const pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    pos[i*3]   = (Math.random()-.5)*100;
+    pos[i*3+1] = (Math.random()-.5)*18 - 4;
+    pos[i*3+2] = (Math.random()-.5)*100;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({color:0xffffff, size:0.12, sizeAttenuation:true})));
+}
+
+// ── ORBIT RING ────────────────────────────────────────────────────────────────
+const orbitRing = new THREE.Mesh(
+  new THREE.TorusGeometry(ORBIT_R, 0.04, 8, 80),
+  new THREE.MeshBasicMaterial({color:0x004433, transparent:true, opacity:0.55})
+);
+orbitRing.rotation.x = Math.PI/2;
+scene.add(orbitRing);
+
+// Danger ring (shows enemy spawn boundary)
+const dangerRing = new THREE.Mesh(
+  new THREE.TorusGeometry(SPAWN_R_MIN * 0.88, 0.025, 6, 64),
+  new THREE.MeshBasicMaterial({color:0x440011, transparent:true, opacity:0.28})
+);
+dangerRing.rotation.x = Math.PI/2;
+scene.add(dangerRing);
+
+// ── CENTRAL CORE ──────────────────────────────────────────────────────────────
+const coreMesh = new THREE.Mesh(
+  new THREE.DodecahedronGeometry(0.78, 0),
+  new THREE.MeshBasicMaterial({color:0xffd700})
+);
+scene.add(coreMesh);
+
+// Core glow rings (3 concentric, animate separately)
+const CORE_RINGS = [];
+for (let i = 0; i < 3; i++) {
+  const m = new THREE.Mesh(
+    new THREE.TorusGeometry(1.1 + i*0.22, 0.055 - i*0.012, 8, 40),
+    new THREE.MeshBasicMaterial({color:0xffaa00, transparent:true, opacity:0.5 - i*0.12})
+  );
+  m.rotation.x = Math.PI/2;
+  m.rotation.z = (i * Math.PI) / 3;
+  scene.add(m);
+  CORE_RINGS.push(m);
+}
+
+// ── PLAYER ───────────────────────────────────────────────────────────────────
+const playerGeo = new THREE.ConeGeometry(0.3, 0.68, 6);
+playerGeo.rotateX(-Math.PI/2); // tip at local -Z → lookAt points tip at target
+const playerMat = new THREE.MeshBasicMaterial({color:0x00ffcc});
+const playerMesh = new THREE.Mesh(playerGeo, playerMat);
+scene.add(playerMesh);
+
+// Player engine glow
+const engGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(0.2, 8, 8),
+  new THREE.MeshBasicMaterial({color:0x00ffcc, transparent:true, opacity:0.4})
+);
+scene.add(engGlow);
+
+// ── OBJECT POOLS ──────────────────────────────────────────────────────────────
+// Enemies
+const MAX_E = 22;
+const E_POOL = [];
+for (let i = 0; i < MAX_E; i++) {
+  const geo = (i % 3 === 0)
+    ? new THREE.TetrahedronGeometry(0.5, 0)
+    : new THREE.OctahedronGeometry(0.44, 0);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color:E_COLS[i % E_COLS.length]}));
+  mesh.visible = false;
+  scene.add(mesh);
+  E_POOL.push({mesh, active:false, x:0, z:0, vx:0, vz:0, hp:1, rx:0, rz:0});
+}
+
+// Bullets
+const MAX_B = 55;
+const B_POOL = [];
+for (let i = 0; i < MAX_B; i++) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.14, 6, 6),
+    new THREE.MeshBasicMaterial({color:0x00ffff})
+  );
+  mesh.visible = false;
+  scene.add(mesh);
+  B_POOL.push({mesh, active:false, x:0, z:0, vx:0, vz:0, life:0, pierce:false});
+}
+
+// Particles
+const MAX_P = 90;
+const P_POOL = [];
+for (let i = 0; i < MAX_P; i++) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09, 4, 4),
+    new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:1})
+  );
+  mesh.visible = false;
+  scene.add(mesh);
+  P_POOL.push({mesh, active:false, x:0, y:0, z:0, vx:0, vy:0, vz:0, life:0, maxLife:1});
+}
+
+// Score floats
+const SF_ELS = [];
+for (let i = 0; i < 10; i++) {
+  const el = document.createElement('div');
+  el.className = 'sfloat';
+  el.style.display = 'none';
+  document.body.appendChild(el);
+  SF_ELS.push({el, active:false, sx:0, sy:0, vy:0, life:0, maxLife:1});
+}
+
+// ── DOM REFS ──────────────────────────────────────────────────────────────────
+const scoreEl   = document.getElementById('score');
+const waveEl    = document.getElementById('wave');
+const hpEl      = document.getElementById('hp');
+const xfEl      = document.getElementById('xf');
+const comboEl   = document.getElementById('combo');
+const lvlEl     = document.getElementById('lvl');
+const lvCardsEl = document.getElementById('lvcards');
+const goEl      = document.getElementById('go');
+const gscEl     = document.getElementById('gsc');
+const gbstEl    = document.getElementById('gbst');
+document.getElementById('rb').addEventListener('click', resetGame);
+
+// ── UPGRADES ──────────────────────────────────────────────────────────────────
+const UPGS = [
+  {id:'speed',     name:'ORBIT BOOST',  desc:'Orbit 40% faster',           icon:'⚡'},
+  {id:'multishot', name:'TWIN FANG',    desc:'Fire 3 shots (spread)',       icon:'✦'},
+  {id:'shield',    name:'CORE SHIELD',  desc:'+2 HP, nova on core hit',     icon:'🔺'},
+  {id:'range',     name:'LONG FANG',    desc:'Bullets travel 50% further',  icon:'◈'},
+  {id:'rapidfire', name:'RAPID FIRE',   desc:'Double fire rate',            icon:'⋇'},
+  {id:'nova',      name:'NOVA BURST',   desc:'AOE kill wave every 10s',     icon:'★'},
+  {id:'homing',    name:'SEEK FANG',    desc:'Bullets curve toward enemies',icon:'↯'},
+  {id:'pierce',    name:'PIERCE SHOT',  desc:'Bullets pass through enemies',icon:'→'},
+];
+const acq = {};
+
+// ── GAME STATE ────────────────────────────────────────────────────────────────
+let state   = 'playing';
+let angle   = 0;
+let hp, score, xp, xpNext, level, wave;
+let combo, comboT;
+let fireT, FIRE_RATE;
+let waveT, WAVE_INT;
+let novaT   = 0;
+let camShake = 0;
+
+// ── INPUT ─────────────────────────────────────────────────────────────────────
+let inputL = false, inputR = false;
+const ptrsL = new Set(), ptrsR = new Set();
+
+function onPtrDown(e) {
+  if (state !== 'playing') return;
+  renderer.domElement.setPointerCapture(e.pointerId);
+  (e.clientX < W()/2 ? ptrsL : ptrsR).add(e.pointerId);
+  inputL = ptrsL.size > 0; inputR = ptrsR.size > 0;
+}
+function onPtrUp(e) {
+  ptrsL.delete(e.pointerId); ptrsR.delete(e.pointerId);
+  inputL = ptrsL.size > 0; inputR = ptrsR.size > 0;
+}
+renderer.domElement.addEventListener('pointerdown',   onPtrDown);
+renderer.domElement.addEventListener('pointerup',     onPtrUp);
+renderer.domElement.addEventListener('pointercancel', onPtrUp);
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const getE  = () => E_POOL.find(e => !e.active)  || null;
+const getB  = () => B_POOL.find(b => !b.active)  || null;
+const getP  = () => P_POOL.find(p => !p.active)  || null;
+const getSF = () => SF_ELS.find(s => !s.active)  || null;
+
+function spawnBurst(x, z, color, n=7) {
+  for (let i = 0; i < n; i++) {
+    const p = getP(); if (!p) continue;
+    const a = Math.random() * Math.PI*2;
+    const sp = 2 + Math.random()*4;
+    p.active = true; p.mesh.visible = true;
+    p.x=x; p.y=0.2; p.z=z;
+    p.vx=Math.cos(a)*sp; p.vy=1+Math.random()*3; p.vz=Math.sin(a)*sp;
+    p.life = p.maxLife = 0.4 + Math.random()*0.35;
+    p.mesh.material.color.setHex(color);
+    p.mesh.material.opacity = 1;
+    p.mesh.position.set(x, 0.2, z);
+  }
+}
+
+function spawnFloat(wx, wz, text, col='#ffcc00') {
+  const sf = getSF(); if (!sf) return;
+  const v = new THREE.Vector3(wx, 0, wz).project(cam);
+  sf.sx = (v.x*.5+.5)*W(); sf.sy = (1-(v.y*.5+.5))*H();
+  sf.vy=-58; sf.life=sf.maxLife=0.75;
+  sf.active=true; sf.el.style.display='block';
+  sf.el.style.color=col; sf.el.textContent=text;
+  sf.el.style.left=sf.sx+'px'; sf.el.style.top=sf.sy+'px';
+}
+
+function updateHP() {
+  hpEl.innerHTML='';
+  for (let i=0; i<5; i++) {
+    const s=document.createElement('span'); s.className='hd';
+    s.textContent = i<hp ? '♦' : '◇';
+    s.style.color = i<hp ? '#ff4466' : '#441122';
+    s.style.textShadow = i<hp ? '0 0 8px #ff4466' : 'none';
+    hpEl.appendChild(s);
+  }
+}
+
+function fireBullet(a, spread=0) {
+  const b = getB(); if (!b) return;
+  b.active=true; b.mesh.visible=true;
+  b.x=Math.cos(a)*ORBIT_R; b.z=Math.sin(a)*ORBIT_R;
+  const spd=9.5;
+  const nx=-Math.cos(a+spread), nz=-Math.sin(a+spread);
+  b.vx=nx*spd; b.vz=nz*spd;
+  b.life = acq.range ? 2.3 : 1.6;
+  b.pierce = !!acq.pierce;
+  b.mesh.position.set(b.x, 0.25, b.z);
+  b.mesh.material.color.setHex(acq.homing ? 0xffaa00 : 0x00ffff);
+}
+
+function spawnEnemy() {
+  const e = getE(); if (!e) return;
+  const a = Math.random()*Math.PI*2;
+  const r = SPAWN_R_MIN + Math.random()*(SPAWN_R_MAX-SPAWN_R_MIN);
+  e.x=Math.cos(a)*r; e.z=Math.sin(a)*r;
+  const spd = 1.6 + wave*0.12 + Math.random()*0.5;
+  const dist = Math.sqrt(e.x*e.x + e.z*e.z);
+  e.vx=(-e.x/dist)*spd; e.vz=(-e.z/dist)*spd;
+  e.hp = wave >= 9 ? 2 : 1;
+  e.active=true; e.mesh.visible=true;
+  e.mesh.position.set(e.x, 0, e.z);
+  e.mesh.material.color.setHex(E_COLS[Math.floor(Math.random()*E_COLS.length)]);
+  e.rx=(Math.random()-.5)*3; e.rz=(Math.random()-.5)*3;
+}
+
+function killEnemy(e) {
+  const col = e.mesh.material.color.getHex();
+  spawnBurst(e.x, e.z, col, 9);
+  spawnBurst(e.x, e.z, 0xffd700, 4);
+  e.active=false; e.mesh.visible=false;
+  combo++; comboT=2.0;
+  const pts = 10 * Math.max(1, combo);
+  score+=pts; xp+=25; scoreEl.textContent=score;
+  spawnFloat(e.x, e.z, '+'+pts);
+  imp('light');
+}
+
+function triggerNova() {
+  let n=0;
+  for (const e of E_POOL) { if (e.active) { killEnemy(e); n++; } }
+  if (n > 0) {
+    camShake=0.7;
+    spawnBurst(0, 0, 0xffaa00, 24);
+    spawnFloat(0, 0, 'NOVA!', '#ffaa00');
+    imp('heavy');
+  }
+}
+
+function checkLevelUp() {
+  if (xp < xpNext) return;
+  xp -= xpNext; xpNext = Math.floor(xpNext*1.45);
+  level++; wave++;
+  WAVE_INT = Math.max(0.85, WAVE_INT - 0.22);
+  state = 'levelup';
+  showLevelUp();
+}
+
+function showLevelUp() {
+  const avail = UPGS.filter(u => !acq[u.id]);
+  const picks = [], pool = [...avail];
+  while (picks.length < 3 && pool.length > 0) {
+    picks.push(pool.splice(Math.floor(Math.random()*pool.length), 1)[0]);
+  }
+  while (picks.length < 3) picks.push(UPGS[Math.floor(Math.random()*UPGS.length)]);
+  lvCardsEl.innerHTML='';
+  for (const u of picks) {
+    const btn = document.createElement('button');
+    btn.className='uc';
+    btn.innerHTML=`<span class="ui2">${u.icon}</span><span class="un">${u.name}</span><span class="ud">${u.desc}</span>`;
+    btn.addEventListener('click', () => pickUpgrade(u.id));
+    lvCardsEl.appendChild(btn);
+  }
+  lvlEl.style.display='flex';
+}
+
+function pickUpgrade(id) {
+  acq[id]=true;
+  if (id==='shield') { hp=Math.min(5, hp+2); updateHP(); }
+  if (id==='rapidfire') FIRE_RATE *= 0.5;
+  if (id==='nova') novaT=NOVA_INT;
+  lvlEl.style.display='none';
+  state='playing'; imp('medium');
+}
+
+function gameOver() {
+  state='dead'; ntf('error');
+  const best=Math.max(score, parseInt(localStorage.getItem('sfbest')||'0'));
+  localStorage.setItem('sfbest', best);
+  gscEl.textContent='SCORE: '+score;
+  gbstEl.textContent='BEST:  '+best;
+  goEl.style.display='flex';
+}
+
+function resetGame() {
+  hp=5; score=0; xp=0; xpNext=350; level=1; wave=1;
+  combo=0; comboT=0; fireT=0; FIRE_RATE=0.28;
+  waveT=0; WAVE_INT=2.6; novaT=0; camShake=0; angle=0;
+  ptrsL.clear(); ptrsR.clear(); inputL=false; inputR=false;
+  Object.keys(acq).forEach(k => delete acq[k]);
+  for (const e of E_POOL) { e.active=false; e.mesh.visible=false; }
+  for (const b of B_POOL) { b.active=false; b.mesh.visible=false; }
+  for (const p of P_POOL) { p.active=false; p.mesh.visible=false; }
+  for (const s of SF_ELS) { s.active=false; s.el.style.display='none'; }
+  scoreEl.textContent='0'; waveEl.textContent='WAVE 1';
+  lvlEl.style.display='none'; goEl.style.display='none';
+  updateHP(); state='playing';
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
+let lastT = 0;
+
+function update(dt) {
+  const t = performance.now() * 0.001;
+
+  // Core animate (runs in all states)
+  coreMesh.rotation.y += dt*0.8;
+  coreMesh.rotation.z += dt*0.25;
+  const cpulse = 1 + 0.1*Math.sin(t*2.5);
+  coreMesh.scale.setScalar(cpulse);
+  for (let i=0; i<CORE_RINGS.length; i++) {
+    CORE_RINGS[i].rotation.z += dt*(0.45 + i*0.3);
+    CORE_RINGS[i].scale.setScalar(1 + 0.07*Math.sin(t*3 + i*2.1));
+  }
+
+  if (state !== 'playing') return;
+
+  // ── PLAYER ORBIT ────────────────────────────────────────────────────────────
+  const spd = acq.speed ? ORBIT_SPD_BASE*1.4 : ORBIT_SPD_BASE;
+  if (inputL && !inputR) angle += spd*dt;
+  if (inputR && !inputL) angle -= spd*dt;
+
+  const px = Math.cos(angle)*ORBIT_R;
+  const pz = Math.sin(angle)*ORBIT_R;
+  playerMesh.position.set(px, 0.2, pz);
+  playerMesh.lookAt(0, 0.2, 0);
+  engGlow.position.set(px, 0.2, pz);
+  engGlow.scale.setScalar(0.9 + 0.2*Math.sin(t*7));
+
+  // ── AUTO-FIRE ────────────────────────────────────────────────────────────────
+  fireT -= dt;
+  if (fireT <= 0) {
+    fireT = acq.rapidfire ? FIRE_RATE*0.5 : FIRE_RATE;
+    fireBullet(angle, 0);
+    if (acq.multishot) {
+      fireBullet(angle,  0.20);
+      fireBullet(angle, -0.20);
+    }
+  }
+
+  // ── WAVE SPAWN ───────────────────────────────────────────────────────────────
+  waveT -= dt;
+  if (waveT <= 0) {
+    waveT = WAVE_INT;
+    const n = 1 + Math.floor(wave/4);
+    for (let i=0; i<n; i++) spawnEnemy();
+  }
+
+  // ── NOVA ──────────────────────────────────────────────────────────────────────
+  if (acq.nova) {
+    novaT -= dt;
+    if (novaT <= 0) { novaT=NOVA_INT; triggerNova(); }
+  }
+
+  // ── BULLETS ──────────────────────────────────────────────────────────────────
+  for (const b of B_POOL) {
+    if (!b.active) continue;
+    b.life -= dt;
+    if (b.life <= 0) { b.active=false; b.mesh.visible=false; continue; }
+
+    // Homing nudge
+    if (acq.homing) {
+      let ne=null, nd=Infinity;
+      for (const e of E_POOL) {
+        if (!e.active) continue;
+        const dx=e.x-b.x, dz=e.z-b.z, d=dx*dx+dz*dz;
+        if (d<nd) { nd=d; ne=e; }
+      }
+      if (ne) {
+        const dx=ne.x-b.x, dz=ne.z-b.z;
+        const dm=Math.sqrt(dx*dx+dz*dz)+0.001;
+        b.vx+=(dx/dm)*7*dt; b.vz+=(dz/dm)*7*dt;
+        const bs=Math.sqrt(b.vx*b.vx+b.vz*b.vz);
+        if (bs>11) { b.vx=b.vx/bs*11; b.vz=b.vz/bs*11; }
+      }
+    }
+
+    b.x+=b.vx*dt; b.z+=b.vz*dt;
+    b.mesh.position.set(b.x, 0.25, b.z);
+
+    // Bullet vs enemy collision
+    for (const e of E_POOL) {
+      if (!e.active) continue;
+      const dx=b.x-e.x, dz=b.z-e.z;
+      if (dx*dx+dz*dz < 0.40) {
+        if (!b.pierce) { b.active=false; b.mesh.visible=false; }
+        e.hp--;
+        if (e.hp <= 0) killEnemy(e);
+        if (!b.pierce) break;
+      }
+    }
+  }
+
+  // ── ENEMIES ──────────────────────────────────────────────────────────────────
+  for (const e of E_POOL) {
+    if (!e.active) continue;
+    e.x+=e.vx*dt; e.z+=e.vz*dt;
+    e.mesh.position.set(e.x, 0, e.z);
+    e.mesh.rotation.y += e.rx*dt;
+    e.mesh.rotation.x += e.rz*dt;
+
+    // Reached core?
+    if (e.x*e.x + e.z*e.z < CORE_HIT_R*CORE_HIT_R) {
+      e.active=false; e.mesh.visible=false;
+      hp--; combo=0; camShake=0.45;
+      spawnBurst(0, 0, 0xff2200, 14);
+      imp('heavy');
+      coreMesh.material.color.setHex(0xff0000);
+      setTimeout(() => coreMesh.material.color.setHex(0xffd700), 220);
+      // Shield upgrade: nova reaction on core hit
+      if (acq.shield) { spawnBurst(0,0,0xffaa00,18); triggerNova(); }
+      updateHP();
+      if (hp <= 0) { gameOver(); return; }
+    }
+  }
+
+  // ── PARTICLES ────────────────────────────────────────────────────────────────
+  for (const p of P_POOL) {
+    if (!p.active) continue;
+    p.life -= dt;
+    if (p.life <= 0) { p.active=false; p.mesh.visible=false; continue; }
+    p.x+=p.vx*dt; p.z+=p.vz*dt; p.y+=p.vy*dt;
+    p.vy -= 5*dt;
+    p.mesh.position.set(p.x, p.y, p.z);
+    p.mesh.material.opacity = p.life/p.maxLife;
+  }
+
+  // ── SCORE FLOATS ─────────────────────────────────────────────────────────────
+  for (const sf of SF_ELS) {
+    if (!sf.active) continue;
+    sf.life -= dt;
+    if (sf.life <= 0) { sf.active=false; sf.el.style.display='none'; continue; }
+    sf.sy += sf.vy*dt;
+    sf.el.style.top = sf.sy+'px';
+    sf.el.style.opacity = String(sf.life/sf.maxLife);
+  }
+
+  // ── COMBO TIMER ───────────────────────────────────────────────────────────────
+  comboT -= dt;
+  if (comboT <= 0) combo = 0;
+  if (combo >= 2) {
+    comboEl.textContent = '×'+combo+' COMBO';
+    comboEl.style.opacity = '1';
+    comboEl.style.color = combo >= 8 ? '#ff4466' : '#ffaa00';
+  } else {
+    comboEl.style.opacity = '0';
+  }
+
+  // ── HUD ───────────────────────────────────────────────────────────────────────
+  xfEl.style.width = (xp/xpNext*100)+'%';
+  waveEl.textContent = 'WAVE '+wave;
+
+  // ── CAM SHAKE ────────────────────────────────────────────────────────────────
+  if (camShake > 0) {
+    camShake -= dt*3;
+    cam.position.x = CAM_BASE.x + (Math.random()-.5)*camShake*0.7;
+    cam.position.y = CAM_BASE.y + (Math.random()-.5)*camShake*0.2;
+    cam.position.z = CAM_BASE.z;
+  } else {
+    cam.position.x = CAM_BASE.x;
+    cam.position.y = CAM_BASE.y;
+    cam.position.z = CAM_BASE.z;
+  }
+  cam.lookAt(0, 0, 0);
+
+  checkLevelUp();
+}
+
+function loop(t) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((t - lastT)*0.001, 0.05);
+  lastT = t;
+  update(dt);
+  renderer.render(scene, cam);
+}
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

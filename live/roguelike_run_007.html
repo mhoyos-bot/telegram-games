@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>NEON DASH</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#000;touch-action:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;font-family:'Arial Black',Arial,sans-serif}
+#score{position:absolute;top:20px;left:50%;transform:translateX(-50%);color:#fff;font-size:28px;font-weight:900;text-shadow:0 0 12px #00ffcc}
+#combo{position:absolute;top:58px;left:50%;transform:translateX(-50%);color:#ffd700;font-size:18px;font-weight:900;opacity:0}
+#lives{position:absolute;top:20px;right:16px;color:#ff4455;font-size:22px;letter-spacing:2px}
+#dist{position:absolute;top:20px;left:16px;color:#88aaff;font-size:13px;font-weight:900}
+#wave{position:absolute;top:38px;left:16px;color:#00ffcc;font-size:11px;font-weight:900;opacity:0.7}
+#upgrades{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,4,16,0.95);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;font-family:'Arial Black',Arial,sans-serif}
+#upgrades h2{color:#00ffcc;font-size:22px;margin-bottom:8px;text-shadow:0 0 16px #00ffcc}
+.ubtn{width:82%;max-width:340px;padding:16px 18px;border:2px solid #00ffcc;background:rgba(0,255,204,0.08);color:#fff;font-family:'Arial Black',Arial,sans-serif;font-size:15px;font-weight:900;border-radius:8px;cursor:pointer;pointer-events:all;text-align:left}
+.ubtn:active{background:rgba(0,255,204,0.22)}
+.uname{color:#00ffcc;font-size:16px}
+.udesc{color:#99aabb;font-size:12px;margin-top:3px;font-weight:normal;font-family:Arial,sans-serif}
+#gameover{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,8,0.94);display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;font-family:'Arial Black',Arial,sans-serif}
+#gameover h1{color:#ff4455;font-size:44px;text-shadow:0 0 28px #ff4455}
+.go-info{color:#fff;font-size:20px}
+.go-sub{color:#88aaff;font-size:14px}
+#rbtn{margin-top:14px;padding:14px 48px;background:#00ffcc;color:#000;font-size:20px;font-weight:900;border:none;border-radius:8px;cursor:pointer;pointer-events:all;font-family:'Arial Black',Arial,sans-serif}
+#floats{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden}
+#tapstart{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#00ffcc;font-size:26px;font-weight:900;font-family:'Arial Black',Arial,sans-serif;text-shadow:0 0 20px #00ffcc;text-align:center;line-height:1.5;pointer-events:none;animation:pulse 0.9s infinite alternate}
+@keyframes pulse{from{opacity:0.5}to{opacity:1}}
+</style>
+</head><body>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="combo"></div>
+  <div id="lives">♥♥♥</div>
+  <div id="dist">0m</div>
+  <div id="wave">WAVE 1</div>
+</div>
+<div id="floats"></div>
+<div id="tapstart">NEON DASH<br><span style="font-size:16px;color:#fff">TAP TO RUN</span></div>
+<div id="upgrades"><h2>⚡ UPGRADE ⚡</h2></div>
+<div id="gameover">
+  <h1>WASTED</h1>
+  <div class="go-info" id="go-score">0</div>
+  <div class="go-sub" id="go-dist">0m</div>
+  <button id="rbtn">RUN AGAIN</button>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+function haptic(t='light'){ tg?.HapticFeedback?.impactOccurred(t); }
+
+// === RENDERER ===
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = false;
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000a18);
+scene.fog = new THREE.FogExp2(0x000a18, 0.05);
+
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth/window.innerHeight, 0.1, 80);
+camera.position.set(0, 2.2, 10.5);
+camera.lookAt(0, -0.4, 0);
+
+scene.add(new THREE.AmbientLight(0x0a1830, 2.8));
+const dLight = new THREE.DirectionalLight(0x00ffcc, 3.0);
+dLight.position.set(3, 6, 5);
+scene.add(dLight);
+
+// === CONSTANTS ===
+const PLAYER_X = -4.0;
+const GROUND_Y = -1.9;
+const GRAVITY = -24;
+const JUMP_VEL = 11.2;
+const TILE_W = 5.5;
+const TILE_COUNT = 9;
+
+// === GAME STATE ===
+const GS = {
+  score:0, lives:3, combo:0, comboTimer:0,
+  dist:0, kills:0, killsToUpgrade:8, waveNum:1,
+  running:false, started:false, paused:false,
+  worldSpeed:3.8, speedMax:11,
+  spawnTimer:1.2, spawnInterval:1.8,
+  fireTimer:0, fireRate:0.30,
+  shakeAmt:0, novaCount:0,
+  upg:{doubleJump:false, magnet:false, rapidFire:false, shield:false, nova:false, pierce:false}
+};
+
+// === PLAYER MESH ===
+const pG = new THREE.Group();
+scene.add(pG);
+pG.position.set(PLAYER_X, GROUND_Y + 0.46, 0);
+
+// Body: rotated diamond
+const pBody = new THREE.Mesh(
+  (() => { const g = new THREE.ConeGeometry(0.38, 0.88, 4); g.rotateZ(-Math.PI/2); return g; })(),
+  new THREE.MeshBasicMaterial({color:0x00ffcc})
+);
+pG.add(pBody);
+
+// Runner legs
+const legGeo = new THREE.BoxGeometry(0.13, 0.34, 0.13);
+const legMat = new THREE.MeshBasicMaterial({color:0x00aacc});
+const legL = new THREE.Mesh(legGeo, legMat); legL.position.set(-0.15, -0.44, 0.09);
+const legR = new THREE.Mesh(legGeo, legMat); legR.position.set(-0.15, -0.44, -0.09);
+pG.add(legL, legR);
+
+// Engine glow orb
+const engGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(0.14, 6, 6),
+  new THREE.MeshBasicMaterial({color:0xffd700})
+);
+engGlow.position.set(-0.46, 0, 0);
+pG.add(engGlow);
+
+// Shield ring
+const shieldMesh = new THREE.Mesh(
+  new THREE.TorusGeometry(0.72, 0.05, 8, 24),
+  new THREE.MeshBasicMaterial({color:0x00ff88, wireframe:true})
+);
+shieldMesh.visible = false;
+pG.add(shieldMesh);
+
+// Player trail
+const TLEN = 22;
+const trailPts = Array.from({length:TLEN}, () => new THREE.Vector3(PLAYER_X, GROUND_Y+0.46, 0));
+const trailGeo = new THREE.BufferGeometry();
+const trailBuf = new Float32Array(TLEN*3);
+trailGeo.setAttribute('position', new THREE.BufferAttribute(trailBuf, 3));
+const trailLine = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({color:0x00ffcc, transparent:true, opacity:0.38}));
+scene.add(trailLine);
+
+// Player physics
+let pVelY = 0, isGrounded = true, canDblJump = false;
+let shieldActive = false, shieldCooldown = 0;
+
+// === GROUND TILES ===
+const tileGeo = new THREE.BoxGeometry(TILE_W, 0.38, 3.2);
+const tileMat = new THREE.MeshBasicMaterial({color:0x001828});
+const tileEdgeMat = new THREE.MeshBasicMaterial({color:0x00445a});
+const tiles = [];
+for (let i = 0; i < TILE_COUNT; i++) {
+  const t = new THREE.Mesh(tileGeo, tileMat);
+  t.position.set(i * TILE_W - 16, GROUND_Y - 0.44, 0);
+  scene.add(t);
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(TILE_W, 0.065, 3.22), tileEdgeMat);
+  edge.position.set(0, 0.225, 0);
+  t.add(edge);
+  tiles.push(t);
+}
+
+// Grid lines on ground
+for (let i = 0; i < 22; i++) {
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-16+i*1.5, GROUND_Y-0.26, -1.6),
+    new THREE.Vector3(-16+i*1.5, GROUND_Y-0.26, 1.6)
+  ]);
+  scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({color:0x002233, transparent:true, opacity:0.5})));
+}
+
+// Starfield
+const BGPC = 110;
+const bgGeo = new THREE.BufferGeometry();
+const bgBuf = new Float32Array(BGPC*3);
+const bgVels = [];
+for (let i = 0; i < BGPC; i++) {
+  bgBuf[i*3] = (Math.random()-0.5)*30;
+  bgBuf[i*3+1] = (Math.random()-0.5)*14;
+  bgBuf[i*3+2] = -2.5 + Math.random()*0.5;
+  bgVels.push(-(0.25+Math.random()*1.0));
+}
+bgGeo.setAttribute('position', new THREE.BufferAttribute(bgBuf, 3));
+scene.add(new THREE.Points(bgGeo, new THREE.PointsMaterial({color:0x1155aa, size:0.07})));
+
+// === OBJECT POOLS ===
+// Bullets
+const BMAX = 36;
+const bullets = [];
+const bGeo = new THREE.SphereGeometry(0.1, 4, 4);
+for (let i = 0; i < BMAX; i++) {
+  const m = new THREE.Mesh(bGeo, new THREE.MeshBasicMaterial({color:0x00ffee}));
+  m.visible = false; scene.add(m);
+  bullets.push({m, vx:0, vy:0, active:false, pierce:false});
+}
+
+// Enemy types: ground runner, aerial flyer, tanky crusher, zigzag dart
+const E_TYPES = [
+  {w:0.56, h:0.56, col:0xff3355, hp:1, spd:1.0, gy:GROUND_Y+0.58, pts:10, name:'RUNNER'},
+  {w:0.46, h:0.46, col:0xff8800, hp:1, spd:1.4, gy:GROUND_Y+2.3,  pts:15, name:'FLYER'},
+  {w:0.72, h:0.72, col:0xcc00ff, hp:2, spd:0.75,gy:GROUND_Y+0.72, pts:25, name:'CRUSHER'},
+  {w:0.36, h:0.36, col:0xffee00, hp:1, spd:2.4, gy:GROUND_Y+1.4,  pts:20, name:'DART'},
+];
+const EMAX = 18;
+const enemies = [];
+for (let i = 0; i < EMAX; i++) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.62, 0.62, 0.5),
+    new THREE.MeshBasicMaterial({color:0xff3355})
+  );
+  g.add(body);
+  const eye = new THREE.Mesh(
+    new THREE.SphereGeometry(0.1, 5, 5),
+    new THREE.MeshBasicMaterial({color:0xffffff})
+  );
+  eye.position.set(0.27, 0.13, 0.27);
+  g.add(eye);
+  g.visible = false;
+  scene.add(g);
+  enemies.push({g, body, active:false, hp:0, spd:0, type:0, timer:0, pts:0, dartVy:1.4});
+}
+
+// Gems
+const GMAX = 22;
+const gems = [];
+const gemGeo = new THREE.OctahedronGeometry(0.22, 0);
+for (let i = 0; i < GMAX; i++) {
+  const m = new THREE.Mesh(gemGeo, new THREE.MeshBasicMaterial({color:0xffd700}));
+  m.visible = false; scene.add(m);
+  gems.push({m, active:false, vy:0});
+}
+
+// Particles
+const PMAX = 90;
+const parts = [];
+const prtGeo = new THREE.SphereGeometry(0.12, 4, 4);
+for (let i = 0; i < PMAX; i++) {
+  const m = new THREE.Mesh(prtGeo, new THREE.MeshBasicMaterial({color:0xffffff, transparent:true}));
+  m.visible = false; scene.add(m);
+  parts.push({m, vx:0, vy:0, vz:0, life:0, maxLife:0, active:false});
+}
+
+// === UI REFS ===
+const scoreEl = document.getElementById('score');
+const comboEl = document.getElementById('combo');
+const livesEl = document.getElementById('lives');
+const distEl = document.getElementById('dist');
+const waveEl = document.getElementById('wave');
+const goUI = document.getElementById('gameover');
+const upgUI = document.getElementById('upgrades');
+const floatsEl = document.getElementById('floats');
+const tapStartEl = document.getElementById('tapstart');
+
+function setLives() {
+  livesEl.textContent = '♥'.repeat(GS.lives) + '♡'.repeat(Math.max(0, 3-GS.lives));
+}
+
+function showFloat(txt, sx, sy, col) {
+  const d = document.createElement('div');
+  d.textContent = txt;
+  d.style.cssText = `position:absolute;left:${sx}px;top:${sy}px;color:${col};font-family:'Arial Black',Arial,sans-serif;font-size:16px;font-weight:900;text-shadow:0 0 8px ${col};pointer-events:none;transform:translateX(-50%)`;
+  floatsEl.appendChild(d);
+  let t = 0;
+  const tick = () => {
+    t++; d.style.top = (sy-t*1.6)+'px'; d.style.opacity = String(1-t/36);
+    if (t < 36) requestAnimationFrame(tick); else d.remove();
+  };
+  requestAnimationFrame(tick);
+}
+
+function w2s(pos) {
+  const v = pos.clone().project(camera);
+  return {x:(v.x+1)/2*window.innerWidth, y:(1-v.y)/2*window.innerHeight};
+}
+
+// === UPGRADES ===
+const UPGRADE_DEFS = [
+  {id:'doubleJump', name:'DOUBLE JUMP',  desc:'Tap again mid-air for a second leap'},
+  {id:'magnet',     name:'GEM MAGNET',   desc:'Gems fly toward you from twice as far'},
+  {id:'rapidFire',  name:'RAPID FIRE',   desc:'Fire rate jumps 65% faster'},
+  {id:'shield',     name:'BARRIER',      desc:'Auto-shield absorbs one hit, recharges in 4s'},
+  {id:'nova',       name:'NOVA STRIKE',  desc:'Every 8th kill blasts the whole screen'},
+  {id:'pierce',     name:'PIERCE SHOT',  desc:'Bullets pass through enemies'},
+];
+
+function pickUpgrades() {
+  const avail = UPGRADE_DEFS.filter(u => !GS.upg[u.id]);
+  if (!avail.length) return null;
+  return avail.sort(() => Math.random()-0.5).slice(0, Math.min(3, avail.length));
+}
+
+function showUpgrades() {
+  GS.paused = true;
+  const choices = pickUpgrades();
+  if (!choices || !choices.length) { GS.paused = false; return; }
+  upgUI.innerHTML = '<h2>⚡ UPGRADE ⚡</h2>';
+  upgUI.style.display = 'flex';
+  choices.forEach(u => {
+    const btn = document.createElement('button');
+    btn.className = 'ubtn';
+    btn.innerHTML = `<div class="uname">${u.name}</div><div class="udesc">${u.desc}</div>`;
+    btn.onclick = () => {
+      GS.upg[u.id] = true;
+      if (u.id === 'rapidFire') GS.fireRate *= 0.38;
+      upgUI.style.display = 'none';
+      GS.paused = false;
+      GS.killsToUpgrade += 10;
+      GS.waveNum++;
+      waveEl.textContent = `WAVE ${GS.waveNum}`;
+    };
+    upgUI.appendChild(btn);
+  });
+}
+
+// === PARTICLES ===
+function burst(pos, col, count) {
+  count = count || 12;
+  let n = 0;
+  for (let i = 0; i < PMAX && n < count; i++) {
+    const p = parts[i];
+    if (p.active) continue;
+    const angle = (Math.PI*2/count)*n + Math.random()*0.4;
+    const spd = 1.6 + Math.random()*2.8;
+    p.m.position.copy(pos);
+    p.m.material.color.setHex(col);
+    p.m.material.opacity = 1;
+    p.m.visible = true;
+    p.vx = Math.cos(angle)*spd;
+    p.vy = Math.sin(angle)*spd + 1.2;
+    p.vz = (Math.random()-0.5)*1.8;
+    p.life = 0;
+    p.maxLife = 18 + Math.random()*14;
+    p.active = true;
+    n++;
+  }
+}
+
+function shake(amt) { GS.shakeAmt = Math.max(GS.shakeAmt, amt); }
+
+// === SPAWN ENEMY ===
+function spawnEnemy() {
+  const e = enemies.find(e => !e.active);
+  if (!e) return;
+  const td = E_TYPES[Math.floor(Math.random()*E_TYPES.length)];
+  e.g.position.set(7.8, td.gy, 0);
+  e.body.material.color.setHex(td.col);
+  e.body.scale.set(td.w/0.62, td.h/0.62, 1);
+  e.active = true; e.g.visible = true;
+  e.hp = td.hp; e.spd = td.spd;
+  e.type = E_TYPES.indexOf(td); e.pts = td.pts;
+  e.timer = 0; e.dartVy = 1.4;
+}
+
+// === SPAWN GEM ===
+function spawnGem(pos) {
+  const g = gems.find(g => !g.active);
+  if (!g) return;
+  g.m.position.copy(pos); g.m.position.z = 0;
+  g.vy = 3.5 + Math.random()*2;
+  g.active = true; g.m.visible = true;
+}
+
+// === FIRE ===
+function fireBullet() {
+  const b = bullets.find(b => !b.active);
+  if (!b) return;
+  b.m.position.set(pG.position.x + 0.5, pG.position.y + 0.1, 0);
+  b.vx = 10.5 + GS.worldSpeed*0.4; b.vy = 0;
+  b.active = true; b.m.visible = true;
+  b.pierce = GS.upg.pierce;
+}
+
+// === KILL ===
+function killEnemy(e) {
+  burst(e.g.position.clone(), [0xff3355, 0xff8800, 0xcc00ff, 0xffee00][e.type], 14);
+  spawnGem(e.g.position.clone());
+  GS.kills++; GS.combo++; GS.comboTimer = 2.2;
+  const mult = Math.min(GS.combo, 8);
+  const pts = e.pts * mult;
+  GS.score += pts; scoreEl.textContent = GS.score;
+  const sp = w2s(e.g.position);
+  showFloat('+'+pts, sp.x, sp.y, GS.combo >= 4 ? '#ffd700' : '#00ffee');
+  if (GS.combo >= 3) {
+    comboEl.textContent = '×'+GS.combo+' COMBO';
+    comboEl.style.opacity = '1';
+  }
+  // Nova
+  if (GS.upg.nova) {
+    GS.novaCount++;
+    if (GS.novaCount >= 8) {
+      GS.novaCount = 0;
+      setTimeout(triggerNova, 40);
+    }
+  }
+  if (GS.kills >= GS.killsToUpgrade) showUpgrades();
+  shake(0.18); haptic('medium');
+  e.active = false; e.g.visible = false;
+}
+
+function triggerNova() {
+  shake(0.55); haptic('heavy');
+  enemies.forEach(e => {
+    if (!e.active) return;
+    burst(e.g.position.clone(), 0xffd700, 16);
+    const sp = w2s(e.g.position);
+    showFloat('NOVA!', sp.x, sp.y, '#ffd700');
+    e.active = false; e.g.visible = false;
+  });
+}
+
+function playerHit() {
+  if (shieldActive) {
+    shieldActive = false; shieldCooldown = 4.0;
+    shieldMesh.visible = false;
+    shake(0.28); haptic('heavy');
+    showFloat('BLOCKED!', window.innerWidth/2, window.innerHeight*0.4, '#00ff88');
+    return;
+  }
+  GS.lives--; setLives();
+  GS.combo = 0; comboEl.style.opacity = '0';
+  shake(0.55); haptic('heavy');
+  if (GS.lives <= 0) gameOver();
+}
+
+// === GAME CONTROL ===
+function resetPools() {
+  bullets.forEach(b => { b.active=false; b.m.visible=false; });
+  enemies.forEach(e => { e.active=false; e.g.visible=false; });
+  gems.forEach(g => { g.active=false; g.m.visible=false; });
+  parts.forEach(p => { p.active=false; p.m.visible=false; });
+}
+
+function startGame() {
+  tapStartEl.style.display = 'none';
+  GS.started = true; GS.running = true; GS.paused = false;
+  Object.assign(GS, {
+    score:0, lives:3, combo:0, comboTimer:0, dist:0,
+    kills:0, killsToUpgrade:8, waveNum:1,
+    worldSpeed:3.8, spawnTimer:1.2, spawnInterval:1.8,
+    fireTimer:0, fireRate:0.30, shakeAmt:0, novaCount:0
+  });
+  Object.keys(GS.upg).forEach(k => GS.upg[k] = false);
+  pG.position.set(PLAYER_X, GROUND_Y+0.46, 0);
+  pVelY = 0; isGrounded = true; canDblJump = false;
+  shieldActive = false; shieldCooldown = 0;
+  resetPools();
+  setLives(); scoreEl.textContent = '0'; distEl.textContent = '0m'; waveEl.textContent = 'WAVE 1';
+  comboEl.style.opacity = '0';
+}
+
+function gameOver() {
+  GS.running = false;
+  document.getElementById('go-score').textContent = 'Score: '+GS.score;
+  document.getElementById('go-dist').textContent = Math.floor(GS.dist)+'m — Wave '+GS.waveNum;
+  goUI.style.display = 'flex';
+}
+
+document.getElementById('rbtn').onclick = () => { goUI.style.display='none'; startGame(); };
+
+// === INPUT ===
+document.addEventListener('pointerdown', () => {
+  if (GS.paused) return;
+  if (!GS.started) { startGame(); return; }
+  if (!GS.running) return;
+  if (isGrounded) {
+    pVelY = JUMP_VEL; isGrounded = false;
+    canDblJump = GS.upg.doubleJump;
+    haptic('light');
+    burst(pG.position.clone(), 0x00ffcc, 5);
+  } else if (canDblJump) {
+    pVelY = JUMP_VEL * 0.84; canDblJump = false;
+    haptic('medium');
+    burst(pG.position.clone(), 0x00aaff, 8);
+  }
+});
+
+// === MAIN LOOP ===
+let prev = performance.now();
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - prev)/1000, 0.05);
+  prev = now;
+
+  if (!GS.running || GS.paused) { renderer.render(scene, camera); return; }
+
+  // Speed ramp
+  GS.worldSpeed = Math.min(GS.speedMax, GS.worldSpeed + 0.28*dt);
+  const ws = GS.worldSpeed;
+
+  // Distance display
+  GS.dist += ws * dt;
+  distEl.textContent = Math.floor(GS.dist)+'m';
+
+  // Starfield
+  const bpos = bgGeo.attributes.position;
+  for (let i = 0; i < BGPC; i++) {
+    bpos.array[i*3] += bgVels[i]*dt*0.6;
+    if (bpos.array[i*3] < -15) bpos.array[i*3] = 15;
+  }
+  bpos.needsUpdate = true;
+
+  // Ground treadmill
+  tiles.forEach(t => {
+    t.position.x -= ws*dt;
+    if (t.position.x < -16) t.position.x += TILE_COUNT * TILE_W;
+  });
+
+  // Camera shake
+  if (GS.shakeAmt > 0.003) {
+    camera.position.x = (Math.random()-0.5)*GS.shakeAmt;
+    camera.position.y = 2.2 + (Math.random()-0.5)*GS.shakeAmt;
+    GS.shakeAmt *= 0.80;
+  } else {
+    camera.position.x = 0;
+    camera.position.y = 2.2;
+    GS.shakeAmt = 0;
+  }
+
+  // Shield regen
+  if (!shieldActive && GS.upg.shield) {
+    shieldCooldown -= dt;
+    if (shieldCooldown <= 0) { shieldActive = true; shieldMesh.visible = true; }
+  }
+  shieldMesh.rotation.z += dt * 1.8;
+
+  // Combo decay
+  if (GS.combo > 0) {
+    GS.comboTimer -= dt;
+    if (GS.comboTimer <= 0) { GS.combo = 0; comboEl.style.opacity = '0'; }
+  }
+
+  // Player physics
+  if (!isGrounded) {
+    pVelY += GRAVITY * dt;
+    pG.position.y += pVelY * dt;
+    if (pG.position.y <= GROUND_Y + 0.46) {
+      pG.position.y = GROUND_Y + 0.46;
+      pVelY = 0; isGrounded = true;
+      burst(pG.position.clone(), 0x00ffcc, 4);
+    }
+  }
+
+  // Leg animation (run cycle when grounded)
+  const legPhase = Math.sin(now * 0.013) * 0.25;
+  legL.rotation.x = isGrounded ? legPhase : 0.1;
+  legR.rotation.x = isGrounded ? -legPhase : -0.1;
+
+  // Body lean forward when jumping up, tilt back when falling
+  pG.rotation.z = isGrounded ? 0 : Math.max(-0.22, Math.min(0.22, pVelY * 0.02));
+
+  // Engine glow pulse
+  const gScale = 1 + Math.sin(now * 0.006) * 0.2;
+  engGlow.scale.setScalar(gScale);
+
+  // Trail
+  for (let i = TLEN-1; i > 0; i--) trailPts[i].copy(trailPts[i-1]);
+  trailPts[0].copy(pG.position);
+  for (let i = 0; i < TLEN; i++) {
+    trailBuf[i*3] = trailPts[i].x;
+    trailBuf[i*3+1] = trailPts[i].y;
+    trailBuf[i*3+2] = trailPts[i].z;
+  }
+  trailGeo.attributes.position.needsUpdate = true;
+
+  // Auto-fire
+  GS.fireTimer -= dt;
+  if (GS.fireTimer <= 0) { fireBullet(); GS.fireTimer = GS.fireRate; }
+
+  // Bullets
+  bullets.forEach(b => {
+    if (!b.active) return;
+    b.m.position.x += b.vx * dt;
+    b.m.position.y += b.vy * dt;
+    if (b.m.position.x > 9 || b.m.position.x < -9) { b.active=false; b.m.visible=false; }
+  });
+
+  // Enemy spawn
+  GS.spawnTimer -= dt;
+  if (GS.spawnTimer <= 0) {
+    spawnEnemy();
+    GS.spawnInterval = Math.max(0.65, 1.8 - (ws-3.8)*0.11);
+    GS.spawnTimer = GS.spawnInterval + (Math.random()-0.5)*0.45;
+  }
+
+  // Enemies
+  const magnetRange = GS.upg.magnet ? 4.8 : 2.4;
+  enemies.forEach(e => {
+    if (!e.active) return;
+    e.g.position.x -= (ws + e.spd) * dt;
+
+    // Type behaviors
+    e.timer += dt;
+    if (e.type === 1) { // FLYER: hover
+      e.g.position.y = E_TYPES[1].gy + Math.sin(e.timer*2.4)*0.75;
+    } else if (e.type === 3) { // DART: zigzag
+      e.g.position.y += e.dartVy * dt * 3;
+      if (e.g.position.y > GROUND_Y + 3.0) e.dartVy = -Math.abs(e.dartVy);
+      if (e.g.position.y < GROUND_Y + 0.45) e.dartVy = Math.abs(e.dartVy);
+    }
+    e.g.rotation.y += dt * 1.8;
+
+    if (e.g.position.x < -9.5) { e.active=false; e.g.visible=false; return; }
+
+    // Bullet hit check
+    let killed = false;
+    bullets.forEach(b => {
+      if (!b.active || killed) return;
+      const dx = b.m.position.x - e.g.position.x;
+      const dy = b.m.position.y - e.g.position.y;
+      if (Math.abs(dx) < 0.56 && Math.abs(dy) < 0.56) {
+        if (!b.pierce) { b.active=false; b.m.visible=false; }
+        e.hp--;
+        if (e.hp <= 0) { killEnemy(e); killed = true; }
+      }
+    });
+
+    // Player hit check
+    if (!e.active) return;
+    const pdx = pG.position.x - e.g.position.x;
+    const pdy = pG.position.y - e.g.position.y;
+    if (Math.abs(pdx) < 0.62 && Math.abs(pdy) < 0.62) {
+      e.active=false; e.g.visible=false;
+      playerHit();
+    }
+  });
+
+  // Gems
+  gems.forEach(g => {
+    if (!g.active) return;
+    g.m.rotation.y += dt * 3.5;
+    g.vy -= 9*dt;
+    g.m.position.y += g.vy * dt;
+    if (g.m.position.y < GROUND_Y + 0.2) { g.m.position.y = GROUND_Y + 0.2; g.vy = 0; }
+    g.m.position.x -= ws * 0.38 * dt;
+    if (g.m.position.x < -9.5) { g.active=false; g.m.visible=false; return; }
+
+    // Magnet pull
+    const dx = pG.position.x - g.m.position.x;
+    const dy = pG.position.y - g.m.position.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist < magnetRange) {
+      const pull = (magnetRange/dist) * 5.5 * dt;
+      g.m.position.x += dx*pull; g.m.position.y += dy*pull;
+    }
+    // Collect
+    if (dist < 0.62) {
+      g.active=false; g.m.visible=false;
+      GS.score += 5; scoreEl.textContent = GS.score;
+      const sp = w2s(g.m.position);
+      showFloat('+5', sp.x, sp.y, '#ffd700');
+    }
+  });
+
+  // Particles
+  parts.forEach(p => {
+    if (!p.active) return;
+    p.m.position.x += p.vx*dt; p.m.position.y += p.vy*dt; p.m.position.z += p.vz*dt;
+    p.vy -= 7*dt;
+    p.life++;
+    const prog = p.life / p.maxLife;
+    p.m.material.opacity = 1 - prog;
+    p.m.scale.setScalar(1 - prog*0.65);
+    if (p.life >= p.maxLife) { p.active=false; p.m.visible=false; }
+  });
+
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+requestAnimationFrame(loop);
+</script>
+</body></html>

@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>CRYSTAL SMASH</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #020210; overflow: hidden; font-family: 'Arial Black', sans-serif; }
+    #cv { display: block; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none;
+    }
+    #score-el {
+      color: #fff; font-size: 32px; font-weight: 900;
+      text-shadow: 0 0 16px rgba(100, 160, 255, 0.9);
+      letter-spacing: 2px;
+    }
+    #wave-el {
+      color: rgba(180, 200, 255, 0.7); font-size: 14px;
+      text-align: right; line-height: 1.4;
+    }
+    #wave-label { font-size: 18px; font-weight: bold; color: #88aaff; }
+    #hint-el {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.4); font-size: 13px; pointer-events: none;
+      letter-spacing: 1px;
+    }
+    #combo-el {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%) scale(0.8);
+      color: #ffcc00; font-size: 44px; font-weight: 900;
+      text-shadow: 0 0 24px #ff8800, 0 0 48px #ff4400;
+      pointer-events: none; opacity: 0;
+      letter-spacing: 3px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div id="hud">
+    <div id="score-el">0</div>
+    <div id="wave-el">
+      <div id="wave-label">WAVE 1</div>
+      <div id="remain-el" style="font-size:12px;color:rgba(180,180,255,0.6)"></div>
+    </div>
+  </div>
+  <div id="combo-el"></div>
+  <div id="hint-el">TAP CRYSTALS TO CHAIN BURST</div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  // CRYSTAL SMASH
+  // Atoms: CRYSTAL_SPAWN, COLOR_CHAIN_BFS, SHATTER_BURST, WAVE_CLEAR_BONUS, SCREEN_SHAKE
+  'use strict';
+
+  const W = window.innerWidth, H = window.innerHeight;
+  const canvas = document.getElementById('cv');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.shadowMap.enabled = false;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x020210);
+  scene.fog = new THREE.FogExp2(0x020210, 0.035);
+
+  const camera = new THREE.PerspectiveCamera(58, W / H, 0.1, 200);
+  camera.position.set(0, 0, 20);
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0x223366, 0.6));
+  const pl1 = new THREE.PointLight(0x4488ff, 3, 50);
+  pl1.position.set(8, 10, 12);
+  scene.add(pl1);
+  const pl2 = new THREE.PointLight(0xff3366, 2, 50);
+  pl2.position.set(-8, -10, 12);
+  scene.add(pl2);
+  const pl3 = new THREE.PointLight(0x00ffaa, 1.5, 40);
+  pl3.position.set(0, 0, -5);
+  scene.add(pl3);
+
+  // Starfield
+  (function () {
+    const geo = new THREE.BufferGeometry();
+    const pts = [];
+    for (let i = 0; i < 600; i++) {
+      pts.push((Math.random() - 0.5) * 120, (Math.random() - 0.5) * 120, -20 - Math.random() * 60);
+    }
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    const mat = new THREE.PointsMaterial({ color: 0xaabbff, size: 0.12, transparent: true, opacity: 0.7 });
+    scene.add(new THREE.Points(geo, mat));
+  })();
+
+  // Color palette
+  const PALETTE = [
+    { hex: 0xff2255, emissive: 0xaa0022 },
+    { hex: 0x22ffaa, emissive: 0x008855 },
+    { hex: 0x2288ff, emissive: 0x004499 },
+    { hex: 0xffaa22, emissive: 0xaa5500 },
+  ];
+
+  const CRYSTAL_GEOS = [
+    new THREE.OctahedronGeometry(0.55, 0),
+    new THREE.TetrahedronGeometry(0.60, 0),
+    new THREE.IcosahedronGeometry(0.48, 0),
+    new THREE.BoxGeometry(0.72, 0.72, 0.72),
+  ];
+
+  const CONNECT_RADIUS = 5.8;
+
+  // State
+  let score = 0, wave = 1, combo = 1;
+  let crystals = [], particles = [], floatTexts = [];
+  let shakeAmt = 0, shakeDecay = 0;
+  const camBase = new THREE.Vector3(0, 0, 20);
+
+  const scoreEl = document.getElementById('score-el');
+  const waveLabelEl = document.getElementById('wave-label');
+  const remainEl = document.getElementById('remain-el');
+  const comboEl = document.getElementById('combo-el');
+  const hintEl = document.getElementById('hint-el');
+
+  // Shared particle geo
+  const PGEO = new THREE.SphereGeometry(0.07, 4, 4);
+
+  // Connection lines
+  let linesObj = null;
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x3355aa, transparent: true, opacity: 0.18 });
+
+  function rebuildLines() {
+    if (linesObj) { scene.remove(linesObj); linesObj.geometry.dispose(); linesObj = null; }
+    const pos = [];
+    const alive = crystals.filter(c => c.state === 'alive');
+    for (let i = 0; i < alive.length; i++) {
+      for (let j = i + 1; j < alive.length; j++) {
+        const a = alive[i], b = alive[j];
+        if (a.colorIdx !== b.colorIdx) continue;
+        if (a.mesh.position.distanceTo(b.mesh.position) < CONNECT_RADIUS) {
+          pos.push(a.mesh.position.x, a.mesh.position.y, a.mesh.position.z);
+          pos.push(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z);
+        }
+      }
+    }
+    if (pos.length > 0) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      linesObj = new THREE.LineSegments(geo, lineMat);
+      scene.add(linesObj);
+    }
+  }
+
+  function spawnWave(waveNum) {
+    crystals.forEach(c => { if (c.mesh) scene.remove(c.mesh); });
+    crystals = [];
+
+    const count = Math.min(14 + waveNum * 3, 36);
+    const sx = 8 + waveNum * 0.3;
+    const sy = 5 + waveNum * 0.2;
+
+    for (let i = 0; i < count; i++) {
+      const ci = Math.floor(Math.random() * PALETTE.length);
+      const col = PALETTE[ci];
+      const gi = Math.floor(Math.random() * CRYSTAL_GEOS.length);
+
+      const mat = new THREE.MeshPhongMaterial({
+        color: col.hex, emissive: col.emissive, emissiveIntensity: 0.6,
+        shininess: 120, transparent: true, opacity: 1,
+      });
+      const mesh = new THREE.Mesh(CRYSTAL_GEOS[gi], mat);
+
+      const x = (Math.random() - 0.5) * sx * 2;
+      const y = (Math.random() - 0.5) * sy * 2;
+      const z = (Math.random() - 0.5) * 5;
+      mesh.position.set(x, y, z);
+      mesh.rotation.set(Math.random() * Math.PI * 2, Math.random() * Math.PI * 2, Math.random() * Math.PI * 2);
+      mesh.scale.setScalar(0);
+
+      // Inner glow
+      const glowMat = new THREE.MeshBasicMaterial({ color: col.hex, transparent: true, opacity: 0.1, side: THREE.BackSide });
+      const glowMesh = new THREE.Mesh(new THREE.SphereGeometry(0.85, 8, 8), glowMat);
+      mesh.add(glowMesh);
+
+      scene.add(mesh);
+
+      crystals.push({
+        mesh, colorIdx: ci, state: 'alive',
+        rotSpd: new THREE.Vector3((Math.random() - 0.5) * 0.025, (Math.random() - 0.5) * 0.025, (Math.random() - 0.5) * 0.025),
+        baseY: y, bobOffset: Math.random() * Math.PI * 2,
+        spawnScale: 0, popStart: 0, popDelay: 0,
+        spawnDelay: i * 40, spawnStart: performance.now(),
+      });
+    }
+
+    waveLabelEl.textContent = `WAVE ${waveNum}`;
+    updateRemain();
+    rebuildLines();
+    hintEl.style.opacity = '1';
+    setTimeout(() => { hintEl.style.opacity = '0'; hintEl.style.transition = 'opacity 1s'; }, 3000);
+  }
+
+  function updateRemain() {
+    const n = crystals.filter(c => c.state === 'alive').length;
+    remainEl.textContent = n > 0 ? `${n} crystals` : '';
+  }
+
+  function burstParticles(pos, colorHex, count) {
+    for (let i = 0; i < count; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 1 });
+      const m = new THREE.Mesh(PGEO, mat);
+      m.position.copy(pos);
+      const spd = 0.07 + Math.random() * 0.18;
+      const v = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(spd);
+      scene.add(m);
+      particles.push({ mesh: m, vel: v, life: 1, mat, decay: 1.2 + Math.random() * 0.8 });
+    }
+  }
+
+  function spawnFloat(text, worldPos, color) {
+    const div = document.createElement('div');
+    div.style.cssText = `position:fixed;pointer-events:none;font-weight:900;font-size:20px;
+      color:${color};text-shadow:0 0 8px ${color};transform:translate(-50%,-50%);`;
+    div.textContent = text;
+    document.body.appendChild(div);
+    const v = worldPos.clone().project(camera);
+    const sx = (v.x * 0.5 + 0.5) * window.innerWidth;
+    const sy = (-v.y * 0.5 + 0.5) * window.innerHeight;
+    div.style.left = sx + 'px';
+    div.style.top = sy + 'px';
+    floatTexts.push({ el: div, startY: sy, t: 0, dur: 1.1 });
+  }
+
+  let comboFadeTimer = null;
+  function flashCombo(n) {
+    comboEl.textContent = `×${n} CHAIN!`;
+    comboEl.style.transition = 'none';
+    comboEl.style.opacity = '1';
+    comboEl.style.transform = 'translate(-50%, -50%) scale(1.2)';
+    clearTimeout(comboFadeTimer);
+    comboFadeTimer = setTimeout(() => {
+      comboEl.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+      comboEl.style.opacity = '0';
+      comboEl.style.transform = 'translate(-50%, -50%) scale(0.9)';
+    }, 700);
+  }
+
+  let waveClearing = false;
+
+  function chainBurst(idx) {
+    if (waveClearing) return;
+    const start = crystals[idx];
+    if (!start || start.state !== 'alive') return;
+
+    // BFS same-color connected crystals
+    const targetColor = start.colorIdx;
+    const visited = new Set([idx]);
+    const queue = [idx];
+    const chain = [];
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      chain.push(cur);
+      const curC = crystals[cur];
+      for (let j = 0; j < crystals.length; j++) {
+        if (visited.has(j)) continue;
+        const other = crystals[j];
+        if (other.state !== 'alive' || other.colorIdx !== targetColor) continue;
+        if (curC.mesh.position.distanceTo(other.mesh.position) < CONNECT_RADIUS) {
+          visited.add(j);
+          queue.push(j);
+        }
+      }
+    }
+
+    // Mark all as popping immediately (removes from alive pool)
+    chain.forEach(i => { crystals[i].state = 'popping'; });
+
+    // Schedule pop animations with stagger
+    const now = performance.now();
+    chain.forEach((i, k) => {
+      crystals[i].popStart = now + k * 75;
+      crystals[i].popDelay = k;
+    });
+
+    // Score
+    const chainLen = chain.length;
+    const gained = chainLen * chainLen * combo * 10;
+    score += gained;
+    scoreEl.textContent = score.toLocaleString();
+
+    if (chainLen >= 4) {
+      combo = Math.min(combo + 1, 10);
+      flashCombo(combo);
+    }
+
+    // Shake
+    if (chainLen >= 3) {
+      shakeAmt = Math.min(0.15 * chainLen, 1.2);
+      shakeDecay = 0.3;
+    }
+
+    const startColor = '#' + PALETTE[targetColor].hex.toString(16).padStart(6, '0');
+    spawnFloat(`+${gained}`, start.mesh.position, startColor);
+
+    rebuildLines();
+    updateRemain();
+
+    // Wave clear check
+    const totalPop = now + chain.length * 75 + 350;
+    const delay = totalPop - performance.now();
+    setTimeout(() => {
+      const alive = crystals.filter(c => c.state === 'alive').length;
+      if (alive === 0 && !waveClearing) {
+        waveClearing = true;
+        const bonus = wave * 500 * combo;
+        score += bonus;
+        scoreEl.textContent = score.toLocaleString();
+        spawnFloat(`WAVE CLEAR! +${bonus}`, new THREE.Vector3(0, 2, 0), '#ffcc00');
+        setTimeout(() => {
+          wave++;
+          combo = 1;
+          waveClearing = false;
+          spawnWave(wave);
+        }, 1200);
+      }
+    }, Math.max(delay, 100));
+  }
+
+  // Input
+  const raycaster = new THREE.Raycaster();
+  const mouse2 = new THREE.Vector2();
+
+  function handleTap(ex, ey) {
+    mouse2.x = (ex / window.innerWidth) * 2 - 1;
+    mouse2.y = -(ey / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse2, camera);
+
+    const aliveMeshes = crystals.filter(c => c.state === 'alive').map(c => c.mesh);
+    const hits = raycaster.intersectObjects(aliveMeshes, false);
+    if (hits.length === 0) return;
+
+    const hitMesh = hits[0].object;
+    const idx = crystals.findIndex(c => c.mesh === hitMesh);
+    if (idx >= 0) chainBurst(idx);
+  }
+
+  canvas.addEventListener('click', e => handleTap(e.clientX, e.clientY));
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches.length > 0) handleTap(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+
+  window.addEventListener('resize', () => {
+    const nw = window.innerWidth, nh = window.innerHeight;
+    renderer.setSize(nw, nh);
+    camera.aspect = nw / nh;
+    camera.updateProjectionMatrix();
+  });
+
+  // Main loop
+  let lastT = 0, lineTimer = 0;
+  let particlesBursted = new Set();
+
+  function tick(t) {
+    requestAnimationFrame(tick);
+    const dt = Math.min((t - lastT) / 1000, 0.05);
+    lastT = t;
+    const now = performance.now();
+
+    // Crystal updates
+    crystals.forEach(c => {
+      if (!c.mesh) return;
+
+      if (c.state === 'alive') {
+        // Spawn-in scale animation
+        if (c.spawnScale < 1) {
+          const elapsed = now - c.spawnStart - c.spawnDelay;
+          if (elapsed > 0) {
+            c.spawnScale = Math.min(elapsed / 350, 1);
+            const sc = easeOutBack(c.spawnScale);
+            c.mesh.scale.setScalar(sc);
+          }
+        }
+        // Bob + rotate
+        c.mesh.rotation.x += c.rotSpd.x;
+        c.mesh.rotation.y += c.rotSpd.y;
+        c.mesh.rotation.z += c.rotSpd.z;
+        c.mesh.position.y = c.baseY + Math.sin(t * 0.001 * 0.9 + c.bobOffset) * 0.18;
+
+      } else if (c.state === 'popping') {
+        const elapsed = now - c.popStart;
+        if (elapsed < 0) return; // waiting for stagger
+
+        // Burst particles once
+        if (!particlesBursted.has(c)) {
+          particlesBursted.add(c);
+          burstParticles(c.mesh.position, PALETTE[c.colorIdx].hex, 14);
+        }
+
+        const prog = Math.min(elapsed / 280, 1);
+        const sc = (1 + prog * 0.6) * (1 - prog);
+        c.mesh.scale.setScalar(Math.max(sc, 0));
+        c.mesh.material.opacity = 1 - prog;
+
+        if (prog >= 1) {
+          scene.remove(c.mesh);
+          c.mesh = null;
+          c.state = 'dead';
+        }
+      }
+    });
+
+    // Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.mesh.position.addScaledVector(p.vel, 1);
+      p.vel.multiplyScalar(0.93);
+      p.life -= dt * p.decay;
+      p.mat.opacity = Math.max(p.life, 0);
+      if (p.life <= 0) {
+        scene.remove(p.mesh);
+        particles.splice(i, 1);
+      }
+    }
+
+    // Floating texts
+    for (let i = floatTexts.length - 1; i >= 0; i--) {
+      const ft = floatTexts[i];
+      ft.t += dt;
+      const prog = ft.t / ft.dur;
+      if (prog >= 1) { ft.el.remove(); floatTexts.splice(i, 1); continue; }
+      ft.el.style.top = (ft.startY - prog * 55) + 'px';
+      ft.el.style.opacity = String(1 - Math.pow(prog, 2));
+    }
+
+    // Screen shake
+    if (shakeDecay > 0) {
+      shakeDecay = Math.max(shakeDecay - dt, 0);
+      const s = shakeAmt * (shakeDecay / 0.3);
+      camera.position.x = camBase.x + (Math.random() - 0.5) * s;
+      camera.position.y = camBase.y + (Math.random() - 0.5) * s;
+    } else {
+      camera.position.copy(camBase);
+    }
+
+    // Slow orbital camera drift
+    const ct = t * 0.0003;
+    camBase.x = Math.sin(ct * 0.7) * 1.8;
+    camBase.y = Math.cos(ct * 0.5) * 1.1;
+    camera.lookAt(0, 0, 0);
+
+    // Line refresh
+    lineTimer += dt;
+    if (lineTimer > 0.12) { rebuildLines(); lineTimer = 0; }
+
+    renderer.render(scene, camera);
+  }
+
+  function easeOutBack(x) {
+    const c1 = 1.70158, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+  }
+
+  // Boot
+  spawnWave(1);
+  requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

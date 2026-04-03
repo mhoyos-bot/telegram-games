@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<!-- NOTE: STD-031 exception — single-file game build, justified at 4xx lines -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+  <title>Runner</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#030d1a;overflow:hidden;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
+    canvas{display:block;touch-action:none}
+    #ui{position:fixed;top:0;left:0;width:100%;pointer-events:none;z-index:10}
+    #score{
+      text-align:center;
+      font-family:'Courier New',monospace;
+      font-size:28px;
+      font-weight:700;
+      color:#14f195;
+      padding:14px 0 0;
+      letter-spacing:2px;
+      text-shadow:0 0 12px #14f195;
+      transition:transform 0.1s;
+    }
+    #score.pulse{
+      animation:scorePulse 0.35s ease-out;
+    }
+    @keyframes scorePulse{
+      0%{transform:scale(1)}
+      40%{transform:scale(1.4);text-shadow:0 0 28px #14f195,0 0 48px #14f195}
+      100%{transform:scale(1)}
+    }
+    #best{
+      text-align:center;
+      font-family:'Courier New',monospace;
+      font-size:13px;
+      color:#14f19580;
+      padding:2px 0 0;
+      letter-spacing:1px;
+    }
+    #msg{
+      position:fixed;
+      top:50%;left:50%;
+      transform:translate(-50%,-50%);
+      display:none;
+      flex-direction:column;
+      align-items:center;
+      gap:14px;
+      pointer-events:none;
+    }
+    #msg.show{display:flex}
+    #msg .over{
+      font-family:'Courier New',monospace;
+      font-size:36px;
+      font-weight:700;
+      color:#ff3355;
+      text-shadow:0 0 18px #ff3355;
+      letter-spacing:3px;
+    }
+    #msg .final{
+      font-family:'Courier New',monospace;
+      font-size:18px;
+      color:#14f195;
+      text-shadow:0 0 8px #14f195;
+    }
+    #msg .tap{
+      font-family:'Courier New',monospace;
+      font-size:15px;
+      color:#14f19599;
+      animation:blink 0.9s step-start infinite;
+    }
+    @keyframes blink{50%{opacity:0}}
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="best"></div>
+</div>
+<div id="msg">
+  <div class="over">GAME OVER</div>
+  <div class="final" id="finalScore"></div>
+  <div class="tap">TAP TO RESTART</div>
+</div>
+<script>
+'use strict';
+
+// 1. Telegram init
+const tg = window.Telegram && window.Telegram.WebApp;
+try {
+  if (tg) { tg.ready(); tg.expand(); }
+} catch (_e) { console.warn('[WARN] Telegram init failed:', _e); }
+
+function haptic(style) {
+  try {
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred(style);
+  } catch (_e) { console.warn('[WARN] haptic failed:', _e); }
+}
+
+// 2. Canvas setup
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, groundY = 0;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  groundY = Math.floor(H * 0.75);
+}
+resize();
+window.addEventListener('resize', () => { resize(); });
+
+// 3. DOM refs
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const msgEl = document.getElementById('msg');
+const finalScoreEl = document.getElementById('finalScore');
+
+// 4. Constants
+const GRAVITY = 2400;
+const JUMP_V = -720;
+const JUMP_V2 = -620;
+const BASE_SPEED = 320;
+const SPEED_INC = 14;
+const MAX_SPEED = 950;
+const OBS_INTERVAL_BASE = 1.6;
+const OBS_INTERVAL_MIN = 0.5;
+const PLAYER_W = 32;
+const PLAYER_H = 44;
+const SHAKE_DECAY = 0.78;
+const PLAYER_X = 90;
+const TRAIL_LEN = 8;
+
+const OBS_TYPES = [
+  { w: 28, h: 50,  color: '#ff3355' },
+  { w: 20, h: 82,  color: '#ff6600' },
+  { w: 38, h: 36,  color: '#cc2244' },
+  { w: 24, h: 108, color: '#ff4422' },
+];
+
+const BG_DEFS = [
+  { speed: 0.15, color: '#0a1a30', minH: 0.25, maxH: 0.55, count: 12 },
+  { speed: 0.30, color: '#0f2840', minH: 0.15, maxH: 0.38, count: 10 },
+  { speed: 0.55, color: '#0d2035', minH: 0.10, maxH: 0.28, count: 14 },
+];
+
+// 5. Game state
+let G = {};
+
+function initBgLayer(count, minHFrac, maxHFrac, extraW) {
+  const arr = [];
+  for (let i = 0; i < count; i++) {
+    const h = Math.floor((minHFrac + Math.random() * (maxHFrac - minHFrac)) * H);
+    const w = Math.floor(20 + Math.random() * (extraW || 60));
+    arr.push({ x: Math.random() * W * 1.5, w, h });
+  }
+  return arr;
+}
+
+function initGame() {
+  let best = 0;
+  try { best = parseInt(localStorage.getItem('runner001_best') || '0', 10) || 0; } catch (_e) { console.warn('[WARN] localStorage read failed:', _e); }
+
+  G = {
+    running: true,
+    dead: false,
+    score: 0,
+    dist: 0,
+    speed: BASE_SPEED,
+    time: 0,
+    px: PLAYER_X,
+    py: 0,
+    pvy: 0,
+    grounded: false,
+    dblJump: false,
+    shake: 0,
+    shakeX: 0,
+    shakeY: 0,
+    obstacles: [],
+    particles: [],
+    trail: [],
+    nextObs: 0.8,
+    nextObsDelay: OBS_INTERVAL_BASE,
+    best,
+  };
+  G.py = groundY - PLAYER_H;
+  G.grounded = true;
+
+  G.bgLayers = BG_DEFS.map((def, i) =>
+    ({ ...def, objs: initBgLayer(def.count, def.minH, def.maxH, 40 + i * 20) })
+  );
+
+  msgEl.classList.remove('show');
+  updateScoreDisplay();
+  if (best > 0) bestEl.textContent = 'BEST ' + best;
+}
+
+// 7. Jump handler
+function onJump() {
+  if (G.dead) {
+    initGame();
+    return;
+  }
+  if (!G.running) return;
+  if (G.grounded) {
+    G.pvy = JUMP_V;
+    G.grounded = false;
+    G.dblJump = false;
+    haptic('light');
+  } else if (!G.dblJump) {
+    G.pvy = JUMP_V2;
+    G.dblJump = true;
+    haptic('medium');
+    burst(G.px + PLAYER_W / 2, G.py + PLAYER_H, '#14f195', 6);
+  }
+}
+
+// 8. Input listeners
+canvas.addEventListener('pointerdown', (ev) => {
+  try { ev.preventDefault(); onJump(); } catch (_e) { console.warn('[WARN] pointerdown handler failed:', _e); }
+});
+document.addEventListener('keydown', (ev) => {
+  try {
+    if (ev.code === 'Space' || ev.code === 'ArrowUp') { ev.preventDefault(); onJump(); }
+  } catch (_e) { console.warn('[WARN] keydown handler failed:', _e); }
+});
+
+// 9. Spawn obstacle
+function spawnObs() {
+  const t = OBS_TYPES[Math.floor(Math.random() * OBS_TYPES.length)];
+  G.obstacles.push({ x: W + 10, w: t.w, h: t.h, color: t.color });
+}
+
+// 10. Burst particles
+function burst(x, y, colorHex, n) {
+  for (let i = 0; i < n; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd = 80 + Math.random() * 220;
+    G.particles.push({
+      x, y,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd - 80,
+      life: 1,
+      decay: 1 / (0.35 + Math.random() * 0.15),
+      color: colorHex,
+      r: 2 + Math.random() * 3,
+    });
+  }
+}
+
+// 11. Shake
+function addShake(amt) {
+  G.shake = Math.max(G.shake, amt);
+}
+
+function updateShake(dt) {
+  if (G.shake < 0.2) { G.shake = 0; G.shakeX = 0; G.shakeY = 0; return; }
+  G.shakeX = (Math.random() - 0.5) * G.shake * 2;
+  G.shakeY = (Math.random() - 0.5) * G.shake * 2;
+  G.shake *= Math.pow(SHAKE_DECAY, dt * 60);
+}
+
+// 12. Collision (AABB with 4px inset)
+function checkCollision() {
+  const inset = 4;
+  const px1 = G.px + inset, py1 = G.py + inset;
+  const px2 = G.px + PLAYER_W - inset, py2 = G.py + PLAYER_H - inset;
+  for (let i = 0; i < G.obstacles.length; i++) {
+    const o = G.obstacles[i];
+    const ox1 = o.x, oy1 = groundY - o.h;
+    const ox2 = o.x + o.w, oy2 = groundY;
+    if (px2 > ox1 && px1 < ox2 && py2 > oy1 && py1 < oy2) return true;
+  }
+  return false;
+}
+
+// 13. Score display
+let lastPulseScore = 0;
+function updateScoreDisplay() {
+  const s = Math.floor(G.dist / 10);
+  G.score = s;
+  scoreEl.textContent = s;
+  if (s > 0 && s % 10 === 0 && s !== lastPulseScore) {
+    lastPulseScore = s;
+    pulseScore();
+  }
+}
+
+function pulseScore() {
+  scoreEl.classList.remove('pulse');
+  void scoreEl.offsetWidth;
+  scoreEl.classList.add('pulse');
+  scoreEl.addEventListener('animationend', () => scoreEl.classList.remove('pulse'), { once: true });
+}
+
+// 14. Kill player
+function killPlayer() {
+  G.dead = true;
+  G.running = false;
+  addShake(18);
+  haptic('heavy');
+  burst(G.px + PLAYER_W / 2, G.py + PLAYER_H / 2, '#ff3355', 22);
+  burst(G.px + PLAYER_W / 2, G.py + PLAYER_H / 2, '#ff6600', 12);
+  setTimeout(() => {
+    try {
+      msgEl.classList.add('show');
+      finalScoreEl.textContent = 'SCORE ' + G.score;
+      if (G.score > G.best) {
+        G.best = G.score;
+        bestEl.textContent = 'BEST ' + G.best;
+        try { localStorage.setItem('runner001_best', G.best); } catch (_e2) { console.warn('[WARN] localStorage write failed:', _e2); }
+      }
+    } catch (_e) { console.warn('[WARN] death overlay failed:', _e); }
+  }, 600);
+}
+
+// 15. Update
+function update(dt) {
+  if (!G.running) {
+    // still update particles and shake after death
+    updateShake(dt);
+    for (let i = G.particles.length - 1; i >= 0; i--) {
+      const p = G.particles[i];
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vy += 400 * dt;
+      p.life -= p.decay * dt;
+      if (p.life <= 0) G.particles.splice(i, 1);
+    }
+    return;
+  }
+
+  G.time += dt;
+  G.speed = Math.min(BASE_SPEED + G.time * SPEED_INC, MAX_SPEED);
+  G.dist += G.speed * dt;
+
+  // Physics
+  G.pvy += GRAVITY * dt;
+  G.py += G.pvy * dt;
+
+  // Ground collision
+  const floor = groundY - PLAYER_H;
+  if (G.py >= floor) {
+    if (G.pvy > 400) {
+      const shakeAmt = Math.min(G.pvy / 100, 5);
+      addShake(shakeAmt);
+      burst(G.px + PLAYER_W / 2, groundY, '#14f195', 4);
+    }
+    G.py = floor;
+    G.pvy = 0;
+    G.grounded = true;
+    G.dblJump = false;
+  } else {
+    G.grounded = false;
+  }
+
+  // Trail
+  G.trail.push({ x: G.px, y: G.py });
+  if (G.trail.length > TRAIL_LEN) G.trail.shift();
+
+  // Obstacles
+  G.nextObs -= dt;
+  if (G.nextObs <= 0) {
+    spawnObs();
+    G.nextObsDelay = Math.max(OBS_INTERVAL_MIN, OBS_INTERVAL_BASE - G.time * 0.04);
+    G.nextObs = G.nextObsDelay;
+  }
+  for (let i = G.obstacles.length - 1; i >= 0; i--) {
+    G.obstacles[i].x -= G.speed * dt;
+    if (G.obstacles[i].x + G.obstacles[i].w < -10) G.obstacles.splice(i, 1);
+  }
+
+  // Collision check
+  if (checkCollision()) { killPlayer(); return; }
+
+  // Particles
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const p = G.particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 400 * dt;
+    p.life -= p.decay * dt;
+    if (p.life <= 0) G.particles.splice(i, 1);
+  }
+
+  // BG layers
+  for (let l = 0; l < G.bgLayers.length; l++) {
+    const layer = G.bgLayers[l];
+    const mv = G.speed * layer.speed * dt;
+    for (let i = 0; i < layer.objs.length; i++) {
+      layer.objs[i].x -= mv;
+      if (layer.objs[i].x + layer.objs[i].w < -20) {
+        layer.objs[i].x = W + Math.random() * 40;
+        const minH = layer.minH, maxH = layer.maxH;
+        layer.objs[i].h = Math.floor((minH + Math.random() * (maxH - minH)) * H);
+        layer.objs[i].w = Math.floor(20 + Math.random() * 60);
+      }
+    }
+  }
+
+  updateShake(dt);
+  updateScoreDisplay();
+}
+
+// 16. Draw
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(Math.round(G.shakeX), Math.round(G.shakeY));
+
+  // Background
+  ctx.fillStyle = '#030d1a';
+  ctx.fillRect(0, 0, W, H);
+
+  // BG city layers
+  for (let l = 0; l < G.bgLayers.length; l++) {
+    const layer = G.bgLayers[l];
+    ctx.fillStyle = layer.color;
+    for (let i = 0; i < layer.objs.length; i++) {
+      const o = layer.objs[i];
+      ctx.fillRect(Math.round(o.x), groundY - o.h, o.w, o.h);
+    }
+  }
+
+  // Ground grid (perspective lines)
+  const gridSpacing = 80;
+  const gridOffset = (G.dist * 0.5) % gridSpacing;
+  const vanishX = W * 0.5;
+  ctx.strokeStyle = 'rgba(20,241,149,0.08)';
+  ctx.lineWidth = 1;
+  for (let x = -gridSpacing + gridOffset; x < W + gridSpacing; x += gridSpacing) {
+    ctx.beginPath();
+    ctx.moveTo(vanishX + (x - vanishX) * 0.001, groundY);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+
+  // Ground line glow
+  ctx.shadowColor = '#14f195';
+  ctx.shadowBlur = 8;
+  ctx.strokeStyle = '#14f195';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+  ctx.lineTo(W, groundY);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Ground fill (dark strip)
+  ctx.fillStyle = '#020a14';
+  ctx.fillRect(0, groundY, W, H - groundY);
+
+  // Obstacles
+  for (let i = 0; i < G.obstacles.length; i++) {
+    const o = G.obstacles[i];
+    ctx.shadowColor = o.color;
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = o.color;
+    ctx.fillRect(Math.round(o.x), groundY - o.h, o.w, o.h);
+  }
+  ctx.shadowBlur = 0;
+
+  // Player trail
+  for (let i = 0; i < G.trail.length; i++) {
+    const t = G.trail[i];
+    const alpha = (i / G.trail.length) * 0.35;
+    ctx.fillStyle = `rgba(20,241,149,${alpha.toFixed(3)})`;
+    const scale = 0.5 + 0.5 * (i / G.trail.length);
+    const tw = Math.round(PLAYER_W * scale);
+    const th = Math.round(PLAYER_H * scale);
+    const tx = Math.round(t.x + (PLAYER_W - tw) / 2);
+    const ty = Math.round(t.y + (PLAYER_H - th) / 2);
+    ctx.fillRect(tx, ty, tw, th);
+  }
+
+  // Player
+  if (!G.dead) {
+    ctx.shadowColor = '#14f195';
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = '#14f195';
+    ctx.fillRect(Math.round(G.px), Math.round(G.py), PLAYER_W, PLAYER_H);
+    // Eye
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#030d1a';
+    ctx.fillRect(Math.round(G.px) + PLAYER_W - 10, Math.round(G.py) + 10, 6, 6);
+    ctx.shadowBlur = 0;
+  }
+
+  // Particles
+  for (let i = 0; i < G.particles.length; i++) {
+    const p = G.particles[i];
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
+// 17. RAF loop
+let lastTime = 0;
+function loop(now) {
+  try {
+    const dt = Math.min((now - lastTime) / 1000, 0.05);
+    lastTime = now;
+    update(dt);
+    draw();
+  } catch (_e) { console.warn('[WARN] game loop error:', _e); }
+  requestAnimationFrame(loop);
+}
+
+// 18. Boot
+initGame();
+requestAnimationFrame((now) => { lastTime = now; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>

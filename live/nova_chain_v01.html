@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>NOVA CHAIN</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;touch-action:none;background:#020810;font-family:'Courier New',monospace}
+canvas{display:block}
+#hud{position:fixed;top:0;left:0;right:0;pointer-events:none;padding:14px 18px;
+  display:flex;justify-content:space-between;align-items:flex-start;z-index:10}
+#score{color:#14f195;font-size:32px;font-weight:bold;text-shadow:0 0 20px #14f195;letter-spacing:2px}
+#chain{color:#ffbb44;font-size:13px;font-weight:bold;margin-top:5px;letter-spacing:3px;min-height:16px}
+#lives{display:flex;gap:8px;align-items:center;padding-top:8px}
+.pip{width:13px;height:13px;border-radius:50%;background:#14f195;
+  box-shadow:0 0 10px #14f195;transition:all 0.25s}
+.pip.dead{background:#112233;box-shadow:none;transform:scale(0.7)}
+#flash{position:fixed;inset:0;pointer-events:none;opacity:0;z-index:20;
+  transition:opacity 0.07s ease-out}
+#chainpop{position:fixed;top:38%;left:50%;transform:translate(-50%,-50%);
+  font-size:42px;font-weight:bold;pointer-events:none;opacity:0;white-space:nowrap;
+  text-shadow:0 0 30px currentColor;letter-spacing:6px;z-index:15;
+  transition:opacity 0.12s,transform 0.12s}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;background:rgba(2,8,16,0.94);z-index:30}
+#overlay h1{color:#14f195;font-size:46px;text-shadow:0 0 40px #14f195;
+  letter-spacing:10px;margin-bottom:8px;animation:glow 1.3s ease-in-out infinite alternate}
+#overlay .sub{color:#334455;font-size:11px;margin-bottom:30px;text-align:center;
+  line-height:2.4;max-width:260px;letter-spacing:2px}
+#overlay .fscore{color:#ffdd44;font-size:30px;text-shadow:0 0 18px #ffaa00;
+  display:none;margin-bottom:6px;letter-spacing:2px}
+#overlay .fbest{color:#ff7755;font-size:12px;text-shadow:0 0 8px #ff5500;
+  display:none;margin-bottom:26px;letter-spacing:2px}
+#overlay button{background:#020810;border:2px solid #14f195;color:#14f195;
+  font-size:16px;padding:14px 48px;cursor:pointer;letter-spacing:5px;
+  font-family:'Courier New',monospace;box-shadow:0 0 28px #14f19540;
+  transition:all 0.15s;pointer-events:all}
+#overlay button:active{transform:scale(0.95);background:#081a10}
+#overlay.gone{display:none}
+@keyframes glow{from{text-shadow:0 0 20px #14f195}to{text-shadow:0 0 55px #14f195,0 0 90px #14f19560}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div>
+<div id="hud">
+  <div>
+    <div id="score">0</div>
+    <div id="chain"></div>
+  </div>
+  <div id="lives">
+    <div class="pip" id="p0"></div>
+    <div class="pip" id="p1"></div>
+    <div class="pip" id="p2"></div>
+  </div>
+</div>
+<div id="chainpop"></div>
+<div id="overlay">
+  <h1>NOVA CHAIN</h1>
+  <div class="sub" id="sub">TAP AN ORB<br>CHAIN NEARBY ORBS<br>BIGGER CHAIN = MORE SCORE</div>
+  <div class="fscore" id="fscore"></div>
+  <div class="fbest" id="fbest"></div>
+  <button id="btn">TAP TO START</button>
+</div>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Telegram bridge
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+function haptic(t) { tg?.HapticFeedback?.impactOccurred(t || 'light'); }
+
+// DOM refs
+const flash    = document.getElementById('flash');
+const scoreEl  = document.getElementById('score');
+const chainEl  = document.getElementById('chain');
+const chainpop = document.getElementById('chainpop');
+const overlay  = document.getElementById('overlay');
+const subEl    = document.getElementById('sub');
+const fscoreEl = document.getElementById('fscore');
+const fbestEl  = document.getElementById('fbest');
+const btn      = document.getElementById('btn');
+const pips     = [0,1,2].map(i => document.getElementById('p'+i));
+
+// Renderer
+const canvas = document.getElementById('c');
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+const renderer = new THREE.WebGLRenderer({canvas, antialias: true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W(), H());
+renderer.setClearColor(0x020810, 1);
+
+// Scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x020810, 0.04);
+
+// Camera
+const camera = new THREE.PerspectiveCamera(52, W()/H(), 0.1, 80);
+camera.position.set(0, 15, 13);
+camera.lookAt(0, 0, 0);
+const CAM_BASE = camera.position.clone();
+
+// Lights
+scene.add(new THREE.AmbientLight(0x0a1a2a, 2.0));
+const dirL = new THREE.DirectionalLight(0x14f195, 2.2);
+dirL.position.set(6, 12, 8);
+scene.add(dirL);
+const fillL = new THREE.DirectionalLight(0xff7722, 0.6);
+fillL.position.set(-8, 4, -4);
+scene.add(fillL);
+
+// Ground
+const gGeo = new THREE.PlaneGeometry(32, 32, 12, 12);
+const gPos = gGeo.attributes.position;
+for (let i = 0; i < gPos.count; i++) {
+  gPos.setZ(i, gPos.getZ(i) + (Math.random()-0.5)*0.4);
+}
+gGeo.computeVertexNormals();
+const ground = new THREE.Mesh(gGeo, new THREE.MeshLambertMaterial({color:0x0a1a0f}));
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// Shared geometry
+const ORB_GEO    = new THREE.SphereGeometry(0.55, 10, 7);
+const PART_GEO   = new THREE.SphereGeometry(0.09, 4, 3);
+const RING_INNER = 0.85, RING_OUTER = 1.0;
+const RING_GEO   = new THREE.RingGeometry(RING_INNER, RING_OUTER, 24);
+
+// Orb color palette (color, emissive)
+const ORB_PALETTE = [
+  [0xffaa22, 0xff6600],
+  [0x22ddff, 0x0099dd],
+  [0xbb44ff, 0x7700cc],
+  [0xff4466, 0xcc0033],
+  [0x44ffaa, 0x00cc66],
+];
+
+// -- ORB POOL --
+const ORB_POOL = [];
+for (let i = 0; i < 20; i++) {
+  const [col, emi] = ORB_PALETTE[i % ORB_PALETTE.length];
+  const mat = new THREE.MeshLambertMaterial({
+    color: col, emissive: emi, emissiveIntensity: 0.5
+  });
+  const m = new THREE.Mesh(ORB_GEO, mat);
+  m.visible = false;
+  scene.add(m);
+  ORB_POOL.push(m);
+}
+function getFreeOrb() { return ORB_POOL.find(m => !m.visible) || null; }
+
+// -- PARTICLE POOL --
+const PART_POOL = [];
+for (let i = 0; i < 240; i++) {
+  const mat = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 1});
+  const m = new THREE.Mesh(PART_GEO, mat);
+  m.visible = false;
+  scene.add(m);
+  PART_POOL.push({mesh: m, vx:0, vy:0, vz:0, life:0, maxLife:0});
+}
+function getFreePart() { return PART_POOL.find(p => !p.mesh.visible) || null; }
+
+// -- SHOCKWAVE POOL --
+const SHOCK_POOL = [];
+for (let i = 0; i < 12; i++) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x14f195, side: THREE.DoubleSide, transparent: true, opacity: 0.75
+  });
+  const m = new THREE.Mesh(RING_GEO, mat.clone());
+  m.rotation.x = -Math.PI / 2;
+  m.visible = false;
+  scene.add(m);
+  SHOCK_POOL.push({mesh: m, life:0, maxLife:0.55, px:0, pz:0, col:0x14f195});
+}
+function getFreeShock() { return SHOCK_POOL.find(s => !s.mesh.visible) || null; }
+
+// Game state
+let score = 0, lives = 3, bestScore = 0, running = false;
+let spawnTimer = 0, spawnInterval = 2.1, gameTick = 0;
+
+const FIELD_W = 7.5, FIELD_D = 5.5;
+const CHAIN_RADIUS = 3.0;
+const ORB_LIFETIME = 7.5;
+const MAX_ORBS = 14;
+
+// Active object lists
+const activeOrbs = []; // {mesh, age, phase, palIdx, alive}
+const activeParts = [];
+const activeShocks = [];
+
+function spawnOrb() {
+  if (activeOrbs.length >= MAX_ORBS) return;
+  const mesh = getFreeOrb();
+  if (!mesh) return;
+  const x = (Math.random()-0.5) * FIELD_W * 2;
+  const z = (Math.random()-0.5) * FIELD_D * 2;
+  const palIdx = Math.floor(Math.random() * ORB_PALETTE.length);
+  const [col, emi] = ORB_PALETTE[palIdx];
+  mesh.material.color.setHex(col);
+  mesh.material.emissive.setHex(emi);
+  mesh.material.emissiveIntensity = 0.5;
+  mesh.position.set(x, 0.55, z);
+  mesh.scale.setScalar(0.05);
+  mesh.visible = true;
+  activeOrbs.push({mesh, age:0, phase: Math.random()*Math.PI*2, palIdx, alive:true});
+}
+
+function burstOrb(orb) {
+  orb.alive = false;
+  orb.mesh.visible = false;
+  const px = orb.mesh.position.x;
+  const py = orb.mesh.position.y;
+  const pz = orb.mesh.position.z;
+  const [col] = ORB_PALETTE[orb.palIdx];
+
+  // Particles
+  for (let i = 0; i < 16; i++) {
+    const p = getFreePart();
+    if (!p) break;
+    p.mesh.position.set(px, py, pz);
+    p.mesh.material.color.setHex(col);
+    p.mesh.material.opacity = 1;
+    p.mesh.visible = true;
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 2.5 + Math.random() * 4.5;
+    p.vx = Math.cos(ang) * spd;
+    p.vy = 2.5 + Math.random() * 5.5;
+    p.vz = Math.sin(ang) * spd;
+    p.life = 0;
+    p.maxLife = 0.45 + Math.random() * 0.45;
+    activeParts.push(p);
+  }
+
+  // Shockwave
+  const sw = getFreeShock();
+  if (sw) {
+    sw.mesh.position.set(px, 0.08, pz);
+    sw.mesh.scale.setScalar(0.12);
+    sw.mesh.material.color.setHex(col);
+    sw.mesh.material.opacity = 0.8;
+    sw.mesh.visible = true;
+    sw.life = 0;
+    sw.maxLife = 0.52;
+    sw.px = px;
+    sw.pz = pz;
+    activeShocks.push(sw);
+  }
+}
+
+// BFS chain from a starting orb — returns count of orbs burst
+function triggerChain(startOrb) {
+  const visited = new Set();
+  const queue = [startOrb];
+  visited.add(startOrb);
+
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    for (const other of activeOrbs) {
+      if (!other.alive || visited.has(other)) continue;
+      const dx = other.mesh.position.x - cur.mesh.position.x;
+      const dz = other.mesh.position.z - cur.mesh.position.z;
+      if (dx*dx + dz*dz < CHAIN_RADIUS * CHAIN_RADIUS) {
+        visited.add(other);
+        queue.push(other);
+      }
+    }
+  }
+
+  const n = visited.size;
+  for (const orb of visited) burstOrb(orb);
+
+  // Score
+  const pts = 10 * n * (n >= 3 ? n : 1);
+  score += pts;
+  scoreEl.textContent = score;
+
+  // Juice feedback
+  const flashCol = n >= 5 ? '#14f195' : n >= 3 ? '#ffaa22' : '#22ddff';
+  flash.style.background = flashCol;
+  flash.style.opacity = n >= 4 ? '0.28' : '0.14';
+  setTimeout(() => { flash.style.opacity = '0'; }, 90);
+
+  if (n >= 2) showChainPop(n);
+  if (n >= 3) cameraShake(n * 0.035);
+  haptic(n >= 4 ? 'heavy' : n >= 2 ? 'medium' : 'light');
+}
+
+// Chain popup text
+let popTimer = null;
+function showChainPop(n) {
+  const labels = ['','','DOUBLE!','TRIPLE!','QUAD!','PENTA!!','HEXA!!!'];
+  const cols   = ['','','#ffbb44','#ff6b35','#ff4466','#bb44ff','#14f195'];
+  const label  = n < labels.length ? labels[n] : 'x'+n+' CHAIN!!!';
+  const col    = n < cols.length   ? cols[n]   : '#14f195';
+  chainpop.textContent = label;
+  chainpop.style.color = col;
+  chainpop.style.opacity = '1';
+  chainpop.style.transform = 'translate(-50%,-50%) scale(1.18)';
+  if (popTimer) clearTimeout(popTimer);
+  popTimer = setTimeout(() => {
+    chainpop.style.opacity = '0';
+    chainpop.style.transform = 'translate(-50%,-50%) scale(1)';
+  }, 700);
+}
+
+// Camera shake
+let shakeT = 0, shakeMag = 0;
+function cameraShake(mag) { shakeMag = mag; shakeT = 0.28; }
+
+function updateLives() {
+  pips.forEach((p, i) => p.classList.toggle('dead', i >= lives));
+}
+
+function orbExpired(orb) {
+  orb.alive = false;
+  orb.mesh.visible = false;
+  lives--;
+  updateLives();
+  flash.style.background = '#ff2244';
+  flash.style.opacity = '0.38';
+  setTimeout(() => { flash.style.opacity = '0'; }, 140);
+  haptic('heavy');
+  if (lives <= 0) endGame();
+}
+
+// Raycaster for tap
+const raycaster = new THREE.Raycaster();
+const pointer   = new THREE.Vector2();
+
+function onTap(cx, cy) {
+  if (!running) return;
+  pointer.x =  (cx / W()) * 2 - 1;
+  pointer.y = -(cy / H()) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const liveOrbs = activeOrbs.filter(o => o.alive);
+  const meshes   = liveOrbs.map(o => o.mesh);
+  const hits     = raycaster.intersectObjects(meshes);
+  if (hits.length > 0) {
+    const hit = hits[0].object;
+    const orb = liveOrbs.find(o => o.mesh === hit);
+    if (orb) triggerChain(orb);
+  }
+}
+
+canvas.addEventListener('pointerdown', e => {
+  if (!running) return;
+  e.preventDefault();
+  onTap(e.clientX, e.clientY);
+}, {passive: false});
+
+// Game lifecycle
+function startGame() {
+  score = 0; lives = 3; running = true; gameTick = 0;
+  spawnTimer = 0; spawnInterval = 2.1;
+  scoreEl.textContent = '0';
+  chainEl.textContent = '';
+  // Clear all active objects
+  activeOrbs.forEach(o => { o.mesh.visible = false; o.alive = false; });
+  activeOrbs.length = 0;
+  activeParts.forEach(p => { p.mesh.visible = false; });
+  activeParts.length = 0;
+  activeShocks.forEach(s => { s.mesh.visible = false; });
+  activeShocks.length = 0;
+  updateLives();
+  subEl.textContent = 'TAP AN ORB\nCHAIN NEARBY ORBS\nBIGGER CHAIN = MORE SCORE';
+  fscoreEl.style.display = 'none';
+  fbestEl.style.display  = 'none';
+  overlay.classList.add('gone');
+  for (let i = 0; i < 5; i++) spawnOrb();
+}
+
+function endGame() {
+  running = false;
+  if (score > bestScore) bestScore = score;
+  overlay.classList.remove('gone');
+  fscoreEl.textContent = 'SCORE  ' + score;
+  fscoreEl.style.display = 'block';
+  fbestEl.textContent  = 'BEST   ' + bestScore;
+  fbestEl.style.display  = 'block';
+  subEl.textContent = '';
+  btn.textContent = 'PLAY AGAIN';
+}
+
+btn.addEventListener('pointerdown', e => { e.preventDefault(); startGame(); }, {passive:false});
+
+// Main loop
+let lastT = performance.now();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt  = Math.min((now - lastT) / 1000, 0.1);
+  lastT = now;
+
+  if (running) {
+    gameTick += dt;
+
+    // Spawn orbs
+    spawnTimer += dt;
+    if (spawnTimer >= spawnInterval) {
+      spawnTimer = 0;
+      spawnOrb();
+      spawnInterval = Math.max(0.75, spawnInterval - 0.02);
+    }
+
+    // Update orbs
+    for (let i = activeOrbs.length - 1; i >= 0; i--) {
+      const o = activeOrbs[i];
+      if (!o.alive) { activeOrbs.splice(i, 1); continue; }
+      o.age += dt;
+      // Scale in on spawn
+      const sc = Math.min(1.0, o.age * 2.8);
+      o.mesh.scale.setScalar(sc);
+      // Bob
+      o.mesh.position.y = 0.55 + Math.sin(gameTick*2.1 + o.phase) * 0.20;
+      // Urgency pulse
+      const urgency = o.age / ORB_LIFETIME;
+      o.mesh.material.emissiveIntensity = 0.4 + urgency * 1.4;
+      // Expire
+      if (o.age >= ORB_LIFETIME) {
+        activeOrbs.splice(i, 1);
+        orbExpired(o);
+      }
+    }
+
+    // Update shockwaves
+    for (let i = activeShocks.length - 1; i >= 0; i--) {
+      const sw = activeShocks[i];
+      sw.life += dt;
+      if (sw.life >= sw.maxLife) {
+        sw.mesh.visible = false;
+        activeShocks.splice(i, 1);
+        continue;
+      }
+      const t = sw.life / sw.maxLife;
+      sw.mesh.scale.setScalar(0.2 + t * CHAIN_RADIUS * 0.88);
+      sw.mesh.material.opacity = (1 - t) * 0.75;
+    }
+
+    // Update particles
+    for (let i = activeParts.length - 1; i >= 0; i--) {
+      const p = activeParts[i];
+      p.life += dt;
+      if (p.life >= p.maxLife) {
+        p.mesh.visible = false;
+        activeParts.splice(i, 1);
+        continue;
+      }
+      p.vy -= 11 * dt;
+      p.mesh.position.x += p.vx * dt;
+      p.mesh.position.y += p.vy * dt;
+      p.mesh.position.z += p.vz * dt;
+      const t = p.life / p.maxLife;
+      const sc = (1 - t) * 0.9 + 0.1;
+      p.mesh.scale.setScalar(sc);
+      p.mesh.material.opacity = 1 - t * t;
+    }
+  }
+
+  // Camera shake + gentle sway
+  if (shakeT > 0) {
+    shakeT -= dt;
+    camera.position.x = CAM_BASE.x + (Math.random()-0.5) * shakeMag * 2;
+    camera.position.y = CAM_BASE.y + (Math.random()-0.5) * shakeMag;
+  } else {
+    camera.position.x = CAM_BASE.x + Math.sin(lastT * 0.0003) * 0.12;
+    camera.position.y = CAM_BASE.y + Math.sin(lastT * 0.00019) * 0.07;
+  }
+
+  renderer.render(scene, camera);
+}
+
+// Resize
+window.addEventListener('resize', () => {
+  renderer.setSize(W(), H());
+  camera.aspect = W() / H();
+  camera.updateProjectionMatrix();
+});
+
+animate();
+</script>
+</body>
+</html>

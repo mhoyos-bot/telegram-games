@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>LUMEN WAVE</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #060b10; overflow: hidden; touch-action: none; font-family: monospace; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none; z-index: 10;
+    }
+    #score { color: #7fffd4; font: bold 26px/1 monospace; text-shadow: 0 0 16px rgba(127,255,212,0.8); }
+    #combo { color: #ffd700; font: bold 17px/1 monospace; text-shadow: 0 0 10px rgba(255,215,0,0.7);
+             min-width: 80px; text-align: center; opacity: 0; transition: opacity .15s; }
+    #lives { color: rgba(255,130,100,0.9); font: 22px/1 monospace; letter-spacing: 4px; }
+    #wave-bar-wrap {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      width: 220px; pointer-events: none;
+    }
+    #wave-label { color: rgba(127,255,212,0.4); font: 10px monospace; text-align: center;
+                  letter-spacing: 2px; margin-bottom: 5px; }
+    #wave-bar { height: 3px; background: rgba(127,255,212,0.12); border-radius: 2px; overflow: hidden; }
+    #wave-fill { height: 100%; background: #7fffd4; border-radius: 2px; width: 0%;
+                 box-shadow: 0 0 6px #7fffd4; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(6,11,16,0.88); z-index: 20;
+    }
+    #overlay h1 { color: #7fffd4; font: bold 44px/1.3 monospace; margin-bottom: 6px;
+                  text-shadow: 0 0 28px rgba(127,255,212,0.7); }
+    .ov-sub { color: rgba(255,255,255,0.4); font: 13px/1.7 monospace; text-align: center; max-width: 260px; }
+    .ov-score { color: #fff; font: bold 24px/1 monospace; margin: 18px 0 6px; }
+    .ov-best  { color: rgba(255,255,255,0.35); font: 13px/1 monospace; margin-bottom: 26px; }
+    .ov-btn {
+      background: rgba(127,255,212,0.08); border: 1px solid rgba(127,255,212,0.4);
+      color: #7fffd4; font: bold 17px/1 monospace; padding: 12px 34px;
+      cursor: pointer; letter-spacing: 1px;
+    }
+    .ov-btn:active { background: rgba(127,255,212,0.18); }
+    .ov-btn.red { border-color: rgba(255,130,100,0.4); color: rgba(255,130,100,0.9); }
+    .spop { position: fixed; pointer-events: none; z-index: 25;
+            color: #ffd700; font: bold 16px monospace; text-shadow: 0 0 8px #ffd700; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div id="score">00000</div>
+    <div id="combo"></div>
+    <div id="lives">&#9829;&#9829;&#9829;</div>
+  </div>
+  <div id="wave-bar-wrap">
+    <div id="wave-label">WAVE</div>
+    <div id="wave-bar"><div id="wave-fill"></div></div>
+  </div>
+  <div id="overlay">
+    <div id="ov-start">
+      <h1>LUMEN WAVE</h1>
+      <div class="ov-sub">The wave lights crystals.<br>Tap them before it passes!</div>
+      <div style="margin-top:30px;">
+        <button class="ov-btn" id="btn-start">&#9654; START</button>
+      </div>
+    </div>
+    <div id="ov-over" style="display:none; text-align:center;">
+      <h1 style="color:#ff8060; text-shadow:0 0 28px rgba(255,100,60,0.7);">WAVE LOST</h1>
+      <div class="ov-score" id="ov-final">SCORE: 0</div>
+      <div class="ov-best" id="ov-best"></div>
+      <button class="ov-btn red" id="btn-retry">&#8635; RIDE AGAIN</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
+  <script>
+  'use strict';
+  // === LUMEN WAVE v01 ===
+  // Lane: wild_lands | Feel: juice | Hook: instant_start
+  // Mechanic: sweep wave activates crystals, tap in window
+
+  const W = window.innerWidth, H = window.innerHeight;
+
+  // --- Renderer ---
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  document.body.insertBefore(renderer.domElement, document.getElementById('hud'));
+
+  // --- Scene ---
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x060b10);
+  scene.fog = new THREE.Fog(0x060b10, 20, 38);
+
+  // --- Camera (isometric ortho) ---
+  const ASP = W / H, CS = 9;
+  const camera = new THREE.OrthographicCamera(-CS*ASP, CS*ASP, CS, -CS, 0.1, 100);
+  camera.position.set(0, 14, 12);
+  camera.lookAt(0, 0, 0);
+
+  // --- Lighting ---
+  scene.add(new THREE.AmbientLight(0x112233, 1.6));
+  const sun = new THREE.DirectionalLight(0x44aaff, 1.4);
+  sun.position.set(5, 10, 6); scene.add(sun);
+  scene.add(Object.assign(new THREE.DirectionalLight(0x00ffcc, 0.5), {position: new THREE.Vector3(-6, 4, -4)}));
+
+  // --- Terrain ---
+  (function buildTerrain() {
+    const COLS = 18, ROWS = 14, SZ = 1.0;
+    const pos = [], col = [];
+    const pal = [new THREE.Color(0x0c2020), new THREE.Color(0x091a18), new THREE.Color(0x071410)];
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = (c - COLS/2) * SZ, z = (r - ROWS/2) * SZ;
+        const h = Math.sin(x*.6)*Math.cos(z*.6)*.4 + Math.sin(x*1.1+z*.9)*.15;
+        const h00=h+(Math.random()-.5)*.18, h10=h+(Math.random()-.5)*.18;
+        const h01=h+(Math.random()-.5)*.18, h11=h+(Math.random()-.5)*.18;
+        const s=SZ*.5;
+        pos.push(x-s,h00,z-s, x+s,h10,z-s, x+s,h11,z+s);
+        pos.push(x-s,h00,z-s, x+s,h11,z+s, x-s,h01,z+s);
+        const cl = pal[Math.floor(Math.random()*3)];
+        for (let i=0;i<6;i++) col.push(cl.r,cl.g,cl.b);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
+    geo.computeVertexNormals();
+    scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({vertexColors:true, flatShading:true})));
+  }());
+
+  // --- Crystal Slots ---
+  const SLOTS = [];
+  for (let r = -2; r <= 2; r++) {
+    for (let c = -3; c <= 3; c++) {
+      const x = c*2.4 + (Math.random()-.5)*.5;
+      const z = r*2.1 + (Math.random()-.5)*.5;
+      const y = Math.sin(x*.6)*Math.cos(z*.6)*.4;
+      SLOTS.push({x, y: y+.05, z});
+    }
+  }
+
+  // --- Crystal Mesh Factory ---
+  const CRYSTAL_COLORS = [0x00ffcc, 0x80ffff, 0x40ff90, 0xffff50, 0xcc80ff, 0xff80c0];
+  function makeCrystal(color) {
+    const g = new THREE.Group();
+    const shardGeo = new THREE.ConeGeometry(.14, .48, 5);
+    const shardMat = new THREE.MeshLambertMaterial({color, flatShading:true, transparent:true, opacity:1});
+    const shard = new THREE.Mesh(shardGeo, shardMat);
+    shard.position.y = .24;
+    g.add(shard);
+    const baseGeo = new THREE.CylinderGeometry(.11,.17,.08,5);
+    g.add(Object.assign(
+      new THREE.Mesh(baseGeo, new THREE.MeshLambertMaterial({color:0x183030, flatShading:true})),
+      {position: {x:0,y:.04,z:0}}
+    ));
+    const glowGeo = new THREE.SphereGeometry(.2, 6, 5);
+    const glowMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0, depthWrite:false});
+    const glow = new THREE.Mesh(glowGeo, glowMat);
+    glow.position.y = .28;
+    g.add(glow);
+    g._shardMat = shardMat;
+    g._glowMat  = glowMat;
+    g._color    = color;
+    return g;
+  }
+
+  // --- Crystal Pool ---
+  const crystals = SLOTS.map((slot, i) => {
+    const color = CRYSTAL_COLORS[i % CRYSTAL_COLORS.length];
+    const mesh  = makeCrystal(color);
+    mesh.position.set(slot.x, slot.y, slot.z);
+    mesh.scale.setScalar(.01);
+    scene.add(mesh);
+    return { mesh, slot, color, state:'idle', timer:0, armed:false };
+  });
+
+  // --- Wave Mesh ---
+  const waveMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 14, 1, 6),
+    new THREE.MeshBasicMaterial({color:0x00ffcc, transparent:true, opacity:.1, side:THREE.DoubleSide, depthWrite:false})
+  );
+  waveMesh.rotation.y = Math.PI/2;
+  scene.add(waveMesh);
+
+  // --- Wave Particles (trail curtain) ---
+  const WP = 100;
+  const wpPos = new Float32Array(WP*3), wpCol = new Float32Array(WP*3);
+  const wpGeo = new THREE.BufferGeometry();
+  wpGeo.setAttribute('position', new THREE.BufferAttribute(wpPos, 3));
+  wpGeo.setAttribute('color',    new THREE.BufferAttribute(wpCol, 3));
+  scene.add(new THREE.Points(wpGeo, new THREE.PointsMaterial({size:.07, vertexColors:true, transparent:true, opacity:.85})));
+
+  // --- Burst Particles ---
+  const BP = 200;
+  const bpPos = new Float32Array(BP*3), bpCol = new Float32Array(BP*3);
+  const bpGeo = new THREE.BufferGeometry();
+  bpGeo.setAttribute('position', new THREE.BufferAttribute(bpPos, 3));
+  bpGeo.setAttribute('color',    new THREE.BufferAttribute(bpCol, 3));
+  scene.add(new THREE.Points(bpGeo, new THREE.PointsMaterial({size:.1, vertexColors:true, transparent:true, opacity:.9})));
+
+  const bpool = Array.from({length:BP}, ()=>({on:false,x:0,y:0,z:0,vx:0,vy:0,vz:0,life:0,ml:0,r:0,g:0,b:0}));
+
+  function doBurst(x, y, z, color, n) {
+    const c = new THREE.Color(color);
+    let k = 0;
+    for (const p of bpool) {
+      if (!p.on && k < n) {
+        p.on=true; p.x=x; p.y=y; p.z=z;
+        const sp=.07+Math.random()*.1, th=Math.random()*Math.PI*2, ph=Math.random()*Math.PI;
+        p.vx=Math.sin(ph)*Math.cos(th)*sp; p.vy=.04+Math.random()*.12; p.vz=Math.sin(ph)*Math.sin(th)*sp;
+        p.life=0; p.ml=.5+Math.random()*.4; p.r=c.r; p.g=c.g; p.b=c.b;
+        k++;
+      }
+    }
+  }
+
+  function tickBurst(dt) {
+    let i = 0;
+    for (const p of bpool) {
+      if (p.on) {
+        p.life += dt;
+        if (p.life >= p.ml) {
+          p.on = false;
+          bpPos[i*3] = 9999;
+        } else {
+          p.x+=p.vx; p.y+=p.vy; p.z+=p.vz; p.vy-=.003;
+          bpPos[i*3]=p.x; bpPos[i*3+1]=p.y; bpPos[i*3+2]=p.z;
+          const f = 1 - p.life/p.ml;
+          bpCol[i*3]=p.r*f; bpCol[i*3+1]=p.g*f; bpCol[i*3+2]=p.b*f;
+        }
+      } else { bpPos[i*3] = 9999; }
+      i++;
+    }
+    bpGeo.attributes.position.needsUpdate = true;
+    bpGeo.attributes.color.needsUpdate    = true;
+  }
+
+  // --- Game State ---
+  let gState = 'idle'; // idle | playing | over
+  let score=0, combo=0, lives=3, missStreak=0;
+  let waveX = -12, waveSpeed = 3.5;
+  let sweepCount = 0;
+  let shakeAmt = 0;
+  let lastT = 0;
+  let popups = [];
+  let bestScore = parseInt(localStorage.getItem('lw_best') || '0');
+
+  const WAVE_START = -11, WAVE_END = 12;
+  const WAVE_WIN   = 1.3;   // half-width of tap window
+  const WAVE_GROW  = 2.8;   // distance to start growing
+
+  // --- HUD ---
+  const scoreEl = document.getElementById('score');
+  const comboEl = document.getElementById('combo');
+  const livesEl = document.getElementById('lives');
+  const waveFillEl = document.getElementById('wave-fill');
+
+  function hudUpdate() {
+    scoreEl.textContent = String(score).padStart(5,'0');
+    livesEl.textContent = '\u2665'.repeat(lives) + '\u2661'.repeat(3-lives);
+    livesEl.style.color = lives <= 1 ? '#ff5050' : 'rgba(255,130,100,0.9)';
+    if (combo >= 2) { comboEl.textContent = `\xd7${Math.min(combo,10)} COMBO`; comboEl.style.opacity='1'; }
+    else comboEl.style.opacity = '0';
+  }
+
+  // --- Score Popups ---
+  function showPop(wp, txt) {
+    const v = wp.clone().project(camera);
+    const sx=(v.x+1)/2*window.innerWidth, sy=(1-(v.y+1)/2)*window.innerHeight;
+    const el = document.createElement('div');
+    el.className='spop'; el.textContent=txt;
+    el.style.left=sx+'px'; el.style.top=sy+'px';
+    document.body.appendChild(el);
+    popups.push({el, life:0});
+  }
+
+  function tickPopups(dt) {
+    for (let i=popups.length-1; i>=0; i--) {
+      const p=popups[i]; p.life+=dt;
+      const t=p.life/.7;
+      p.el.style.transform=`translateY(${-t*36}px)`;
+      p.el.style.opacity=String(Math.max(0,1-t));
+      if (p.life>=.7) { p.el.remove(); popups.splice(i,1); }
+    }
+  }
+
+  // --- Crystal Lifecycle ---
+  function seedWave() {
+    crystals.forEach(cr => {
+      cr.state='idle'; cr.timer=0; cr.armed=(Math.random()<.6);
+      cr.mesh.scale.setScalar(.01);
+      cr.mesh._shardMat.opacity = 1;
+      cr.mesh._glowMat.opacity  = 0;
+    });
+  }
+
+  function tapCrystal(cr) {
+    cr.state='tapped'; cr.timer=0;
+    combo++;
+    const mult = Math.min(combo, 10);
+    const pts  = 10 * mult;
+    score += pts;
+    missStreak = 0;
+    doBurst(cr.mesh.position.x, cr.mesh.position.y+.4, cr.mesh.position.z, cr.color, 22);
+    showPop(new THREE.Vector3(cr.mesh.position.x, cr.mesh.position.y+.7, cr.mesh.position.z),
+            `+${pts}${mult>1?' \xd7'+mult:''}`);
+    shakeAmt = Math.min(shakeAmt + .05, .22);
+    hudUpdate();
+  }
+
+  function missCrystal(cr) {
+    cr.state='idle'; cr.armed=false; cr.timer=0;
+    combo=0;
+    missStreak++;
+    if (missStreak >= 4) {
+      missStreak=0; lives--;
+      shakeAmt = Math.min(shakeAmt + .18, .35);
+      hudUpdate();
+      if (lives <= 0) endGame();
+    } else {
+      shakeAmt = Math.min(shakeAmt + .05, .18);
+      hudUpdate();
+    }
+  }
+
+  function easeOut(t) { return 1-(1-t)*(1-t); }
+
+  function tickCrystals(dt, wx) {
+    for (const cr of crystals) {
+      cr.timer += dt;
+
+      if (cr.state === 'idle') {
+        cr.mesh.scale.setScalar(.01);
+        if (cr.armed && wx > cr.slot.x - WAVE_GROW && wx < cr.slot.x) {
+          cr.state='growing'; cr.timer=0;
+        }
+      }
+
+      else if (cr.state === 'growing') {
+        const t = Math.min(cr.timer / .3, 1);
+        cr.mesh.scale.setScalar(easeOut(t));
+        // wave arrives
+        if (Math.abs(cr.slot.x - wx) < WAVE_WIN) {
+          cr.state='lit'; cr.timer=0;
+          cr.mesh.scale.setScalar(1);
+        }
+      }
+
+      else if (cr.state === 'lit') {
+        cr.mesh._glowMat.opacity = .12 + Math.sin(cr.timer*8)*.09;
+        cr.mesh.scale.setScalar(1 + Math.sin(cr.timer*6)*.08);
+        // wave passed
+        if (wx > cr.slot.x + WAVE_WIN + .4) {
+          missCrystal(cr);
+        }
+      }
+
+      else if (cr.state === 'tapped') {
+        const t = Math.min(cr.timer/.28, 1);
+        cr.mesh.scale.setScalar(1 + t*.6);
+        cr.mesh._shardMat.opacity = 1-t;
+        cr.mesh._glowMat.opacity  = (1-t)*.25;
+        if (t >= 1) {
+          cr.state='idle'; cr.armed=false;
+          cr.mesh.scale.setScalar(.01);
+          cr.mesh._shardMat.opacity = 1;
+          cr.mesh._glowMat.opacity  = 0;
+        }
+      }
+    }
+  }
+
+  // --- Wave Update ---
+  function tickWave(dt, t) {
+    waveX += waveSpeed * dt;
+
+    // Wave bar
+    const pct = Math.max(0, Math.min(100, (waveX-WAVE_START)/(WAVE_END-WAVE_START)*100));
+    waveFillEl.style.width = pct + '%';
+
+    // Wave mesh position + pulse
+    waveMesh.position.x = waveX;
+    waveMesh.material.opacity = .06 + Math.sin(t*4)*.05;
+
+    // Trail curtain particles
+    for (let i=0; i<WP; i++) {
+      const fi = i/WP;
+      const trailDepth = (i % 10) / 10;        // 0=front .. 1=back
+      const strip      = Math.floor(i/10);      // which Z column (0..9)
+      const zNorm      = strip/9 - 0.5;         // -0.5..+0.5
+
+      wpPos[i*3]   = waveX - trailDepth * 1.2 + (Math.random()-.5)*.05;
+      wpPos[i*3+1] = .1 + Math.sin(zNorm*4 + t*2.5) * 1.4 + Math.random()*.15;
+      wpPos[i*3+2] = zNorm * 11;
+
+      const bright = (1-trailDepth) * (.6 + fi*.3);
+      wpCol[i*3]=0; wpCol[i*3+1]=bright*.85; wpCol[i*3+2]=bright*.65;
+    }
+    wpGeo.attributes.position.needsUpdate = true;
+    wpGeo.attributes.color.needsUpdate    = true;
+
+    // End of sweep
+    if (waveX > WAVE_END) {
+      waveX = WAVE_START;
+      sweepCount++;
+      waveSpeed = Math.min(3.5 + sweepCount * .18, 7.5);
+      seedWave();
+    }
+  }
+
+  // --- Input ---
+  const ray = new THREE.Raycaster();
+  const mPtr = new THREE.Vector2();
+
+  function onTap(e) {
+    if (gState !== 'playing') return;
+    e.preventDefault();
+    const ev = e.touches ? e.touches[0] : e;
+    mPtr.x = (ev.clientX/window.innerWidth)*2-1;
+    mPtr.y = -(ev.clientY/window.innerHeight)*2+1;
+    ray.setFromCamera(mPtr, camera);
+
+    let hit=null, bestD=Infinity;
+    for (const cr of crystals) {
+      if (cr.state !== 'lit') continue;
+      const fp = cr.mesh.position.clone(); fp.y += .3;
+      const d = ray.ray.distanceToPoint(fp);
+      if (d < 1.1 && d < bestD) { bestD=d; hit=cr; }
+    }
+
+    if (hit) tapCrystal(hit);
+    else shakeAmt = Math.min(shakeAmt + .025, .1);
+  }
+
+  renderer.domElement.addEventListener('mousedown',  onTap);
+  renderer.domElement.addEventListener('touchstart', onTap, {passive:false});
+
+  // --- Game Flow ---
+  function startGame() {
+    score=0; combo=0; lives=3; missStreak=0; sweepCount=0;
+    waveX=WAVE_START; waveSpeed=3.5;
+    popups.forEach(p=>p.el.remove()); popups=[];
+    seedWave();
+    gState='playing';
+    document.getElementById('overlay').style.display='none';
+    hudUpdate();
+  }
+
+  function endGame() {
+    gState='over';
+    if (score>bestScore) { bestScore=score; localStorage.setItem('lw_best',bestScore); }
+    document.getElementById('ov-final').textContent = 'SCORE: '+score;
+    document.getElementById('ov-best').textContent  = 'BEST: '+bestScore;
+    document.getElementById('ov-start').style.display = 'none';
+    document.getElementById('ov-over').style.display  = 'block';
+    document.getElementById('overlay').style.display  = 'flex';
+  }
+
+  document.getElementById('btn-start').addEventListener('click', startGame);
+  document.getElementById('btn-retry').addEventListener('click', startGame);
+
+  // Telegram Mini App
+  if (window.Telegram && window.Telegram.WebApp) {
+    window.Telegram.WebApp.ready();
+    window.Telegram.WebApp.expand();
+  }
+
+  // --- Main Loop ---
+  function animate(time) {
+    requestAnimationFrame(animate);
+    const t = time/1000;
+    const dt = Math.min(t - lastT, .05);
+    lastT = t;
+
+    if (gState === 'playing') {
+      tickWave(dt, t);
+      tickCrystals(dt, waveX);
+    }
+    tickBurst(dt);
+    tickPopups(dt);
+
+    // Camera shake
+    if (shakeAmt > .001) {
+      camera.position.x = (Math.random()-.5)*shakeAmt;
+      camera.position.y = 14 + (Math.random()-.5)*shakeAmt;
+      shakeAmt *= .8;
+    } else {
+      camera.position.x = 0;
+      camera.position.y = 14;
+      shakeAmt = 0;
+    }
+    camera.position.z = 12;
+    camera.lookAt(0, 0, 0);
+
+    renderer.render(scene, camera);
+  }
+
+  // Resize
+  window.addEventListener('resize', () => {
+    const w=window.innerWidth, h=window.innerHeight;
+    renderer.setSize(w, h);
+    const a=w/h;
+    camera.left=-CS*a; camera.right=CS*a;
+    camera.updateProjectionMatrix();
+  });
+
+  animate(0);
+  </script>
+</body>
+</html>

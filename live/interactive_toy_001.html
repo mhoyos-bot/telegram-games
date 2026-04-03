@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>Physics Toy — Rando's House 001</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #07070f; overflow: hidden; touch-action: none; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+    #hint {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.28); font-size: 13px; pointer-events: none;
+      transition: opacity 1.2s;
+    }
+    #reset {
+      position: fixed; top: 16px; right: 16px;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+      color: rgba(255,255,255,0.45); font-size: 13px; padding: 8px 18px;
+      border-radius: 20px; cursor: pointer; transition: all 0.2s;
+    }
+    #reset:hover { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.85); }
+    #fps {
+      position: fixed; top: 16px; left: 16px;
+      color: rgba(255,255,255,0.2); font-size: 11px; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+<div id="hint">drag &amp; throw · drop from height · enjoy</div>
+<button id="reset">reset</button>
+<div id="fps">60 fps</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM-PHY-001: Physics constants (tunable block)
+// ─────────────────────────────────────────────────────────────────────────────
+const GRAVITY         = -20;
+const RESTITUTION     = 0.68;     // bounce coefficient
+const FLOOR_FRICTION  = 0.982;    // horizontal damping on floor
+const FLOOR_Y         = -3.8;
+const WALL_X          = 6.8;
+const WALL_Z          = 5.2;
+const CEILING_Y       = 9.0;
+const NUM_OBJECTS     = 12;
+const PARTICLE_POOL   = 400;
+const HIT_THRESHOLD   = 2.2;      // min relative speed to spawn collision particles
+const MAX_DT          = 0.05;     // physics cap
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Renderer
+// ─────────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene + camera
+// ─────────────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x07070f);
+scene.fog = new THREE.Fog(0x07070f, 18, 32);
+
+const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 60);
+camera.position.set(0, 6.5, 13);
+camera.lookAt(0, 0, 0);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lights
+// ─────────────────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x1a2233, 1.2));
+
+const sun = new THREE.DirectionalLight(0xfff5e0, 2.2);
+sun.position.set(6, 12, 6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 30 });
+scene.add(sun);
+
+const fill = new THREE.DirectionalLight(0x2244aa, 0.7);
+fill.position.set(-6, 2, -6);
+scene.add(fill);
+
+const rimA = new THREE.PointLight(0xff5533, 1.4, 18);
+rimA.position.set(-4, 4, -5);
+scene.add(rimA);
+
+const rimB = new THREE.PointLight(0x3388ff, 0.8, 14);
+rimB.position.set(5, 2, -3);
+scene.add(rimB);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Floor + grid
+// ─────────────────────────────────────────────────────────────────────────────
+const floorMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(22, 16),
+  new THREE.MeshStandardMaterial({ color: 0x0d0d1f, roughness: 0.98, metalness: 0.05 })
+);
+floorMesh.rotation.x = -Math.PI / 2;
+floorMesh.position.y = FLOOR_Y;
+floorMesh.receiveShadow = true;
+scene.add(floorMesh);
+
+const grid = new THREE.GridHelper(22, 22, 0x1a2244, 0x12122a);
+grid.position.y = FLOOR_Y + 0.002;
+scene.add(grid);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM-PHY-002: Colour palette
+// ─────────────────────────────────────────────────────────────────────────────
+const PALETTE = [
+  0xff6b6b, 0xffd93d, 0x6bcb77, 0x4d96ff, 0xc77dff,
+  0xff9f43, 0x00d2d3, 0xff6b81, 0xa29bfe, 0x55efc4,
+  0xfd79a8, 0xfdcb6e,
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM-PHY-003: PhysicsObject class — verlet-style sphere physics
+// ─────────────────────────────────────────────────────────────────────────────
+class PhysicsObject {
+  constructor(id) {
+    this.id = id;
+    this.radius = 0.34 + Math.random() * 0.28;
+
+    const col = PALETTE[id % PALETTE.length];
+    const segs = this.radius > 0.5 ? 18 : 14;
+    const geo = new THREE.SphereGeometry(this.radius, segs, segs);
+    const mat = new THREE.MeshStandardMaterial({
+      color: col,
+      roughness: 0.25,
+      metalness: 0.2,
+      emissive: new THREE.Color(col).multiplyScalar(0.08),
+    });
+    this.mesh = new THREE.Mesh(geo, mat);
+    this.mesh.castShadow = true;
+    this.mesh.receiveShadow = true;
+    this.mesh.userData.physObj = this;
+    scene.add(this.mesh);
+
+    this.hexColor = col;
+    this.threeColor = new THREE.Color(col);
+
+    // State
+    this.pos  = new THREE.Vector3();
+    this.vel  = new THREE.Vector3();
+    this.prev = new THREE.Vector3();
+
+    // Squash/stretch spring
+    this.squash    = 0;   // deviation from 1 (0 = normal)
+    this.squashVel = 0;
+
+    this.dragging = false;
+    this.reset();
+  }
+
+  reset() {
+    this.pos.set(
+      (Math.random() - 0.5) * 9,
+      FLOOR_Y + this.radius + Math.random() * 7 + 1,
+      (Math.random() - 0.5) * 5
+    );
+    this.vel.set(
+      (Math.random() - 0.5) * 5,
+      Math.random() * 3,
+      (Math.random() - 0.5) * 3
+    );
+    this.squash = 0;
+    this.squashVel = 0;
+    this.mesh.scale.set(1, 1, 1);
+    this.mesh.rotation.set(0, 0, 0);
+  }
+
+  // ATOM-PHY-004: Per-object physics tick
+  update(dt) {
+    if (this.dragging) {
+      this.mesh.position.copy(this.pos);
+      return;
+    }
+
+    // Gravity
+    this.vel.y += GRAVITY * dt;
+
+    // Integrate
+    this.pos.x += this.vel.x * dt;
+    this.pos.y += this.vel.y * dt;
+    this.pos.z += this.vel.z * dt;
+
+    // Floor
+    const floorContact = FLOOR_Y + this.radius;
+    if (this.pos.y <= floorContact) {
+      this.pos.y = floorContact;
+      const impactSpeed = Math.abs(this.vel.y);
+      if (impactSpeed > HIT_THRESHOLD) {
+        spawnFloorBurst(this.pos, this.hexColor, impactSpeed);
+        this.squashVel -= impactSpeed * 0.18; // slam squash
+      }
+      this.vel.y = Math.abs(this.vel.y) * RESTITUTION;
+      this.vel.x *= FLOOR_FRICTION;
+      this.vel.z *= FLOOR_FRICTION;
+    }
+
+    // Walls
+    if (this.pos.x + this.radius > WALL_X) {
+      this.pos.x = WALL_X - this.radius;
+      this.vel.x = -Math.abs(this.vel.x) * RESTITUTION * 0.85;
+    } else if (this.pos.x - this.radius < -WALL_X) {
+      this.pos.x = -WALL_X + this.radius;
+      this.vel.x = Math.abs(this.vel.x) * RESTITUTION * 0.85;
+    }
+    if (this.pos.z + this.radius > WALL_Z) {
+      this.pos.z = WALL_Z - this.radius;
+      this.vel.z = -Math.abs(this.vel.z) * RESTITUTION * 0.85;
+    } else if (this.pos.z - this.radius < -WALL_Z) {
+      this.pos.z = -WALL_Z + this.radius;
+      this.vel.z = Math.abs(this.vel.z) * RESTITUTION * 0.85;
+    }
+
+    // Ceiling
+    if (this.pos.y > CEILING_Y - this.radius) {
+      this.pos.y = CEILING_Y - this.radius;
+      this.vel.y = -Math.abs(this.vel.y) * 0.4;
+    }
+
+    // ATOM-PHY-005: Squash/stretch spring (damped harmonic)
+    this.squashVel += (-this.squash * 28 - this.squashVel * 5) * dt;
+    this.squash += this.squashVel * dt;
+    this.squash = Math.max(-0.45, Math.min(0.6, this.squash));
+
+    // Volume-preserving scale (squash Y, compensate XZ)
+    const sy  = 1 + this.squash;
+    const sxz = 1 / Math.sqrt(sy); // approximate volume conservation
+    this.mesh.scale.set(sxz, sy, sxz);
+
+    // Rolling rotation (visual only)
+    this.mesh.rotation.x += this.vel.z * dt * 0.25;
+    this.mesh.rotation.z -= this.vel.x * dt * 0.25;
+
+    this.mesh.position.copy(this.pos);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Create objects
+// ─────────────────────────────────────────────────────────────────────────────
+const objects = Array.from({ length: NUM_OBJECTS }, (_, i) => new PhysicsObject(i));
+const meshList = objects.map(o => o.mesh);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM-PHY-006: Sphere–sphere collision resolution
+// ─────────────────────────────────────────────────────────────────────────────
+const _normal  = new THREE.Vector3();
+const _relVel  = new THREE.Vector3();
+const _midPt   = new THREE.Vector3();
+
+function resolveCollisions() {
+  for (let i = 0; i < objects.length; i++) {
+    const a = objects[i];
+    for (let j = i + 1; j < objects.length; j++) {
+      const b = objects[j];
+
+      _normal.subVectors(b.pos, a.pos);
+      const dist2 = _normal.lengthSq();
+      const minD  = a.radius + b.radius;
+
+      if (dist2 < minD * minD && dist2 > 0.0001) {
+        const dist = Math.sqrt(dist2);
+        _normal.divideScalar(dist); // normalize in place
+
+        _relVel.subVectors(b.vel, a.vel);
+        const relN = _relVel.dot(_normal);
+
+        if (relN < 0) {
+          const impulse = -(1 + RESTITUTION) * relN / 2;
+          const impactSpeed = Math.abs(relN);
+
+          if (!a.dragging) a.vel.addScaledVector(_normal, -impulse);
+          if (!b.dragging) b.vel.addScaledVector(_normal,  impulse);
+
+          // Squash both
+          const squashAmt = impactSpeed * 0.10;
+          a.squashVel -= squashAmt;
+          b.squashVel -= squashAmt;
+
+          // Collision particles on hard hit
+          if (impactSpeed > HIT_THRESHOLD) {
+            _midPt.addVectors(a.pos, b.pos).multiplyScalar(0.5);
+            spawnCollisionBurst(_midPt, a.hexColor, b.hexColor, impactSpeed);
+          }
+        }
+
+        // Positional correction (prevent sinking)
+        const overlap = (minD - dist) * 0.52;
+        if (!a.dragging) a.pos.addScaledVector(_normal, -overlap);
+        if (!b.dragging) b.pos.addScaledVector(_normal,  overlap);
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM-VIS-006: GPU particle system (additive blending, vertex colours, CPU sim)
+// ─────────────────────────────────────────────────────────────────────────────
+const pPos   = new Float32Array(PARTICLE_POOL * 3);
+const pColor = new Float32Array(PARTICLE_POOL * 3);
+
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos,   3).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('color',    new THREE.BufferAttribute(pColor, 3).setUsage(THREE.DynamicDrawUsage));
+
+const pMat = new THREE.PointsMaterial({
+  size: 0.14,
+  vertexColors: true,
+  transparent: true,
+  opacity: 1.0,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true,
+});
+
+scene.add(new THREE.Points(pGeo, pMat));
+
+// CPU particle state — pre-allocated, no GC during tick
+const particles = Array.from({ length: PARTICLE_POOL }, () => ({
+  px: 0, py: 0, pz: 0,
+  vx: 0, vy: 0, vz: 0,
+  r: 0, g: 0, b: 0,
+  life: 0, maxLife: 0,
+}));
+let pHead = 0;
+
+function _emitParticle(px, py, pz, vx, vy, vz, r, g, b, life) {
+  const p = particles[pHead % PARTICLE_POOL];
+  pHead++;
+  p.px = px; p.py = py; p.pz = pz;
+  p.vx = vx; p.vy = vy; p.vz = vz;
+  p.r = r; p.g = g; p.b = b;
+  p.life = life; p.maxLife = life;
+}
+
+// ATOM-VIS-007: Floor impact burst — radial splash on XZ plane
+function spawnFloorBurst(pos, hexColor, speed) {
+  const tc = new THREE.Color(hexColor);
+  const count = Math.min(25, Math.floor(speed * 2.5));
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const s = (2 + Math.random() * 3) * (0.5 + speed * 0.1);
+    _emitParticle(
+      pos.x, pos.y + 0.05, pos.z,
+      Math.cos(angle) * s,
+      Math.random() * speed * 0.35 + 0.8,
+      Math.sin(angle) * s,
+      tc.r, tc.g, tc.b,
+      0.3 + Math.random() * 0.45
+    );
+  }
+}
+
+// ATOM-VIS-008: Sphere collision burst — omnidirectional spark burst
+function spawnCollisionBurst(pos, hexA, hexB, speed) {
+  const ca = new THREE.Color(hexA);
+  const cb = new THREE.Color(hexB);
+  const count = Math.min(32, Math.floor(speed * 3.5));
+  for (let i = 0; i < count; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const s     = (1.5 + Math.random() * speed * 0.7);
+    const c = i % 2 === 0 ? ca : cb;
+    _emitParticle(
+      pos.x, pos.y, pos.z,
+      Math.sin(phi) * Math.cos(theta) * s,
+      Math.sin(phi) * Math.sin(theta) * s,
+      Math.cos(phi) * s,
+      c.r, c.g, c.b,
+      0.28 + Math.random() * 0.5
+    );
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = 0; i < PARTICLE_POOL; i++) {
+    const p = particles[i];
+    const t = p.maxLife > 0 ? Math.max(0, p.life / p.maxLife) : 0;
+
+    if (p.life > 0) {
+      p.vy += GRAVITY * 0.22 * dt; // lighter gravity
+      p.vx *= 0.96;
+      p.vy *= 0.97;
+      p.vz *= 0.96;
+      p.px += p.vx * dt;
+      p.py += p.vy * dt;
+      p.pz += p.vz * dt;
+      if (p.py < FLOOR_Y) { p.py = FLOOR_Y; p.vy *= -0.2; }
+      p.life -= dt;
+    }
+
+    const i3 = i * 3;
+    pPos[i3]   = p.px; pPos[i3+1] = p.py; pPos[i3+2] = p.pz;
+    // fade out: multiply colour by t
+    pColor[i3]   = p.r * t;
+    pColor[i3+1] = p.g * t;
+    pColor[i3+2] = p.b * t;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.color.needsUpdate    = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM-INPUT-001: Drag system — mouse + touch, camera-plane projection
+// ─────────────────────────────────────────────────────────────────────────────
+const raycaster  = new THREE.Raycaster();
+const mouseNDC   = new THREE.Vector2();
+const dragPlane  = new THREE.Plane();
+const hitPoint   = new THREE.Vector3();
+const dragOffset = new THREE.Vector3();
+const _camDir    = new THREE.Vector3();
+
+let draggedObj  = null;
+let dragPrevPos = new THREE.Vector3();
+let throwVel    = new THREE.Vector3();
+let dragT       = 0;
+
+function _getNDC(e) {
+  const src  = e.touches ? e.touches[0] : e;
+  const rect = renderer.domElement.getBoundingClientRect();
+  return {
+    x:  ((src.clientX - rect.left) / rect.width)  * 2 - 1,
+    y: -((src.clientY - rect.top)  / rect.height) * 2 + 1,
+  };
+}
+
+function onDown(e) {
+  const { x, y } = _getNDC(e);
+  mouseNDC.set(x, y);
+  raycaster.setFromCamera(mouseNDC, camera);
+  const hits = raycaster.intersectObjects(meshList);
+  if (!hits.length) return;
+
+  draggedObj = hits[0].object.userData.physObj;
+  draggedObj.dragging = true;
+  draggedObj.vel.set(0, 0, 0);
+
+  // Drag plane: face the camera, pass through the object
+  camera.getWorldDirection(_camDir);
+  dragPlane.setFromNormalAndCoplanarPoint(_camDir.negate(), draggedObj.pos);
+
+  raycaster.ray.intersectPlane(dragPlane, hitPoint);
+  dragOffset.subVectors(draggedObj.pos, hitPoint);
+
+  dragPrevPos.copy(draggedObj.pos);
+  throwVel.set(0, 0, 0);
+  dragT = 0;
+}
+
+function onMove(e) {
+  if (!draggedObj) return;
+  const { x, y } = _getNDC(e);
+  mouseNDC.set(x, y);
+  raycaster.setFromCamera(mouseNDC, camera);
+  if (!raycaster.ray.intersectPlane(dragPlane, hitPoint)) return;
+
+  const newPos = hitPoint.clone().add(dragOffset);
+  // Clamp to bounds
+  newPos.x = Math.max(-WALL_X + draggedObj.radius, Math.min(WALL_X - draggedObj.radius, newPos.x));
+  newPos.z = Math.max(-WALL_Z + draggedObj.radius, Math.min(WALL_Z - draggedObj.radius, newPos.z));
+  newPos.y = Math.max(FLOOR_Y + draggedObj.radius, Math.min(CEILING_Y - draggedObj.radius, newPos.y));
+
+  draggedObj.pos.copy(newPos);
+
+  // Track throw velocity (exponential moving average)
+  throwVel.lerp(newPos.clone().sub(dragPrevPos).divideScalar(Math.max(dragT, 0.016)), 0.6);
+  throwVel.clampLength(0, 22);
+  dragPrevPos.copy(newPos);
+  dragT = 0;
+}
+
+function onUp() {
+  if (!draggedObj) return;
+  draggedObj.vel.copy(throwVel);
+  draggedObj.dragging = false;
+  draggedObj = null;
+}
+
+const dom = renderer.domElement;
+dom.addEventListener('mousedown',  onDown);
+dom.addEventListener('mousemove',  onMove);
+dom.addEventListener('mouseup',    onUp);
+dom.addEventListener('touchstart', e => { e.preventDefault(); onDown(e); }, { passive: false });
+dom.addEventListener('touchmove',  e => { e.preventDefault(); onMove(e); }, { passive: false });
+dom.addEventListener('touchend',   e => { e.preventDefault(); onUp();   }, { passive: false });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reset
+// ─────────────────────────────────────────────────────────────────────────────
+document.getElementById('reset').addEventListener('click', () => {
+  draggedObj = null;
+  objects.forEach(o => { o.dragging = false; o.reset(); });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resize
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hint fade
+// ─────────────────────────────────────────────────────────────────────────────
+const hint = document.getElementById('hint');
+setTimeout(() => { hint.style.opacity = '0'; }, 5000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FPS counter
+// ─────────────────────────────────────────────────────────────────────────────
+const fpsEl = document.getElementById('fps');
+let fpsFrames = 0, fpsLast = performance.now();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main loop
+// ─────────────────────────────────────────────────────────────────────────────
+let lastTime = performance.now();
+
+function tick(now) {
+  requestAnimationFrame(tick);
+
+  const dt = Math.min((now - lastTime) / 1000, MAX_DT);
+  lastTime = now;
+
+  // Drag time tracker (used for throw velocity)
+  dragT += dt;
+
+  // Physics
+  objects.forEach(o => o.update(dt));
+  resolveCollisions();
+  updateParticles(dt);
+
+  // Gentle camera sway
+  camera.position.y = 6.5 + Math.sin(now * 0.00028) * 0.2;
+  camera.lookAt(0, 0.5, 0);
+
+  renderer.render(scene, camera);
+
+  // FPS
+  fpsFrames++;
+  if (now - fpsLast > 1000) {
+    fpsEl.textContent = fpsFrames + ' fps';
+    fpsFrames = 0;
+    fpsLast   = now;
+  }
+}
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

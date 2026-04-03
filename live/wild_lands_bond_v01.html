@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>WILD LANDS — BOND</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #030810; overflow: hidden; touch-action: none; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; pointer-events: none;
+    }
+    #time-hud {
+      color: rgba(255,255,255,0.22); font: 10px/1 monospace; letter-spacing: 0.12em;
+      transition: color 4s;
+    }
+    #bond-hud {
+      display: flex; align-items: center; gap: 6px;
+      color: rgba(255,200,100,0.0); font: 11px/1 monospace; letter-spacing: 0.10em;
+      transition: color 0.4s;
+    }
+    #bond-hud.visible { color: rgba(255,200,100,0.75); }
+    #bond-bar-wrap {
+      width: 72px; height: 5px; background: rgba(255,255,255,0.08);
+      border-radius: 3px; overflow: hidden;
+    }
+    #bond-bar {
+      height: 100%; width: 0%; background: linear-gradient(90deg, #cc6622, #ffaa44);
+      border-radius: 3px; transition: width 0.35s ease-out;
+    }
+    #hint {
+      position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.20); font: 11px/1 monospace; letter-spacing: 0.12em;
+      pointer-events: none; transition: opacity 2s;
+    }
+    #hint.hidden { opacity: 0; }
+    #flash {
+      position: fixed; inset: 0; pointer-events: none;
+      background: rgba(255,180,80,0);
+      transition: background 0.08s;
+    }
+  </style>
+</head>
+<body>
+  <div id="flash"></div>
+  <div id="hud">
+    <div id="time-hud">&#9790; NIGHT</div>
+    <div id="bond-hud">
+      <span id="bond-label">BOND</span>
+      <div id="bond-bar-wrap"><div id="bond-bar"></div></div>
+      <span id="bond-level">0</span>
+    </div>
+  </div>
+  <div id="hint">tap the fox</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  // =====================================================================
+  // WILD LANDS — BOND v01
+  // Fox tap interaction + bond mechanic + juice system
+  // Mechanic: Tap fox → bond grows → world warms → new life appears
+  // Atoms: FOLLOW_CAMERA, DAY_NIGHT, FOG, FIREFLY, BONE_ANIM, BOND_MECHANIC
+  // Single file. No external assets. CDN Three.js r128 only.
+  // =====================================================================
+
+  // ── TELEGRAM ────────────────────────────────────────────────────────
+  try {
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      window.Telegram.WebApp.expand();
+    }
+  } catch (_e) { /* silent noop — not in Telegram */ }
+
+  // ── RENDERER ────────────────────────────────────────────────────────
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  document.body.appendChild(renderer.domElement);
+
+  // ── SCENE ───────────────────────────────────────────────────────────
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x030810);
+  scene.fog = new THREE.FogExp2(0x030810, 0.026);
+
+  // ── CAMERA — isometric orthographic ─────────────────────────────────
+  const FRUSTUM = 17;
+  let aspect = window.innerWidth / window.innerHeight;
+  const camera = new THREE.OrthographicCamera(
+    -FRUSTUM * aspect, FRUSTUM * aspect,
+     FRUSTUM, -FRUSTUM, 0.1, 500
+  );
+  camera.position.set(35, 35, 35);
+  camera.lookAt(0, 0, 0);
+
+  const camTarget   = new THREE.Vector3(0, 0, 0);
+  const _camTmpPos  = new THREE.Vector3();
+  const _camTmpLook = new THREE.Vector3();
+  const CAM_LERP    = 0.035;
+
+  window.addEventListener('resize', () => {
+    aspect = window.innerWidth / window.innerHeight;
+    camera.left   = -FRUSTUM * aspect;
+    camera.right  =  FRUSTUM * aspect;
+    camera.top    =  FRUSTUM;
+    camera.bottom = -FRUSTUM;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ── LIGHTING ────────────────────────────────────────────────────────
+  const ambient = new THREE.AmbientLight(0x0a1525, 0.2);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0x112233, 0.05);
+  sun.position.set(-40, 20, 30);
+  scene.add(sun);
+  const moonLight = new THREE.PointLight(0x4466bb, 1.0, 100);
+  moonLight.position.set(25, 40, -15);
+  scene.add(moonLight);
+  const tealLight = new THREE.PointLight(0x00ccaa, 0.9, 55);
+  tealLight.position.set(10, 8, 0);
+  scene.add(tealLight);
+  let tealOrbitAngle = 0;
+
+  // Bond warmth light — attached to fox, grows with bond
+  const bondLight = new THREE.PointLight(0xff8822, 0.0, 18);
+  bondLight.position.set(0, 1.5, 0);
+  scene.add(bondLight);
+
+  // ── DAY/NIGHT CYCLE ─────────────────────────────────────────────────
+  const DAY_DURATION = 90;
+  let dayTime = 0.45;
+
+  const DAY_KEYS = [
+    { t: 0.00, sky: 0x030810, fog: 0x030810, fd: 0.027, ac: 0x0a1525, ai: 0.20, sc: 0x112233, si: 0.05, mi: 1.00, ti: 0.90 },
+    { t: 0.20, sky: 0x060c18, fog: 0x060c18, fd: 0.025, ac: 0x182535, ai: 0.28, sc: 0x223344, si: 0.08, mi: 0.80, ti: 0.70 },
+    { t: 0.28, sky: 0x1c0e22, fog: 0x220a14, fd: 0.018, ac: 0x3a2240, ai: 0.48, sc: 0xff5522, si: 0.68, mi: 0.25, ti: 0.25 },
+    { t: 0.40, sky: 0x4a7db5, fog: 0x5c90c0, fd: 0.009, ac: 0x304870, ai: 0.72, sc: 0xfff4e0, si: 1.00, mi: 0.00, ti: 0.00 },
+    { t: 0.60, sky: 0x4a7db5, fog: 0x5c90c0, fd: 0.009, ac: 0x304870, ai: 0.72, sc: 0xfff4e0, si: 1.00, mi: 0.00, ti: 0.00 },
+    { t: 0.72, sky: 0x1c0a0a, fog: 0x220808, fd: 0.018, ac: 0x3a1818, ai: 0.48, sc: 0xff7733, si: 0.62, mi: 0.25, ti: 0.25 },
+    { t: 0.82, sky: 0x060810, fog: 0x060810, fd: 0.025, ac: 0x1a1830, ai: 0.28, sc: 0x223344, si: 0.08, mi: 0.80, ti: 0.70 },
+    { t: 1.00, sky: 0x030810, fog: 0x030810, fd: 0.027, ac: 0x0a1525, ai: 0.20, sc: 0x112233, si: 0.05, mi: 1.00, ti: 0.90 },
+  ];
+
+  const _cA = new THREE.Color(), _cB = new THREE.Color();
+  const _skC = new THREE.Color(), _foC = new THREE.Color();
+  const _acC = new THREE.Color(), _scC = new THREE.Color();
+
+  function _lh(ha, hb, f, out) {
+    _cA.setHex(ha); _cB.setHex(hb);
+    out.lerpColors(_cA, _cB, f);
+  }
+
+  function sampleDayNight(t) {
+    t = ((t % 1) + 1) % 1;
+    for (let i = 0; i < DAY_KEYS.length - 1; i++) {
+      const a = DAY_KEYS[i], b = DAY_KEYS[i + 1];
+      if (t >= a.t && t < b.t) {
+        const f = (t - a.t) / (b.t - a.t);
+        _lh(a.sky, b.sky, f, _skC);
+        _lh(a.fog, b.fog, f, _foC);
+        _lh(a.ac,  b.ac,  f, _acC);
+        _lh(a.sc,  b.sc,  f, _scC);
+        return { fd: a.fd+(b.fd-a.fd)*f, ai: a.ai+(b.ai-a.ai)*f,
+                 si: a.si+(b.si-a.si)*f, mi: a.mi+(b.mi-a.mi)*f, ti: a.ti+(b.ti-a.ti)*f };
+      }
+    }
+    const k = DAY_KEYS[0];
+    _skC.setHex(k.sky); _foC.setHex(k.fog);
+    _acC.setHex(k.ac);  _scC.setHex(k.sc);
+    return { fd: k.fd, ai: k.ai, si: k.si, mi: k.mi, ti: k.ti };
+  }
+
+  const TIME_LABELS = [
+    [0.00,'&#9790; NIGHT'],[0.22,'&#9790; NIGHT'],[0.26,'&#9728; DAWN'],
+    [0.42,'&#9728; DAY'],[0.60,'&#9728; DAY'],[0.70,'&#9681; DUSK'],[0.80,'&#9790; NIGHT'],
+  ];
+  function getTimeLabel(t) {
+    let lbl = TIME_LABELS[0][1];
+    for (let i = 0; i < TIME_LABELS.length; i++) {
+      if (t >= TIME_LABELS[i][0]) lbl = TIME_LABELS[i][1];
+    }
+    return lbl;
+  }
+  function nightStrength(t) {
+    if (t < 0.25) return 1 - t / 0.25;
+    if (t > 0.75) return (t - 0.75) / 0.25;
+    return 0;
+  }
+
+  // ── TERRAIN ─────────────────────────────────────────────────────────
+  const TERRAIN_SIZE = 55;
+  const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 28, 28);
+  terrainGeo.rotateX(-Math.PI / 2);
+  const posAttr = terrainGeo.attributes.position;
+  const colors = [];
+  for (let i = 0; i < posAttr.count; i++) {
+    const x = posAttr.getX(i), z = posAttr.getZ(i);
+    const y = Math.sin(x * 0.15) * 1.8 + Math.cos(z * 0.12) * 1.4 + Math.sin((x + z) * 0.08) * 0.9;
+    posAttr.setY(i, y);
+    const base = 0.08 + Math.random() * 0.06;
+    const g    = 0.18 + Math.random() * 0.12 + y * 0.02;
+    const b    = 0.06 + Math.random() * 0.04;
+    colors.push(base, g, b);
+  }
+  terrainGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  terrainGeo.computeVertexNormals();
+  const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshBasicMaterial({ vertexColors: true }));
+  terrain.name = 'terrain';
+  scene.add(terrain);
+
+  const groundRay = new THREE.Raycaster();
+  const _downVec  = new THREE.Vector3(0, -1, 0);
+  function getGroundY(x, z) {
+    groundRay.set(new THREE.Vector3(x, 50, z), _downVec);
+    const hits = groundRay.intersectObject(terrain);
+    return hits.length > 0 ? hits[0].point.y : 0;
+  }
+
+  // ── TREES ───────────────────────────────────────────────────────────
+  const treeMat  = new THREE.MeshBasicMaterial({ color: 0x1a4030 });
+  const trunkMat = new THREE.MeshBasicMaterial({ color: 0x3d2817 });
+  for (let i = 0; i < 10; i++) {
+    const tree = new THREE.Group();
+    const h = 1.8 + Math.random() * 1.5, r = 1.0 + Math.random() * 0.8;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, h * 0.6, 5), trunkMat);
+    trunk.position.y = h * 0.3; tree.add(trunk);
+    const cone1 = new THREE.Mesh(new THREE.ConeGeometry(r, h * 0.7, 6),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(0.06+Math.random()*0.08, 0.15+Math.random()*0.12, 0.05+Math.random()*0.04) }));
+    cone1.position.y = h * 0.65; tree.add(cone1);
+    const cone2 = new THREE.Mesh(new THREE.ConeGeometry(r*0.7, h*0.5, 6),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(0.05+Math.random()*0.06, 0.18+Math.random()*0.10, 0.04+Math.random()*0.03) }));
+    cone2.position.y = h; tree.add(cone2);
+    let tx, tz;
+    do { tx=(Math.random()-0.5)*44; tz=(Math.random()-0.5)*44; } while (tx*tx+tz*tz < 36);
+    tree.position.set(tx, getGroundY(tx, tz), tz);
+    scene.add(tree);
+  }
+
+  // ── ROCKS ───────────────────────────────────────────────────────────
+  for (let i = 0; i < 7; i++) {
+    const size = 0.4 + Math.random() * 0.8;
+    const geo = new THREE.DodecahedronGeometry(size, 0);
+    const rp = geo.attributes.position;
+    for (let j = 0; j < rp.count; j++) rp.setY(j, rp.getY(j) * (0.5 + Math.random() * 0.3));
+    geo.computeVertexNormals();
+    const g = 0.15 + Math.random() * 0.15;
+    const rock = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: new THREE.Color(g, g*0.95, g*0.9) }));
+    let rx, rz;
+    do { rx=(Math.random()-0.5)*44; rz=(Math.random()-0.5)*44; } while (rx*rx+rz*rz < 16);
+    rock.position.set(rx, getGroundY(rx,rz) + size*0.2, rz);
+    rock.rotation.y = Math.random() * Math.PI * 2;
+    scene.add(rock);
+  }
+
+  // ── TOON HELPER ─────────────────────────────────────────────────────
+  function toon(color) { return new THREE.MeshToonMaterial({ color, flatShading: true }); }
+
+  // ── FOX ─────────────────────────────────────────────────────────────
+  const fox = new THREE.Group();
+  fox.userData = {
+    name: 'fox', speed: 2.5,
+    state: 'idle', stateTimer: 2.0,
+    wanderTarget: new THREE.Vector3(),
+    dir: new THREE.Vector3(1, 0, 0),
+    bobPhase: 0, tailPhase: 0, yOffset: 0,
+    scaleT: 0,          // juice: scale pulse timer
+    happyTimer: 0,      // happy state duration
+    tapCount: 0,
+  };
+
+  const foxBody  = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.6, 0.6), toon(0xcc6622));
+  foxBody.position.y = 0.5; fox.add(foxBody);
+  const foxHead  = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 0.5), toon(0xcc6622));
+  foxHead.position.set(0.85, 0.7, 0); foxHead.name = 'head'; fox.add(foxHead);
+  const earL = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.3, 4), toon(0xdd7733));
+  earL.position.set(0.85, 1.05, 0.15); fox.add(earL);
+  const earR = earL.clone(); earR.position.z = -0.15; fox.add(earR);
+  const foxTail = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.9, 5), toon(0xbb5511));
+  foxTail.position.set(-0.9, 0.6, 0); foxTail.rotation.z = Math.PI/2 + 0.3; foxTail.name = 'tail'; fox.add(foxTail);
+  const eyeMat = toon(0x111111);
+  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.04, 4, 4), eyeMat);
+  eyeL.position.set(1.1, 0.75, 0.15); fox.add(eyeL);
+  const eyeR = eyeL.clone(); eyeR.position.z = -0.15; fox.add(eyeR);
+  // Snout white tip
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.14, 0.25), toon(0xeecc99));
+  snout.position.set(1.09, 0.62, 0); fox.add(snout);
+  // Leg stubs (4)
+  const legMat = toon(0xaa5511);
+  const legPositions = [[0.45,-0.08,0.22],[0.45,-0.08,-0.22],[-0.35,-0.08,0.22],[-0.35,-0.08,-0.22]];
+  const legs = legPositions.map(([lx,ly,lz]) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.35, 0.14), legMat);
+    leg.position.set(lx, ly, lz); fox.add(leg); return leg;
+  });
+
+  fox.position.set(0, getGroundY(0,0), 0);
+  scene.add(fox);
+
+  // Fox collider group for raycasting (all fox meshes)
+  const foxMeshes = [];
+  fox.traverse(m => { if (m.isMesh) foxMeshes.push(m); });
+
+  // Bond light follows fox
+  fox.add(bondLight);
+
+  // ── DEER ────────────────────────────────────────────────────────────
+  function buildDeer(ox, oz) {
+    const g = new THREE.Group();
+    g.userData = { name:'deer', state:'idle', stateTimer:2+Math.random()*3,
+      dir: new THREE.Vector3(1,0,0), bobPhase: Math.random()*Math.PI*2,
+      speed: 1.5, wanderTarget: new THREE.Vector3() };
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.6,0.65,0.55), toon(0x8a5a30));
+    body.position.y=0.55; g.add(body);
+    const neck = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.55,0.28), toon(0x8a5a30));
+    neck.position.set(0.75,0.9,0); g.add(neck);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.4,0.35,0.35), toon(0x7a4d28));
+    head.position.set(0.95,1.25,0); g.add(head);
+    const al = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.02,0.5,3), toon(0x5a3010));
+    al.position.set(0.97,1.6,0.08); g.add(al);
+    const ar = al.clone(); ar.position.z=-0.08; g.add(ar);
+    const lm = toon(0x6a4020);
+    [[-0.45,-0.05,0.2],[-0.45,-0.05,-0.2],[0.35,-0.05,0.2],[0.35,-0.05,-0.2]].forEach(([x,y,z])=>{
+      const l=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.4,0.12),lm); l.position.set(x,y,z); g.add(l);
+    });
+    g.position.set(ox, getGroundY(ox,oz), oz);
+    scene.add(g); return g;
+  }
+  const deer = buildDeer(8, -6);
+  const deer2 = buildDeer(-9, 7);
+
+  // ── BIRD ────────────────────────────────────────────────────────────
+  function buildBird(ox, oz, perchHeight) {
+    const g = new THREE.Group();
+    g.userData = { name:'bird', state:'perch', stateTimer:4+Math.random()*4,
+      perchY: perchHeight, bobPhase: Math.random()*Math.PI*2 };
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.22,5,4), toon(0x1a1a2a));
+    body.position.y=0; g.add(body);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.14,4,3), toon(0x111122));
+    head.position.set(0.22,0.12,0); g.add(head);
+    const wl = new THREE.Mesh(new THREE.BoxGeometry(0.04,0.08,0.5), toon(0x222233));
+    wl.position.set(0, 0, 0.28); g.add(wl);
+    const wr = wl.clone(); wr.position.z=-0.28; g.add(wr);
+    g.position.set(ox, perchHeight, oz);
+    scene.add(g); return g;
+  }
+  const bird = buildBird(5, 2, getGroundY(5,2) + 3.5);
+
+  // ── FIREFLIES ───────────────────────────────────────────────────────
+  const FF_COUNT = 28;
+  const ffPositions = new Float32Array(FF_COUNT * 3);
+  const ffGeo = new THREE.BufferGeometry();
+  for (let i = 0; i < FF_COUNT; i++) {
+    ffPositions[i*3]   = (Math.random()-0.5)*30;
+    ffPositions[i*3+1] = 0.5 + Math.random()*3.5;
+    ffPositions[i*3+2] = (Math.random()-0.5)*30;
+  }
+  ffGeo.setAttribute('position', new THREE.BufferAttribute(ffPositions, 3));
+  const ffMat = new THREE.PointsMaterial({ color:0x88ffaa, size:0.18, transparent:true, opacity:0 });
+  const fireflies = new THREE.Points(ffGeo, ffMat);
+  scene.add(fireflies);
+  let ffPhase = 0;
+
+  // ── JUICE PARTICLE SYSTEM ────────────────────────────────────────────
+  // Pool of 16 spark particles, reused on fox tap
+  const SPARK_COUNT = 16;
+  const sparkData = [];
+  const sparkGroup = new THREE.Group();
+  scene.add(sparkGroup);
+
+  for (let i = 0; i < SPARK_COUNT; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0 });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.09, 3, 2), mat);
+    mesh.visible = false;
+    sparkGroup.add(mesh);
+    sparkData.push({
+      mesh, active: false, life: 0,
+      vel: new THREE.Vector3(),
+    });
+  }
+
+  // Emit sparks from a world position
+  function emitSparks(pos) {
+    let spawned = 0;
+    for (let i = 0; i < SPARK_COUNT && spawned < 10; i++) {
+      const s = sparkData[i];
+      if (s.active) continue;
+      s.active = true;
+      s.life = 0.55 + Math.random() * 0.25;
+      s.mesh.position.copy(pos);
+      s.mesh.position.y += 0.8 + Math.random() * 0.5;
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 2.0 + Math.random() * 2.5;
+      s.vel.set(
+        Math.cos(angle) * speed,
+        2.5 + Math.random() * 2.0,
+        Math.sin(angle) * speed
+      );
+      // Color: alternating orange and white
+      s.mesh.material.color.setHex(spawned % 2 === 0 ? 0xffaa44 : 0xffffff);
+      s.mesh.material.opacity = 1.0;
+      s.mesh.visible = true;
+      s.mesh.scale.setScalar(1.0);
+      spawned++;
+    }
+  }
+
+  function updateSparks(dt) {
+    for (let i = 0; i < SPARK_COUNT; i++) {
+      const s = sparkData[i];
+      if (!s.active) continue;
+      s.life -= dt;
+      if (s.life <= 0) {
+        s.active = false;
+        s.mesh.visible = false;
+        s.mesh.material.opacity = 0;
+        continue;
+      }
+      s.vel.y -= 5.5 * dt; // gravity
+      s.mesh.position.x += s.vel.x * dt;
+      s.mesh.position.y += s.vel.y * dt;
+      s.mesh.position.z += s.vel.z * dt;
+      const lifeRatio = s.life / 0.7;
+      s.mesh.material.opacity = Math.max(0, lifeRatio * lifeRatio);
+      s.mesh.scale.setScalar(0.5 + lifeRatio * 0.5);
+    }
+  }
+
+  // ── BOND STATE ───────────────────────────────────────────────────────
+  const BOND_MAX = 100;
+  const BOND_PER_TAP = 8;
+  let bondValue  = 0;
+  let bondLevel  = 0;      // 0-4 thresholds
+  const BOND_THRESHOLDS = [0, 20, 45, 72, 100];
+
+  const bondBarEl    = document.getElementById('bond-bar');
+  const bondLevelEl  = document.getElementById('bond-level');
+  const bondHudEl    = document.getElementById('bond-hud');
+  const timeHudEl    = document.getElementById('time-hud');
+  const hintEl       = document.getElementById('hint');
+  const flashEl      = document.getElementById('flash');
+
+  let hintVisible = true;
+  let hintFadeTimer = 0;
+
+  function updateBondHUD() {
+    const pct = Math.min(bondValue / BOND_MAX * 100, 100);
+    bondBarEl.style.width = pct + '%';
+    bondLevelEl.textContent = bondLevel;
+    if (bondValue > 0) bondHudEl.classList.add('visible');
+  }
+
+  function onBondIncrease(amount) {
+    bondValue = Math.min(bondValue + amount, BOND_MAX);
+    const newLevel = BOND_THRESHOLDS.filter(t => bondValue >= t).length - 1;
+    bondLevel = Math.min(newLevel, 4);
+    updateBondHUD();
+    // Bond light grows with level
+    bondLight.intensity = bondLevel * 0.4;
+    bondLight.distance  = 10 + bondLevel * 4;
+  }
+
+  // CSS flash juice
+  function triggerFlash() {
+    flashEl.style.background = 'rgba(255,180,80,0.14)';
+    setTimeout(() => { flashEl.style.background = 'rgba(255,180,80,0)'; }, 120);
+  }
+
+  // ── RAYCASTER FOR TAP ────────────────────────────────────────────────
+  const tapRay = new THREE.Raycaster();
+  const _tapNDC = new THREE.Vector2();
+
+  function handleTap(clientX, clientY) {
+    _tapNDC.x =  (clientX / window.innerWidth)  * 2 - 1;
+    _tapNDC.y = -(clientY / window.innerHeight) * 2 + 1;
+    tapRay.setFromCamera(_tapNDC, camera);
+    const hits = tapRay.intersectObjects(foxMeshes, false);
+    if (hits.length > 0) {
+      onFoxTapped();
+    }
+  }
+
+  renderer.domElement.addEventListener('click', e => handleTap(e.clientX, e.clientY));
+  renderer.domElement.addEventListener('touchend', e => {
+    e.preventDefault();
+    if (e.changedTouches.length > 0) {
+      handleTap(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+    }
+  }, { passive: false });
+
+  function onFoxTapped() {
+    fox.userData.tapCount++;
+    // Hide hint after first tap
+    if (hintVisible) { hintEl.classList.add('hidden'); hintVisible = false; }
+    // Juice: scale pulse
+    fox.userData.scaleT = 0.30;
+    // Juice: sparks
+    emitSparks(fox.position);
+    // Juice: screen flash
+    triggerFlash();
+    // Juice: fox goes happy state
+    fox.userData.state = 'happy';
+    fox.userData.happyTimer = 1.8;
+    // Bond increase
+    onBondIncrease(BOND_PER_TAP);
+    // Camera follows fox
+    camTarget.copy(fox.position);
+  }
+
+  // ── CREATURE WANDER AI ───────────────────────────────────────────────
+  const _creatureMove = new THREE.Vector3();
+
+  function pickWanderTarget(creature) {
+    const r = 8 + Math.random() * 6;
+    const a = Math.random() * Math.PI * 2;
+    creature.userData.wanderTarget.set(
+      Math.cos(a) * r, 0,
+      Math.sin(a) * r
+    );
+  }
+
+  function updateCreatureWander(creature, dt) {
+    const ud = creature.userData;
+    ud.stateTimer -= dt;
+    if (ud.stateTimer <= 0) {
+      if (ud.state === 'idle') {
+        ud.state = 'wander'; ud.stateTimer = 2.5 + Math.random() * 3.0;
+        pickWanderTarget(creature);
+      } else {
+        ud.state = 'idle'; ud.stateTimer = 1.5 + Math.random() * 3.5;
+      }
+    }
+    if (ud.state === 'wander') {
+      _creatureMove.set(
+        ud.wanderTarget.x - creature.position.x, 0,
+        ud.wanderTarget.z - creature.position.z
+      );
+      const dist = _creatureMove.length();
+      if (dist > 0.5) {
+        _creatureMove.normalize().multiplyScalar(ud.speed * dt);
+        creature.position.x += _creatureMove.x;
+        creature.position.z += _creatureMove.z;
+        creature.position.y = getGroundY(creature.position.x, creature.position.z);
+        if (dist > 1.0) {
+          ud.dir.set(_creatureMove.x, 0, _creatureMove.z).normalize();
+          creature.rotation.y = Math.atan2(ud.dir.x, ud.dir.z);
+        }
+      }
+      ud.bobPhase += dt * 6;
+      creature.position.y += Math.sin(ud.bobPhase) * 0.04;
+    }
+  }
+
+  // ── FOX AI WITH HAPPY STATE ──────────────────────────────────────────
+  const _foxMove = new THREE.Vector3();
+  const _foxHappyDest = new THREE.Vector3();
+
+  function updateFox(dt) {
+    const ud = fox.userData;
+
+    // Scale pulse juice
+    if (ud.scaleT > 0) {
+      ud.scaleT -= dt;
+      const t = ud.scaleT / 0.30;
+      const pulse = 1.0 + Math.sin(t * Math.PI) * 0.28;
+      fox.scale.setScalar(pulse);
+    } else {
+      fox.scale.setScalar(1.0);
+    }
+
+    // Tail wag — faster when happy
+    ud.tailPhase += dt * (ud.state === 'happy' ? 12 : 4.5);
+    foxTail.rotation.y = Math.sin(ud.tailPhase) * 0.55;
+
+    // Leg swing
+    ud.bobPhase += dt * (ud.state === 'wander' || ud.state === 'happy' ? 9 : 0);
+    legs[0].position.y = -0.08 + Math.sin(ud.bobPhase) * 0.12;
+    legs[1].position.y = -0.08 - Math.sin(ud.bobPhase) * 0.12;
+    legs[2].position.y = -0.08 - Math.sin(ud.bobPhase) * 0.12;
+    legs[3].position.y = -0.08 + Math.sin(ud.bobPhase) * 0.12;
+
+    // Head idle nod
+    const nod = ud.state === 'idle' ? Math.sin(Date.now() * 0.001) * 0.08 : 0;
+    foxHead.position.y = 0.7 + nod;
+
+    if (ud.state === 'happy') {
+      // Happy: orbit around origin excitedly
+      ud.happyTimer -= dt;
+      if (ud.happyTimer <= 0) { ud.state = 'idle'; ud.stateTimer = 2.0; }
+      const hapAngle = Date.now() * 0.003;
+      _foxHappyDest.set(Math.cos(hapAngle)*3, 0, Math.sin(hapAngle)*3);
+      _foxMove.set(
+        _foxHappyDest.x - fox.position.x, 0,
+        _foxHappyDest.z - fox.position.z
+      );
+      const dist = _foxMove.length();
+      if (dist > 0.3) {
+        _foxMove.normalize().multiplyScalar(4.5 * dt);
+        fox.position.x += _foxMove.x;
+        fox.position.z += _foxMove.z;
+        fox.position.y = getGroundY(fox.position.x, fox.position.z);
+        fox.rotation.y = Math.atan2(_foxMove.x, _foxMove.z);
+      }
+    } else {
+      ud.stateTimer -= dt;
+      if (ud.stateTimer <= 0) {
+        if (ud.state === 'idle') {
+          ud.state = 'wander'; ud.stateTimer = 2.0 + Math.random() * 3.5;
+          const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 5;
+          ud.wanderTarget = ud.wanderTarget || new THREE.Vector3();
+          ud.wanderTarget.set(Math.cos(a)*r, 0, Math.sin(a)*r);
+        } else {
+          ud.state = 'idle'; ud.stateTimer = 1.5 + Math.random() * 3.0;
+        }
+      }
+      if (ud.state === 'wander') {
+        const wt = ud.wanderTarget || new THREE.Vector3();
+        _foxMove.set(wt.x - fox.position.x, 0, wt.z - fox.position.z);
+        const dist = _foxMove.length();
+        if (dist > 0.5) {
+          _foxMove.normalize().multiplyScalar(ud.speed * dt);
+          fox.position.x += _foxMove.x;
+          fox.position.z += _foxMove.z;
+          fox.position.y = getGroundY(fox.position.x, fox.position.z);
+          if (dist > 1.0) fox.rotation.y = Math.atan2(_foxMove.x, _foxMove.z);
+        }
+      }
+    }
+
+    // Keep fox on terrain
+    fox.position.y = getGroundY(fox.position.x, fox.position.z);
+
+    // Camera smoothly follows fox when bond > 0
+    if (bondValue > 0) {
+      camTarget.lerp(fox.position, 0.02);
+    }
+  }
+
+  // ── BIRD PERCH ANIMATION ─────────────────────────────────────────────
+  function updateBird(dt) {
+    const ud = bird.userData;
+    ud.stateTimer -= dt;
+    ud.bobPhase += dt * 2.0;
+    if (ud.stateTimer <= 0) {
+      ud.stateTimer = 3 + Math.random() * 4;
+    }
+    bird.position.y = ud.perchY + Math.sin(ud.bobPhase) * 0.05;
+    bird.rotation.y += dt * 0.6;
+  }
+
+  // ── CLOCK ────────────────────────────────────────────────────────────
+  const clock = new THREE.Clock();
+
+  // ── RENDER LOOP ──────────────────────────────────────────────────────
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.05);
+
+    // Day/night
+    dayTime = (dayTime + dt / DAY_DURATION) % 1;
+    const dn = sampleDayNight(dayTime);
+    scene.background.copy(_skC);
+    scene.fog.color.copy(_foC);
+    scene.fog.density = dn.fd;
+    ambient.color.copy(_acC);
+    ambient.intensity = dn.ai;
+    sun.color.copy(_scC);
+    sun.intensity = dn.si;
+    moonLight.intensity = dn.mi;
+    tealLight.intensity = dn.ti;
+
+    // Teal orbit
+    tealOrbitAngle += dt * 0.35;
+    tealLight.position.set(Math.cos(tealOrbitAngle)*12, 6, Math.sin(tealOrbitAngle)*12);
+
+    // Time HUD
+    timeHudEl.innerHTML = getTimeLabel(dayTime);
+
+    // Fireflies
+    ffPhase += dt;
+    const ns = nightStrength(dayTime);
+    ffMat.opacity = ns * (0.35 + 0.45 * Math.sin(ffPhase * 1.3));
+    const ffPos = ffGeo.attributes.position;
+    for (let i = 0; i < FF_COUNT; i++) {
+      ffPos.setY(i, ffPos.getY(i) + Math.sin(ffPhase * 0.7 + i * 0.8) * 0.008);
+    }
+    ffPos.needsUpdate = true;
+
+    // Creatures
+    updateFox(dt);
+    updateCreatureWander(deer, dt);
+    updateCreatureWander(deer2, dt);
+    updateBird(dt);
+
+    // Sparks
+    updateSparks(dt);
+
+    // Camera lerp to target
+    _camTmpPos.set(
+      camTarget.x + 35, camTarget.y + 35, camTarget.z + 35
+    );
+    camera.position.lerp(_camTmpPos, CAM_LERP);
+    _camTmpLook.lerp(camTarget, CAM_LERP);
+    camera.lookAt(_camTmpLook);
+
+    renderer.render(scene, camera);
+  }
+
+  animate();
+  </script>
+</body>
+</html>

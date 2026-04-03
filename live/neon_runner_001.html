@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>NEON RUNNER</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000011; overflow: hidden; width: 100vw; height: 100vh; font-family: monospace; }
+canvas { display: block; }
+#ui {
+  position: fixed; top: 0; left: 0; width: 100%; pointer-events: none;
+  display: flex; justify-content: space-between; padding: 12px 18px;
+  z-index: 10;
+}
+#score { color: #00ffff; font-size: 22px; font-weight: bold; text-shadow: 0 0 12px #00ffff; }
+#best { color: rgba(255,255,255,0.5); font-size: 16px; padding-top: 4px; }
+#pubar {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  color: #ffcc00; font-size: 13px; letter-spacing: 3px; pointer-events: none;
+  z-index: 10; text-shadow: 0 0 10px #ffcc00;
+}
+#overlay {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; z-index: 20;
+  pointer-events: none; text-align: center;
+}
+#overlay h1 { font-size: 32px; margin-bottom: 10px; letter-spacing: 4px; }
+#overlay .sub { color: rgba(255,255,255,0.5); font-size: 13px; margin-top: 6px; letter-spacing: 2px; }
+#overlay.hidden { display: none; }
+.cyan { color: #00ffff; text-shadow: 0 0 20px #00ffff; }
+.red  { color: #ff4422; text-shadow: 0 0 20px #ff4422; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <span id="score">0</span>
+  <span id="best">BEST 0</span>
+</div>
+<div id="pubar"></div>
+<div id="overlay">
+  <h1 class="cyan">NEON RUNNER</h1>
+  <div class="sub">TAP / SPACE TO START</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// NEON RUNNER — Lane 004 Rando's House
+// Roguelike auto-runner. Tap/Space to jump (double jump!).
+// Collect coins. Power-ups change the rules.
+// Atom extracted: instant_start roguelike loop + juice layer pattern.
+
+const W = window.innerWidth, H = window.innerHeight;
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000011, 25, 65);
+
+const camera = new THREE.PerspectiveCamera(58, W / H, 0.1, 100);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// ─── LIGHTS ────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x111133, 1.2));
+const playerGlow = new THREE.PointLight(0x00ffff, 3, 10);
+scene.add(playerGlow);
+const sun = new THREE.DirectionalLight(0xffffff, 0.4);
+sun.position.set(10, 20, 10); sun.castShadow = true;
+sun.shadow.mapSize.set(512, 512);
+scene.add(sun);
+
+// ─── MATERIALS ─────────────────────────────────────────────────────────────
+const MAT = {
+  player: new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x003344, shininess: 120 }),
+  plat:   new THREE.MeshPhongMaterial({ color: 0x0d0d2a, emissive: 0x020210, shininess: 30 }),
+  edge:   new THREE.MeshPhongMaterial({ color: 0x2222ff, emissive: 0x0808aa }),
+  coin:   new THREE.MeshPhongMaterial({ color: 0xffcc00, emissive: 0x443300, shininess: 100 }),
+  shield: new THREE.MeshPhongMaterial({ color: 0x00ff88, emissive: 0x004422, transparent: true, opacity: 0.7 }),
+  speed:  new THREE.MeshPhongMaterial({ color: 0xff4400, emissive: 0x441100 }),
+  flip:   new THREE.MeshPhongMaterial({ color: 0xff00ff, emissive: 0x440044 }),
+};
+
+// ─── GEOMETRIES ────────────────────────────────────────────────────────────
+const GEO = {
+  player: new THREE.BoxGeometry(0.6, 0.6, 0.6),
+  platW1: new THREE.BoxGeometry(1, 0.28, 2.4),   // unit width — scaled on X
+  edge:   new THREE.BoxGeometry(1.02, 0.07, 2.42),
+  coin:   new THREE.CylinderGeometry(0.22, 0.22, 0.06, 16),
+  pu:     new THREE.OctahedronGeometry(0.32, 0),
+};
+
+// ─── PLAYER ────────────────────────────────────────────────────────────────
+const playerMesh = new THREE.Mesh(GEO.player, MAT.player);
+playerMesh.castShadow = true;
+scene.add(playerMesh);
+
+// Shield bubble (visual)
+const shieldBubble = new THREE.Mesh(
+  new THREE.SphereGeometry(0.55, 16, 12),
+  MAT.shield.clone()
+);
+shieldBubble.visible = false;
+playerMesh.add(shieldBubble);
+
+// ─── STARS ─────────────────────────────────────────────────────────────────
+const STARS = 350;
+const sPos = new Float32Array(STARS * 3);
+for (let i = 0; i < STARS; i++) {
+  sPos[i*3]   = (Math.random() - 0.5) * 100;
+  sPos[i*3+1] = (Math.random() - 0.5) * 50;
+  sPos[i*3+2] = -5 - Math.random() * 20;
+}
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute('position', new THREE.BufferAttribute(sPos, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({
+  size: 0.08, color: 0x6688ff, transparent: true, opacity: 0.55,
+  blending: THREE.AdditiveBlending, depthWrite: false
+})));
+
+// ─── TRAIL ─────────────────────────────────────────────────────────────────
+const TRAIL = 80;
+const trailPos = new Float32Array(TRAIL * 3);
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+const trailPts = new THREE.Points(trailGeo, new THREE.PointsMaterial({
+  size: 0.12, color: 0x00ffff, transparent: true, opacity: 0.5,
+  blending: THREE.AdditiveBlending, depthWrite: false
+}));
+scene.add(trailPts);
+let trailHead = 0;
+const trailHistory = Array.from({ length: TRAIL }, () => ({ x: 0, y: 0 }));
+
+// ─── PARTICLES ─────────────────────────────────────────────────────────────
+const PC = 240;
+const pPos  = new Float32Array(PC * 3);
+const pVel  = Array.from({ length: PC }, () => ({ vx:0, vy:0, vz:0 }));
+const pLife = new Float32Array(PC);
+const pGeo  = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+const pMat  = new THREE.PointsMaterial({
+  size: 0.14, color: 0xffffff, transparent: true, opacity: 0,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.Points(pGeo, pMat));
+
+function burst(x, y, col, n) {
+  pMat.color.set(col);
+  let k = 0;
+  for (let i = 0; i < PC && k < n; i++) {
+    if (pLife[i] <= 0) {
+      pPos[i*3] = x; pPos[i*3+1] = y; pPos[i*3+2] = (Math.random()-0.5)*0.4;
+      const spd = 3 + Math.random()*5, a = Math.random()*Math.PI*2;
+      pVel[i].vx = Math.cos(a)*spd;
+      pVel[i].vy = Math.sin(a)*spd*0.6 + 1.5;
+      pVel[i].vz = (Math.random()-0.5)*1.5;
+      pLife[i] = 0.4 + Math.random()*0.35;
+      k++;
+    }
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pMat.opacity = 0.9;
+}
+
+// ─── PLATFORM POOL ─────────────────────────────────────────────────────────
+const PPOOL = 20;
+const platPool  = [];
+const activePlats = [];
+
+for (let i = 0; i < PPOOL; i++) {
+  const m = new THREE.Mesh(GEO.platW1, MAT.plat.clone());
+  m.receiveShadow = true;
+  const e = new THREE.Mesh(GEO.edge, MAT.edge.clone());
+  e.position.y = 0.175;
+  m.add(e);
+  m.visible = false;
+  m.userData = { active: false };
+  scene.add(m);
+  platPool.push(m);
+}
+
+// ─── COIN POOL ─────────────────────────────────────────────────────────────
+const CPOOL = 50;
+const coinPool   = [];
+const activeCoins = [];
+
+for (let i = 0; i < CPOOL; i++) {
+  const m = new THREE.Mesh(GEO.coin, MAT.coin.clone());
+  m.castShadow = true;
+  m.visible = false;
+  m.userData = { active: false };
+  scene.add(m);
+  coinPool.push(m);
+}
+
+// ─── POWERUP POOL ──────────────────────────────────────────────────────────
+const PUPOOL = 10;
+const puPool   = [];
+const activePUs = [];
+const PU_TYPES  = ['shield','speed','flip'];
+const PU_COLS   = { shield: 0x00ff88, speed: 0xff4400, flip: 0xff00ff };
+const PU_NAMES  = { shield: 'SHIELD', speed: 'SPEED ×2', flip: 'FLIP GRAV' };
+
+for (let i = 0; i < PUPOOL; i++) {
+  const m = new THREE.Mesh(GEO.pu, MAT.shield.clone());
+  m.visible = false;
+  m.userData = { active: false, type: 'shield' };
+  scene.add(m);
+  puPool.push(m);
+}
+
+// ─── SPAWN HELPERS ─────────────────────────────────────────────────────────
+function spawnPlat(x, y, w) {
+  const m = platPool.find(p => !p.userData.active);
+  if (!m) return null;
+  m.scale.x = w;
+  m.position.set(x + w * 0.5, y, 0);
+  m.visible = true;
+  m.userData.active = true;
+  m.userData.L = x;
+  m.userData.R = x + w;
+  m.userData.T = y + 0.14;
+  activePlats.push(m);
+  return m;
+}
+function killPlat(m) {
+  m.visible = false; m.userData.active = false;
+  activePlats.splice(activePlats.indexOf(m), 1);
+}
+
+function spawnCoin(x, y) {
+  const m = coinPool.find(c => !c.userData.active);
+  if (!m) return;
+  m.position.set(x, y, 0); m.rotation.y = Math.random()*Math.PI;
+  m.visible = true; m.userData.active = true;
+  activeCoins.push(m);
+}
+function killCoin(m) {
+  m.visible = false; m.userData.active = false;
+  activeCoins.splice(activeCoins.indexOf(m), 1);
+}
+
+function spawnPU(x, y, type) {
+  const m = puPool.find(p => !p.userData.active);
+  if (!m) return;
+  m.position.set(x, y, 0);
+  m.userData.active = true; m.userData.type = type;
+  m.material.color.set(PU_COLS[type]);
+  m.material.emissive.set(PU_COLS[type]);
+  m.material.emissiveIntensity = 0.4;
+  m.visible = true;
+  activePUs.push(m);
+}
+function killPU(m) {
+  m.visible = false; m.userData.active = false;
+  activePUs.splice(activePUs.indexOf(m), 1);
+}
+
+// ─── LEVEL GEN ─────────────────────────────────────────────────────────────
+let genX = 0;
+let rngSeed = 12345;
+function rng() {
+  rngSeed ^= rngSeed << 13; rngSeed ^= rngSeed >> 17; rngSeed ^= rngSeed << 5;
+  return (rngSeed >>> 0) / 0x100000000;
+}
+
+function generateAhead(px) {
+  while (genX < px + 48) {
+    const gap = 1.4 + rng() * 2.6;
+    genX += gap;
+    const w = 3.0 + rng() * 4.5;
+    const y = 1.5 + rng() * 2.5;
+    spawnPlat(genX, y, w);
+
+    // Coins along platform
+    const nc = 2 + Math.floor(rng() * 4);
+    for (let i = 1; i <= nc; i++) {
+      spawnCoin(genX + w * i / (nc + 1), y + 0.52);
+    }
+    // Rare powerup
+    if (rng() < 0.18) {
+      const t = PU_TYPES[Math.floor(rng() * PU_TYPES.length)];
+      spawnPU(genX + w * 0.5, y + 0.9, t);
+    }
+    genX += w;
+  }
+}
+
+// ─── GAME STATE ────────────────────────────────────────────────────────────
+let gs = 'start'; // start | playing | dead
+let px = 0, py = 3, vx = 0, vy = 0;
+let onGround = false, jumps = 2;
+let speed = 6, dist = 0;
+let score = 0, best = 0;
+let gravDir = 1;      // 1 = normal, -1 = flipped
+let shakeAmt = 0;
+let activePU = null, puTimer = 0;
+const PU_DUR = 6;
+let puShieldOn = false, puSpeedOn = false, puFlipOn = false;
+const GRAV = 20;
+
+const scoreEl = document.getElementById('score');
+const bestEl  = document.getElementById('best');
+const puBarEl = document.getElementById('pubar');
+const overlay = document.getElementById('overlay');
+
+function showOverlay(title, cls, sub1, sub2='') {
+  overlay.innerHTML = `<h1 class="${cls}">${title}</h1><div class="sub">${sub1}</div>${sub2 ? `<div class="sub" style="margin-top:4px">${sub2}</div>` : ''}`;
+  overlay.classList.remove('hidden');
+}
+
+function initLevel() {
+  // Clear
+  [...activePlats].forEach(killPlat);
+  [...activeCoins].forEach(killCoin);
+  [...activePUs].forEach(killPU);
+  genX = 0; rngSeed = 10000 + Math.floor(Date.now() % 99999);
+  px = -1; py = 3.0; vx = 0; vy = 0; speed = 6; dist = 0;
+  jumps = 2; onGround = false; score = 0;
+  gravDir = 1; activePU = null; puTimer = 0;
+  puShieldOn = false; puSpeedOn = false; puFlipOn = false;
+  shakeAmt = 0;
+  puBarEl.textContent = '';
+  scoreEl.textContent = '0';
+  playerMesh.material.emissive.set(0x003344);
+  shieldBubble.visible = false;
+  spawnPlat(-5, 2.0, 9); // start pad
+  generateAhead(px);
+}
+
+function startGame() {
+  gs = 'playing';
+  overlay.classList.add('hidden');
+  initLevel();
+}
+
+function die() {
+  if (gs !== 'playing') return;
+  gs = 'dead';
+  if (score > best) best = score;
+  bestEl.textContent = `BEST ${best}`;
+  burst(px, py, 0xff4422, 60);
+  shakeAmt = 1.0;
+  deactivatePU();
+  showOverlay('DEAD', 'red', `SCORE ${score} &nbsp;|&nbsp; BEST ${best}`, 'TAP TO RESTART');
+}
+
+function activatePU(type) {
+  deactivatePU();
+  activePU = type; puTimer = PU_DUR;
+  burst(px, py, PU_COLS[type], 20);
+  shakeAmt = Math.max(shakeAmt, 0.35);
+  if (type === 'shield') { puShieldOn = true; shieldBubble.visible = true; playerMesh.material.emissive.set(0x00ff44); }
+  if (type === 'speed')  { puSpeedOn = true; playerMesh.material.emissive.set(0xff4400); }
+  if (type === 'flip')   { puFlipOn = true; gravDir = -1; playerMesh.material.emissive.set(0xff00ff); shakeAmt = Math.max(shakeAmt, 0.55); }
+}
+
+function deactivatePU() {
+  if (!activePU) return;
+  puShieldOn = false; puSpeedOn = false;
+  if (puFlipOn) { puFlipOn = false; gravDir = 1; }
+  activePU = null;
+  playerMesh.material.emissive.set(0x003344);
+  shieldBubble.visible = false;
+  puBarEl.textContent = '';
+}
+
+function doJump() {
+  if (gs === 'start') { startGame(); return; }
+  if (gs === 'dead')  { startGame(); return; }
+  if (jumps > 0) {
+    vy = puFlipOn ? -13 : 13;
+    jumps--;
+    burst(px, py - (puFlipOn ? -0.3 : 0.3), 0x00ffff, 12);
+    shakeAmt = Math.max(shakeAmt, jumps === 0 ? 0.2 : 0.1);
+  }
+}
+
+// ─── INPUT ─────────────────────────────────────────────────────────────────
+renderer.domElement.addEventListener('pointerdown', e => { e.preventDefault(); doJump(); }, { passive: false });
+window.addEventListener('keydown', e => { if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); doJump(); } });
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+
+// ─── CLOCK ─────────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+const camTarget = new THREE.Vector3();
+
+function update(dt) {
+  if (gs !== 'playing') return;
+
+  dist += dt;
+  const baseSpd = 6 + dist * 0.28;
+  speed = puSpeedOn ? Math.min(baseSpd * 2, 24) : Math.min(baseSpd, 18);
+
+  px += speed * dt;
+  vy -= GRAV * gravDir * dt;
+  py += vy * dt;
+
+  // ── Platform collision ──────────────────────────────────────────────────
+  onGround = false;
+  for (const p of activePlats) {
+    if (px + 0.25 < p.userData.L || px - 0.25 > p.userData.R) continue;
+    const top = p.userData.T;
+    if (gravDir === 1) {
+      if (py - 0.3 <= top && py - 0.3 >= top - 0.6 && vy <= 0) {
+        py = top + 0.3; vy = 0; onGround = true; jumps = 2;
+      }
+    } else {
+      if (py + 0.3 >= top - 0.06 && py + 0.3 <= top + 0.6 && vy >= 0) {
+        py = top - 0.3 - 0.06; vy = 0; onGround = true; jumps = 2;
+      }
+    }
+  }
+
+  // ── Death bounds ────────────────────────────────────────────────────────
+  if ((gravDir === 1 && py < -3) || (gravDir === -1 && py > 9)) { die(); return; }
+
+  // ── Coin collect ────────────────────────────────────────────────────────
+  for (let i = activeCoins.length - 1; i >= 0; i--) {
+    const c = activeCoins[i];
+    if (Math.abs(c.position.x - px) < 0.55 && Math.abs(c.position.y - py) < 0.55) {
+      score++;
+      scoreEl.textContent = score;
+      burst(c.position.x, c.position.y, 0xffcc00, 7);
+      killCoin(c);
+    }
+  }
+
+  // ── Powerup collect ─────────────────────────────────────────────────────
+  for (let i = activePUs.length - 1; i >= 0; i--) {
+    const p = activePUs[i];
+    if (Math.abs(p.position.x - px) < 0.65 && Math.abs(p.position.y - py) < 0.65) {
+      activatePU(p.userData.type);
+      killPU(p);
+    }
+  }
+
+  // ── PU timer ────────────────────────────────────────────────────────────
+  if (activePU) {
+    puTimer -= dt;
+    puBarEl.textContent = `${PU_NAMES[activePU]}  ${Math.max(0, puTimer).toFixed(1)}s`;
+    if (puTimer <= 0) deactivatePU();
+  }
+
+  // ── Cull old objects ────────────────────────────────────────────────────
+  for (let i = activePlats.length - 1; i >= 0; i--)
+    if (activePlats[i].userData.R < px - 12) killPlat(activePlats[i]);
+  for (let i = activeCoins.length - 1; i >= 0; i--)
+    if (activeCoins[i].position.x < px - 12) killCoin(activeCoins[i]);
+  for (let i = activePUs.length - 1; i >= 0; i--)
+    if (activePUs[i].position.x < px - 12) killPU(activePUs[i]);
+
+  generateAhead(px);
+
+  // ── Animate world objects ───────────────────────────────────────────────
+  const t = clock.elapsedTime;
+  for (const c of activeCoins) c.rotation.y += dt * 2.5;
+  for (const p of activePUs)   { p.rotation.y += dt * 2; p.rotation.x += dt * 1.3; p.position.y += Math.sin(t * 3 + p.position.x) * 0.003; }
+
+  // ── Player mesh ─────────────────────────────────────────────────────────
+  playerMesh.position.set(px, py, 0);
+  playerMesh.rotation.z = onGround ? Math.sin(t * 14) * 0.04 : vy * 0.025;
+  playerGlow.position.set(px, py + 0.5, 1.5);
+
+  // ── Trail ───────────────────────────────────────────────────────────────
+  trailHistory[trailHead].x = px;
+  trailHistory[trailHead].y = py;
+  trailHead = (trailHead + 1) % TRAIL;
+  for (let i = 0; i < TRAIL; i++) {
+    const h = trailHistory[i];
+    trailPos[i*3] = h.x; trailPos[i*3+1] = h.y; trailPos[i*3+2] = 0;
+  }
+  trailGeo.attributes.position.needsUpdate = true;
+
+  // ── Particles ───────────────────────────────────────────────────────────
+  let anyP = false;
+  for (let i = 0; i < PC; i++) {
+    if (pLife[i] > 0) {
+      pLife[i] -= dt;
+      pPos[i*3]   += pVel[i].vx * dt;
+      pPos[i*3+1] += pVel[i].vy * dt;
+      pPos[i*3+2] += pVel[i].vz * dt;
+      pVel[i].vy  -= 12 * dt;
+      anyP = true;
+    }
+  }
+  if (anyP) { pGeo.attributes.position.needsUpdate = true; pMat.opacity = 0.9; }
+  else pMat.opacity = 0;
+
+  // ── Camera ──────────────────────────────────────────────────────────────
+  const camTargetX = px + 3;
+  const camTargetY = 4.5 + (py - 2.5) * 0.25;
+  let sx = 0, sy = 0;
+  if (shakeAmt > 0.02) {
+    sx = (Math.random() - 0.5) * shakeAmt;
+    sy = (Math.random() - 0.5) * shakeAmt;
+    shakeAmt *= 0.82;
+  } else shakeAmt = 0;
+  camera.position.x += (camTargetX + sx - camera.position.x) * 0.12;
+  camera.position.y += (camTargetY + sy - camera.position.y) * 0.10;
+  camera.position.z = 13;
+  camTarget.set(px + 2, camTargetY - 1.5, 0);
+  camera.lookAt(camTarget);
+
+  // ── Stars parallax ──────────────────────────────────────────────────────
+  starGeo.attributes.position.array[0] = camera.position.x * 0.08; // crude parallax via first star
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  update(dt);
+  renderer.render(scene, camera);
+}
+
+// ─── BOOT ──────────────────────────────────────────────────────────────────
+// Pre-build starting platform so the world isn't empty on the title screen
+spawnPlat(-5, 2.0, 9);
+generateAhead(5);
+camera.position.set(4, 4, 13);
+camera.lookAt(4, 3, 0);
+animate();
+</script>
+</body>
+</html>

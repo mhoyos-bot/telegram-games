@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>ROGUE RUN</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;touch-action:none;font-family:'Courier New',monospace;user-select:none;-webkit-user-select:none}
+canvas{display:block;position:fixed;top:0;left:0}
+#ui{position:fixed;top:0;left:0;right:0;padding:14px 16px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;z-index:10}
+#score{color:#0ff;font-size:34px;font-weight:700;text-shadow:0 0 18px #0ff,0 0 4px #0ff;letter-spacing:2px}
+#lv{color:#f0f;font-size:15px;font-weight:700;text-shadow:0 0 10px #f0f;padding-top:8px;letter-spacing:1px}
+#perks{position:fixed;bottom:24px;left:16px;z-index:10;display:flex;gap:8px;pointer-events:none}
+.pk{font-size:22px;text-shadow:0 0 8px currentColor}
+#overlay{position:fixed;inset:0;z-index:20;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.88)}
+#ol-title{color:#0ff;font-size:40px;font-weight:700;text-shadow:0 0 24px #0ff,0 0 48px #0ff;margin-bottom:6px;letter-spacing:4px}
+#ol-score{color:#fff;font-size:22px;margin-bottom:4px}
+#ol-best{color:#ff0;font-size:18px;font-weight:700;text-shadow:0 0 12px #ff0;margin-bottom:28px}
+#ol-btn{color:#000;background:#0ff;padding:16px 44px;font-size:20px;font-weight:700;border:none;border-radius:4px;cursor:pointer;letter-spacing:2px;font-family:'Courier New',monospace;box-shadow:0 0 20px #0ff}
+#upg-panel{position:fixed;inset:0;z-index:30;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.93)}
+#upg-hd{color:#ff0;font-size:30px;font-weight:700;text-shadow:0 0 20px #ff0;margin-bottom:4px;letter-spacing:3px}
+#upg-sub{color:#888;font-size:14px;margin-bottom:24px;letter-spacing:1px}
+#upg-cards{display:flex;flex-direction:column;gap:12px;align-items:center}
+.ucard{background:#0a0a0f;border:2px solid #222;border-radius:8px;padding:16px 22px;cursor:pointer;text-align:center;width:min(280px,80vw);transition:border-color .15s,background .15s}
+.ucard:active{border-color:#0ff;background:#001a1a}
+.uicon{font-size:32px;margin-bottom:6px}
+.uname{color:#0ff;font-size:17px;font-weight:700;letter-spacing:1px;margin-bottom:3px}
+.udesc{color:#666;font-size:12px;line-height:1.5}
+.ucard.has{border-color:#444;opacity:.6;cursor:default}
+.ucard.has .uname{color:#444}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score">0m</div>
+  <div id="lv">LV 1</div>
+</div>
+<div id="perks"></div>
+<div id="overlay">
+  <div id="ol-title">ROGUE RUN</div>
+  <div id="ol-score"></div>
+  <div id="ol-best"></div>
+  <button id="ol-btn">TAP TO RUN</button>
+</div>
+<div id="upg-panel">
+  <div id="upg-hd">LEVEL UP</div>
+  <div id="upg-sub">CHOOSE ONE UPGRADE</div>
+  <div id="upg-cards"></div>
+</div>
+
+<script>
+// ROGUE RUN — roguelike_run_v01
+// Atoms: AUTORUN_MOVEMENT, OBSTACLE_PROC_GEN, ROGUELIKE_UPGRADE_PICK, NEAR_MISS_JUICE
+
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d');
+let W, H, GROUND_Y, FLOOR_H;
+
+function resize() {
+  W = cvs.width = window.innerWidth;
+  H = cvs.height = window.innerHeight;
+  GROUND_Y = H * 0.72;
+  FLOOR_H = H - GROUND_Y;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- CONSTANTS ---
+const PLAYER_X = () => W * 0.22;
+const P_W = 24, P_H = 34;
+const GRAVITY = 0.65;
+const JUMP_VY = -15.5;
+const SAFE_START = 480;  // px of solid floor before first gap
+
+// --- STATE ---
+const S = { RUN: 0, PICK: 1, DEAD: 2 };
+let gs = S.DEAD;
+
+// --- PLAYER ---
+const p = {
+  y: 0, vy: 0,
+  onGround: false,
+  jumpsUsed: 0,
+  shield: false, shieldCooldown: 0,
+  dashVx: 0, dashFrames: 0,
+  magnetRange: 0,
+  trail: [],
+  invFrames: 0,
+  highJump: false
+};
+
+// --- WORLD ---
+let speed = 5;
+let distance = 0;
+let level = 1;
+let nextLevelDist = 500;
+let floors = [];   // {x, w}
+let spikes = [];   // {x, y, w, h}
+let orbs = [];     // {x, y, r, collected, vy}
+let particles = [];
+let shakeMag = 0;
+let shakeX = 0, shakeY = 0;
+let score = 0;
+let bestScore = parseInt(localStorage.getItem('rr_best') || '0');
+
+// --- UPGRADES ---
+const UPGRADE_POOL = [
+  { id:'double_jump', icon:'↑↑', name:'DOUBLE JUMP',   desc:'Tap again mid-air for a second jump' },
+  { id:'shield',      icon:'⬡',  name:'SHIELD',        desc:'Block one fatal hit per run. Recharges each level' },
+  { id:'magnet',      icon:'◈',  name:'MAGNET',        desc:'Orbs fly toward you from double range' },
+  { id:'high_jump',   icon:'↟',  name:'HIGH JUMP',     desc:'Jumps are 30% higher. Clear wider gaps' },
+  { id:'dash',        icon:'»',  name:'DASH',          desc:'Tap mid-air to surge forward through obstacles' },
+  { id:'slow_mo',     icon:'◎',  name:'SLOW MO',       desc:'Near-miss slows the world for 1.2 seconds' },
+];
+let owned = {};
+let upgradeChoices = [];
+let nearMissTimer = 0;
+let slowMoTimer = 0;
+
+// --- FLOOR GENERATION ---
+let genX = 0;
+function initFloor() {
+  floors = [];
+  spikes = [];
+  orbs = [];
+  genX = 0;
+  // Safe start zone
+  floors.push({ x: 0, w: SAFE_START });
+  genX = SAFE_START;
+  // Generate ahead
+  while (genX < W + 2000) spawnFloorSegment();
+}
+
+function spawnFloorSegment() {
+  const lvFactor = Math.min(level - 1, 8);
+  // Gap
+  const gapW = 80 + Math.random() * 80 + lvFactor * 8;
+  genX += gapW;
+  // Floor segment
+  const segW = 160 + Math.random() * 180 - lvFactor * 6;
+  const floorSeg = { x: genX, w: Math.max(100, segW) };
+  floors.push(floorSeg);
+
+  // Spike on segment (chance increases with level)
+  if (Math.random() < 0.25 + lvFactor * 0.04) {
+    const spikeX = floorSeg.x + 30 + Math.random() * Math.max(10, floorSeg.w - 80);
+    spikes.push({ x: spikeX, y: GROUND_Y - 20, w: 18, h: 20 });
+  }
+
+  // Orbs above segment
+  const orbCount = Math.floor(Math.random() * 3) + 1;
+  for (let i = 0; i < orbCount; i++) {
+    const ox = floorSeg.x + 20 + (i / orbCount) * (floorSeg.w - 40);
+    const oy = GROUND_Y - 60 - Math.random() * 60;
+    orbs.push({ x: ox, y: oy, r: 8, collected: false, vy: 0 });
+  }
+
+  genX += floorSeg.w;
+}
+
+// --- PARTICLES ---
+function burst(x, y, color, count, speed_mul = 1) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const s = (2 + Math.random() * 4) * speed_mul;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * s,
+      vy: Math.sin(angle) * s - 2,
+      life: 1, decay: 0.03 + Math.random() * 0.04,
+      r: 2 + Math.random() * 3,
+      color
+    });
+  }
+}
+
+function shake(mag) { shakeMag = Math.max(shakeMag, mag); }
+
+// --- INPUT ---
+let jumpQueued = false;
+let dashQueued = false;
+let lastTapTime = 0;
+
+function onTap(e) {
+  if (e.cancelable) e.preventDefault();
+  if (gs === S.DEAD) { startGame(); return; }
+  if (gs === S.PICK) return;
+
+  const now = performance.now();
+  const doubleTap = (now - lastTapTime) < 280;
+  lastTapTime = now;
+
+  if (owned.dash && !p.onGround && p.dashFrames <= 0 && doubleTap) {
+    dashQueued = true;
+  } else {
+    jumpQueued = true;
+  }
+}
+document.addEventListener('touchstart', onTap, { passive: false });
+document.addEventListener('mousedown', onTap);
+
+// --- PHYSICS & UPDATE ---
+function applyJump() {
+  const maxJ = owned.double_jump ? 2 : 1;
+  if (p.jumpsUsed < maxJ) {
+    p.vy = owned.high_jump ? JUMP_VY * 1.32 : JUMP_VY;
+    p.jumpsUsed++;
+    p.onGround = false;
+    burst(PLAYER_X(), p.y + P_H * 0.5, '#0ff', 10, 0.8);
+  }
+}
+
+function getFloorAt(px) {
+  // Returns the floor Y at player's feet, or null if in gap
+  for (const f of floors) {
+    if (px + P_W > f.x && px < f.x + f.w) return GROUND_Y;
+  }
+  return null;
+}
+
+function update(dt) {
+  const effectiveSpeed = (slowMoTimer > 0) ? speed * 0.3 : speed;
+
+  // Distance + score
+  distance += effectiveSpeed * 0.1;
+  score = Math.floor(distance) + Math.floor(Object.keys(owned).length * 50);
+
+  // Level up check
+  if (distance >= nextLevelDist) {
+    triggerLevelUp();
+    return;
+  }
+
+  // Handle jump queue
+  if (jumpQueued) { applyJump(); jumpQueued = false; }
+  if (dashQueued) {
+    p.dashVx = 16; p.dashFrames = 12;
+    burst(PLAYER_X(), p.y + P_H * 0.5, '#f0f', 14, 1.2);
+    dashQueued = false;
+  }
+
+  // Player physics
+  p.vy += GRAVITY;
+  p.y += p.vy;
+
+  // Dash
+  if (p.dashFrames > 0) p.dashFrames--;
+
+  // Invincibility cooldown
+  if (p.invFrames > 0) p.invFrames--;
+
+  // Shield recharge indicator
+  if (p.shieldCooldown > 0) p.shieldCooldown--;
+
+  // Near-miss / slow-mo
+  if (nearMissTimer > 0) nearMissTimer--;
+  if (slowMoTimer > 0) slowMoTimer--;
+
+  // Floor collision
+  const floorY = getFloorAt(PLAYER_X());
+  if (floorY !== null && p.y + P_H >= floorY && p.vy >= 0) {
+    p.y = floorY - P_H;
+    p.vy = 0;
+    p.onGround = true;
+    p.jumpsUsed = 0;
+    p.dashFrames = 0;
+  } else {
+    p.onGround = false;
+  }
+
+  // Fall death (fell below floor)
+  if (p.y > H + 60) {
+    die();
+    return;
+  }
+
+  // Scroll world
+  for (const f of floors) f.x -= effectiveSpeed;
+  for (const s of spikes) s.x -= effectiveSpeed;
+  for (const o of orbs) {
+    o.x -= effectiveSpeed;
+    if (owned.magnet) {
+      const range = 120 * (owned.magnet ? 2 : 1);
+      const dx = PLAYER_X() - o.x;
+      const dy = (p.y + P_H * 0.5) - o.y;
+      const dist2 = Math.sqrt(dx * dx + dy * dy);
+      if (dist2 < range && !o.collected) {
+        o.x += dx * 0.12;
+        o.y += dy * 0.12;
+      }
+    }
+  }
+
+  // Spike collision
+  if (p.invFrames <= 0) {
+    for (const s of spikes) {
+      const px = PLAYER_X(), py = p.y;
+      if (px + P_W - 6 > s.x && px + 6 < s.x + s.w &&
+          py + P_H - 2 > s.y && py < s.y + s.h) {
+        if (owned.shield && p.shield) {
+          p.shield = false;
+          p.invFrames = 90;
+          shake(8);
+          burst(PLAYER_X(), p.y + P_H * 0.5, '#0ff', 20, 1.5);
+        } else if (owned.slow_mo && nearMissTimer > 0) {
+          // near miss saved us — do nothing
+        } else {
+          die();
+          return;
+        }
+      }
+      // Near miss detection
+      const nearX = Math.abs(px - (s.x + s.w * 0.5)) < 60;
+      if (nearX && py + P_H > s.y + s.h + 5 && nearMissTimer <= 0) {
+        nearMissTimer = 20;
+        if (owned.slow_mo && slowMoTimer <= 0) {
+          slowMoTimer = 72;
+          burst(PLAYER_X(), p.y, '#f0f', 8, 0.5);
+        }
+      }
+    }
+  }
+
+  // Orb collection
+  for (const o of orbs) {
+    if (o.collected) continue;
+    const dx = PLAYER_X() + P_W * 0.5 - o.x;
+    const dy = p.y + P_H * 0.5 - o.y;
+    if (Math.sqrt(dx * dx + dy * dy) < P_W * 0.8 + o.r) {
+      o.collected = true;
+      score += 10;
+      burst(o.x, o.y, '#ff0', 8, 0.7);
+    }
+  }
+
+  // Player trail
+  p.trail.push({ x: PLAYER_X() + P_W * 0.5, y: p.y + P_H * 0.5 });
+  if (p.trail.length > 14) p.trail.shift();
+
+  // Generate more floor ahead
+  while (genX - (W - PLAYER_X()) < W + 1200) spawnFloorSegment();
+
+  // Clean up off-screen objects
+  floors = floors.filter(f => f.x + f.w > -50);
+  spikes = spikes.filter(s => s.x + s.w > -50);
+  orbs = orbs.filter(o => o.x > -50);
+
+  // Update particles
+  for (const pt of particles) {
+    pt.x += pt.vx; pt.y += pt.vy;
+    pt.vy += 0.15; pt.vx *= 0.95;
+    pt.life -= pt.decay;
+  }
+  particles = particles.filter(pt => pt.life > 0);
+
+  // Camera shake decay
+  if (shakeMag > 0) {
+    shakeX = (Math.random() - 0.5) * shakeMag;
+    shakeY = (Math.random() - 0.5) * shakeMag;
+    shakeMag *= 0.82;
+    if (shakeMag < 0.4) { shakeMag = 0; shakeX = 0; shakeY = 0; }
+  }
+
+  // Speed up over distance
+  speed = 5 + (level - 1) * 0.8 + distance * 0.002;
+  speed = Math.min(speed, 13);
+}
+
+// --- RENDER ---
+function render() {
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  // Background
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // Background grid lines (atmosphere)
+  ctx.globalAlpha = 0.06;
+  ctx.strokeStyle = '#0ff';
+  ctx.lineWidth = 1;
+  const gridOff = (Date.now() * 0.5 * speed * 0.1) % 60;
+  for (let x = -gridOff; x < W; x += 60) {
+    ctx.beginPath(); ctx.moveTo(x, GROUND_Y); ctx.lineTo(x + 40, H); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Floor segments
+  for (const f of floors) {
+    // Glow edge
+    ctx.save();
+    ctx.shadowColor = '#0ff';
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(f.x, GROUND_Y, f.w, FLOOR_H);
+    ctx.strokeStyle = '#0ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(f.x, GROUND_Y);
+    ctx.lineTo(f.x + f.w, GROUND_Y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Spikes
+  for (const s of spikes) {
+    ctx.save();
+    ctx.shadowColor = '#f0f';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = '#f0f';
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y + s.h);
+    ctx.lineTo(s.x + s.w * 0.5, s.y);
+    ctx.lineTo(s.x + s.w, s.y + s.h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Orbs
+  for (const o of orbs) {
+    if (o.collected) continue;
+    ctx.save();
+    ctx.shadowColor = '#ff0';
+    ctx.shadowBlur = 16;
+    const pulse = 0.85 + 0.15 * Math.sin(Date.now() * 0.006 + o.x);
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Player trail
+  for (let i = 0; i < p.trail.length; i++) {
+    const t = p.trail[i];
+    const alpha = (i / p.trail.length) * 0.45;
+    const size = P_W * 0.3 * (i / p.trail.length);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#0ff';
+    ctx.fillRect(t.x - size * 0.5, t.y - size * 0.5, size, size);
+  }
+  ctx.globalAlpha = 1;
+
+  // Player
+  if (gs === S.RUN) {
+    const px = PLAYER_X(), py = p.y;
+    const blink = p.invFrames > 0 && Math.floor(Date.now() / 80) % 2 === 0;
+
+    if (!blink) {
+      ctx.save();
+      ctx.shadowColor = '#0ff';
+      ctx.shadowBlur = 20;
+
+      // Body
+      ctx.fillStyle = p.shield ? '#0ff' : '#00eeff';
+      ctx.fillRect(px, py, P_W, P_H);
+
+      // Eye
+      ctx.fillStyle = '#000';
+      ctx.fillRect(px + P_W * 0.55, py + P_H * 0.2, 6, 6);
+
+      // Legs animation
+      const legPhase = Date.now() * 0.012;
+      const legSwing = p.onGround ? Math.sin(legPhase) * 5 : 0;
+      ctx.fillStyle = '#008899';
+      ctx.fillRect(px + 4, py + P_H, 8, legSwing + 6);
+      ctx.fillRect(px + P_W - 12, py + P_H, 8, -legSwing + 6);
+
+      // Shield glow
+      if (p.shield && owned.shield) {
+        ctx.strokeStyle = '#0ff';
+        ctx.lineWidth = 3;
+        ctx.shadowBlur = 30;
+        ctx.beginPath();
+        ctx.arc(px + P_W * 0.5, py + P_H * 0.5, P_W * 0.9, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // Particles
+  for (const pt of particles) {
+    ctx.globalAlpha = pt.life;
+    ctx.fillStyle = pt.color;
+    ctx.shadowColor = pt.color;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, pt.r * pt.life, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+
+  // Slow-mo vignette
+  if (slowMoTimer > 0) {
+    const alpha = Math.min(slowMoTimer / 72, 1) * 0.18;
+    ctx.fillStyle = `rgba(255,0,255,${alpha})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  ctx.restore();
+
+  // HUD
+  document.getElementById('score').textContent = Math.floor(score) + 'm';
+  document.getElementById('lv').textContent = 'LV ' + level;
+  updatePerksUI();
+}
+
+function updatePerksUI() {
+  const perks = document.getElementById('perks');
+  const icons = {
+    double_jump: '↑↑', shield: p.shield ? '⬡' : '▽',
+    magnet: '◈', high_jump: '↟', dash: '»', slow_mo: '◎'
+  };
+  const colors = {
+    double_jump: '#0ff', shield: p.shield ? '#0ff' : '#444',
+    magnet: '#ff0', high_jump: '#f0f', dash: '#f0f', slow_mo: '#f0f'
+  };
+  perks.innerHTML = Object.keys(owned).map(id =>
+    `<span class="pk" style="color:${colors[id] || '#0ff'}">${icons[id] || '?'}</span>`
+  ).join('');
+}
+
+// --- GAME FLOW ---
+function startGame() {
+  gs = S.RUN;
+  distance = 0; score = 0; level = 1; nextLevelDist = 500;
+  speed = 5;
+  owned = {};
+  p.y = GROUND_Y - P_H;
+  p.vy = 0; p.onGround = true; p.jumpsUsed = 0;
+  p.shield = false; p.shieldCooldown = 0;
+  p.dashVx = 0; p.dashFrames = 0;
+  p.invFrames = 0; p.trail = [];
+  nearMissTimer = 0; slowMoTimer = 0;
+  shakeMag = 0; shakeX = 0; shakeY = 0;
+  particles = [];
+  initFloor();
+  document.getElementById('overlay').style.display = 'none';
+}
+
+function die() {
+  if (gs !== S.RUN) return;
+  gs = S.DEAD;
+  shake(18);
+  burst(PLAYER_X(), p.y + P_H * 0.5, '#0ff', 30, 1.6);
+  burst(PLAYER_X(), p.y + P_H * 0.5, '#f0f', 20, 1.2);
+  if (score > bestScore) {
+    bestScore = score;
+    localStorage.setItem('rr_best', bestScore);
+  }
+  setTimeout(showDeathScreen, 400);
+}
+
+function showDeathScreen() {
+  const ol = document.getElementById('overlay');
+  document.getElementById('ol-score').textContent = 'SCORE: ' + Math.floor(score) + 'm';
+  document.getElementById('ol-best').textContent = 'BEST: ' + bestScore + 'm';
+  ol.style.display = 'flex';
+}
+
+document.getElementById('ol-btn').addEventListener('click', startGame);
+
+function triggerLevelUp() {
+  gs = S.PICK;
+  level++;
+  nextLevelDist = distance + 400 + level * 80;
+
+  // Recharge shield
+  if (owned.shield) p.shield = true;
+
+  // Pick 3 random upgrades
+  const pool = UPGRADE_POOL.filter(u => !owned[u.id]);
+  const shuffled = pool.sort(() => Math.random() - 0.5).slice(0, Math.min(3, pool.length));
+  // If fewer than 3 new upgrades, pad with owned ones (show as already owned)
+  upgradeChoices = shuffled;
+  if (upgradeChoices.length === 0) {
+    // All upgrades owned — just continue
+    gs = S.RUN;
+    return;
+  }
+  renderUpgradePanel();
+}
+
+function renderUpgradePanel() {
+  const panel = document.getElementById('upg-panel');
+  const cards = document.getElementById('upg-cards');
+  cards.innerHTML = '';
+  upgradeChoices.forEach(u => {
+    const card = document.createElement('div');
+    card.className = 'ucard';
+    card.innerHTML = `<div class="uicon">${u.icon}</div><div class="uname">${u.name}</div><div class="udesc">${u.desc}</div>`;
+    card.addEventListener('click', () => pickUpgrade(u.id));
+    card.addEventListener('touchstart', (e) => { e.preventDefault(); pickUpgrade(u.id); }, { passive: false });
+    cards.appendChild(card);
+  });
+  panel.style.display = 'flex';
+}
+
+function pickUpgrade(id) {
+  owned[id] = true;
+  // Apply immediate effects
+  if (id === 'shield') p.shield = true;
+  if (id === 'magnet') p.magnetRange = 120;
+
+  document.getElementById('upg-panel').style.display = 'none';
+  burst(PLAYER_X(), H * 0.5, '#ff0', 40, 1.4);
+  shake(6);
+  gs = S.RUN;
+}
+
+// --- MAIN LOOP ---
+let lastTs = 0;
+function loop(ts) {
+  const dt = Math.min((ts - lastTs) / 16.67, 2);
+  lastTs = ts;
+  if (gs === S.RUN) update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+// --- INIT ---
+showDeathScreen();  // Show start screen immediately
+document.getElementById('ol-title').textContent = 'ROGUE RUN';
+document.getElementById('ol-score').textContent = 'AUTO-RUNNER + UPGRADES';
+document.getElementById('ol-best').textContent = 'BEST: ' + bestScore + 'm';
+initFloor();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

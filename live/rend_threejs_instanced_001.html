@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>SHARD STORM — Three.js Instanced Renderer Exp</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #050208; overflow: hidden; touch-action: none; font-family: monospace; }
+    #game-canvas { display: block; position: fixed; top: 0; left: 0; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; pointer-events: none;
+      padding: 14px 16px; display: flex; justify-content: space-between; align-items: center;
+    }
+    #score { color: #e040ff; font: bold 22px monospace; letter-spacing: 0.06em;
+      text-shadow: 0 0 14px rgba(224,64,255,0.9); }
+    #info { color: rgba(255,255,255,0.4); font: 11px monospace; }
+    #hint {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.35); font: 11px monospace; letter-spacing: 0.18em;
+      pointer-events: none; text-align: center;
+    }
+    #overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(5,2,8,0.94); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; color: white; text-align: center;
+    }
+    #overlay h1 { font: bold 26px monospace; color: #e040ff; margin-bottom: 8px;
+      letter-spacing: 0.1em; text-shadow: 0 0 22px rgba(224,64,255,0.9); }
+    #overlay .sub { font: 13px monospace; color: rgba(255,255,255,0.4); margin-bottom: 8px; }
+    #overlay button {
+      background: transparent; border: 1px solid rgba(224,64,255,0.5);
+      color: #e040ff; padding: 12px 34px; font: bold 14px monospace;
+      letter-spacing: 0.1em; cursor: pointer; margin-top: 14px;
+    }
+    #overlay.hidden { display: none; }
+    #dodge-flash {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none; opacity: 0; background: rgba(224,64,255,0.12);
+      transition: opacity 0.06s;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="hud">
+    <div id="score">0</div>
+    <div id="info">300 INSTANCES</div>
+  </div>
+  <div id="hint">SWIPE TO DODGE SHARDS</div>
+  <div id="dodge-flash"></div>
+  <div id="overlay">
+    <h1>SHARD STORM</h1>
+    <div class="sub">EXP 03 · THREE.JS INSTANCED · RENDERER TEST</div>
+    <div class="sub" style="font-size:11px; color:rgba(255,255,255,0.2);">300 instanced shards — swipe to dodge, survive as long as possible</div>
+    <button id="start-btn">TAP TO START</button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.expand();
+      window.Telegram.WebApp.ready();
+    }
+
+    const scoreEl = document.getElementById('score');
+    const hintEl = document.getElementById('hint');
+    const overlay = document.getElementById('overlay');
+    const dodgeFlash = document.getElementById('dodge-flash');
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas: document.getElementById('game-canvas'),
+      antialias: false,
+      powerPreference: 'high-performance'
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x050208);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x050208, 20, 40);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 50);
+    camera.position.set(0, 0, 10);
+    camera.lookAt(0, 0, 0);
+
+    scene.add(new THREE.AmbientLight(0x220033, 1.2));
+    const light1 = new THREE.PointLight(0xe040ff, 2, 20);
+    light1.position.set(0, 5, 5);
+    scene.add(light1);
+    const light2 = new THREE.PointLight(0x4050ff, 1.5, 20);
+    light2.position.set(-5, -3, 5);
+    scene.add(light2);
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // InstancedMesh — 300 shards
+    const SHARD_COUNT = 300;
+    const shardGeo = new THREE.OctahedronGeometry(0.18, 0);
+    const shardMat = new THREE.MeshLambertMaterial({ color: 0xe040ff });
+    const instancedShards = new THREE.InstancedMesh(shardGeo, shardMat, SHARD_COUNT);
+    instancedShards.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(instancedShards);
+
+    // Color variation per instance
+    const instanceColors = new THREE.InstancedBufferAttribute(new Float32Array(SHARD_COUNT * 3), 3);
+    const PALETTE = [
+      new THREE.Color(0xe040ff), new THREE.Color(0x8040ff),
+      new THREE.Color(0x4080ff), new THREE.Color(0xff40a0),
+      new THREE.Color(0xffffff)
+    ];
+
+    const shards = [];
+    const dummy = new THREE.Object3D();
+
+    function initShards() {
+      for (let i = 0; i < SHARD_COUNT; i++) {
+        const s = {
+          x: (Math.random() - 0.5) * 14,
+          y: 12 + Math.random() * 20,
+          z: (Math.random() - 0.5) * 4,
+          vx: (Math.random() - 0.5) * 0.03,
+          vy: -(0.05 + Math.random() * 0.05),
+          vz: (Math.random() - 0.5) * 0.02,
+          rx: Math.random() * Math.PI * 2,
+          ry: Math.random() * Math.PI * 2,
+          rz: Math.random() * Math.PI * 2,
+          drx: (Math.random() - 0.5) * 0.06,
+          dry: (Math.random() - 0.5) * 0.06,
+          scale: 0.5 + Math.random() * 1.2
+        };
+        shards.push(s);
+        const col = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+        instanceColors.setXYZ(i, col.r, col.g, col.b);
+      }
+      instancedShards.geometry.setAttribute('color', instanceColors);
+    }
+
+    // Player
+    const playerGeo = new THREE.OctahedronGeometry(0.4, 1);
+    const playerMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8040ff, emissiveIntensity: 0.5 });
+    const player = new THREE.Mesh(playerGeo, playerMat);
+    player.position.set(0, -3, 0);
+    scene.add(player);
+
+    // Player target
+    let playerTargetX = 0, playerTargetY = -3;
+    let playerX = 0, playerY = -3;
+    let touchStartX = 0, touchStartY = 0;
+
+    // Game state
+    let score = 0, running = false, frameCount = 0;
+    let wave = 1, speedMult = 1;
+    let invincible = 0;
+    let gameStartTime = 0;
+
+    function onTouchStart(e) {
+      const t = e.changedTouches ? e.changedTouches[0] : e;
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+    }
+
+    function onTouchMove(e) {
+      if (!running) return;
+      e.preventDefault();
+      const t = e.changedTouches ? e.changedTouches[0] : e;
+      const dx = (t.clientX - touchStartX) / window.innerWidth * 14;
+      const dy = -(t.clientY - touchStartY) / window.innerHeight * 8;
+      playerTargetX = Math.max(-5, Math.min(5, playerX + dx));
+      playerTargetY = Math.max(-5, Math.min(3, playerY + dy));
+    }
+
+    document.addEventListener('touchstart', (e) => { e.preventDefault(); onTouchStart(e); }, { passive: false });
+    document.addEventListener('touchmove', (e) => { e.preventDefault(); onTouchMove(e); }, { passive: false });
+    document.addEventListener('mousemove', (e) => {
+      if (!running) return;
+      playerTargetX = (e.clientX / window.innerWidth * 2 - 1) * 5;
+      playerTargetY = -(e.clientY / window.innerHeight * 2 - 1) * 4;
+    });
+
+    function gameOver() {
+      running = false;
+      const survived = ((Date.now() - gameStartTime) / 1000).toFixed(1);
+      overlay.innerHTML = `
+        <h1 style="color:#ff4466">DESTROYED</h1>
+        <div class="sub">SCORE: ${score}</div>
+        <div class="sub">SURVIVED: ${survived}s · WAVE: ${wave}</div>
+        <div class="sub" style="font-size:11px; color:rgba(255,255,255,0.2);">THREE.JS INSTANCED · 300 INSTANCES · ${frameCount} frames</div>
+        <button onclick="startGame()">PLAY AGAIN</button>
+      `;
+      overlay.classList.remove('hidden');
+    }
+
+    function startGame() {
+      initShards();
+      score = 0; wave = 1; speedMult = 1; frameCount = 0; invincible = 60;
+      playerX = 0; playerY = -3; playerTargetX = 0; playerTargetY = -3;
+      player.position.set(0, -3, 0);
+      scoreEl.textContent = '0';
+      gameStartTime = Date.now();
+      overlay.classList.add('hidden');
+      running = true;
+    }
+
+    document.getElementById('start-btn').addEventListener('click', startGame);
+
+    const COLLISION_R = 0.55;
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (!running) { renderer.render(scene, camera); return; }
+      frameCount++;
+
+      // Smooth player movement
+      playerX += (playerTargetX - playerX) * 0.18;
+      playerY += (playerTargetY - playerY) * 0.18;
+      player.position.x = playerX;
+      player.position.y = playerY;
+      player.rotation.x += 0.02;
+      player.rotation.y += 0.015;
+
+      // Score / wave
+      score = Math.floor((Date.now() - gameStartTime) / 100);
+      scoreEl.textContent = score;
+      const newWave = 1 + Math.floor(score / 50);
+      if (newWave !== wave) {
+        wave = newWave;
+        speedMult = 1 + (wave - 1) * 0.15;
+        hintEl.textContent = `WAVE ${wave}`;
+        setTimeout(() => { hintEl.textContent = 'SWIPE TO DODGE SHARDS'; }, 1000);
+      }
+
+      // Update shards via InstancedMesh
+      let collide = false;
+      for (let i = 0; i < SHARD_COUNT; i++) {
+        const s = shards[i];
+        s.y += s.vy * speedMult;
+        s.x += s.vx;
+        s.z += s.vz;
+        s.rx += s.drx;
+        s.ry += s.dry;
+
+        // Reset when off bottom
+        if (s.y < -8) {
+          s.y = 10 + Math.random() * 8;
+          s.x = (Math.random() - 0.5) * 14;
+        }
+
+        dummy.position.set(s.x, s.y, s.z);
+        dummy.rotation.set(s.rx, s.ry, s.rz);
+        dummy.scale.setScalar(s.scale);
+        dummy.updateMatrix();
+        instancedShards.setMatrixAt(i, dummy.matrix);
+
+        // Collision check (skip during invincibility)
+        if (invincible <= 0) {
+          const dx = s.x - playerX, dy = s.y - playerY, dz = s.z;
+          if (dx*dx + dy*dy + dz*dz < COLLISION_R * COLLISION_R * s.scale) {
+            collide = true;
+          }
+        }
+      }
+      instancedShards.instanceMatrix.needsUpdate = true;
+
+      if (invincible > 0) invincible--;
+
+      if (collide) {
+        gameOver();
+        return;
+      }
+
+      // Light pulse
+      light1.position.x = Math.sin(Date.now() * 0.001) * 4;
+      light1.intensity = 1.5 + Math.sin(Date.now() * 0.003) * 0.5;
+
+      // Player flash when near shards (optional juice)
+      let minDist = Infinity;
+      for (let i = 0; i < Math.min(20, SHARD_COUNT); i++) {
+        const s = shards[i];
+        const dx = s.x - playerX, dy = s.y - playerY;
+        const d = dx*dx + dy*dy;
+        if (d < minDist) minDist = d;
+      }
+      if (minDist < 4) {
+        dodgeFlash.style.opacity = String(Math.max(0, (4 - minDist) / 16));
+      } else {
+        dodgeFlash.style.opacity = '0';
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>

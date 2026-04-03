@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>RUNESPIRE</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;touch-action:none;background:#050210;font-family:'Courier New',monospace}
+canvas{display:block}
+#hud{position:fixed;top:0;left:0;right:0;pointer-events:none;padding:14px 18px;
+  display:flex;justify-content:space-between;align-items:flex-start;z-index:10}
+#score{color:#c8aaff;font-size:28px;font-weight:bold;text-shadow:0 0 15px #8844ff;letter-spacing:2px}
+#combo{color:#ffdd44;font-size:16px;font-weight:bold;text-shadow:0 0 10px #ffaa00;
+  opacity:0;transition:opacity 0.2s;letter-spacing:2px;margin-top:4px}
+#lives{display:flex;gap:8px;align-items:center;margin-top:4px}
+.life{width:13px;height:13px;border-radius:50%;background:#8844ff;
+  box-shadow:0 0 8px #aa66ff;transition:all 0.3s}
+.life.dead{background:#1a0a2e;box-shadow:none}
+#flash{position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity 0.1s;z-index:20}
+#feedback{position:fixed;top:38%;left:50%;transform:translate(-50%,-50%);
+  font-size:34px;font-weight:bold;pointer-events:none;opacity:0;white-space:nowrap;
+  text-shadow:0 0 22px currentColor;letter-spacing:3px;z-index:15}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;background:rgba(5,2,16,0.92);z-index:30}
+#overlay h1{color:#c8aaff;font-size:40px;text-shadow:0 0 28px #8844ff;
+  letter-spacing:6px;margin-bottom:10px}
+#overlay .sub{color:#9977cc;font-size:13px;margin-bottom:28px;text-align:center;
+  line-height:1.9;max-width:260px}
+#overlay .fscore{color:#ffdd44;font-size:28px;text-shadow:0 0 14px #ffaa00;
+  display:none;margin-bottom:20px;letter-spacing:2px}
+#overlay button{background:#0d0520;border:2px solid #8844ff;color:#c8aaff;font-size:17px;
+  padding:13px 40px;cursor:pointer;letter-spacing:3px;font-family:'Courier New',monospace;
+  box-shadow:0 0 22px #8844ff44;transition:all 0.15s}
+#overlay button:hover{background:#1a0a3a;box-shadow:0 0 30px #8844ff66}
+#overlay button:active{transform:scale(0.96)}
+#overlay.gone{display:none}
+#wavebadge{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+  color:#554477;font-size:12px;letter-spacing:3px;pointer-events:none;z-index:10}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div>
+<div id="hud">
+  <div>
+    <div id="score">0</div>
+    <div id="combo"></div>
+  </div>
+  <div id="lives">
+    <div class="life" id="l0"></div>
+    <div class="life" id="l1"></div>
+    <div class="life" id="l2"></div>
+  </div>
+</div>
+<div id="feedback"></div>
+<div id="wavebadge" id="wavebadge">WAVE 1</div>
+<div id="overlay">
+  <h1>RUNESPIRE</h1>
+  <div class="sub">Ancient runes drift toward the spire.<br>Tap them to shatter them before<br>they reach the core.</div>
+  <div class="fscore" id="fscore"></div>
+  <button id="btn">PROTECT</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// =====================================================================
+// RUNESPIRE — protect the spire, shatter the runes
+// Three.js r128 | STD-025 | Lane 001 Wild Lands
+// =====================================================================
+
+const canvas  = document.getElementById('c');
+const overlay = document.getElementById('overlay');
+const btn     = document.getElementById('btn');
+const scoreEl = document.getElementById('score');
+const comboEl = document.getElementById('combo');
+const flashEl = document.getElementById('flash');
+const fbEl    = document.getElementById('feedback');
+const fscoreEl= document.getElementById('fscore');
+const waveEl  = document.getElementById('wavebadge');
+
+// ---- Renderer -------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+// ---- Scene ----------------------------------------------------------
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x050210, 18, 45);
+scene.background = new THREE.Color(0x050210);
+
+// ---- Camera ---------------------------------------------------------
+const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 100);
+camera.position.set(0, 20, 14);
+camera.lookAt(0, 0, 0);
+const camBase = { x: 0, y: 20, z: 14 };
+
+// ---- Lighting -------------------------------------------------------
+scene.add(new THREE.AmbientLight(0x221133, 0.9));
+const pLight = new THREE.PointLight(0x8844ff, 3.5, 14);
+pLight.position.set(0, 5, 0);
+scene.add(pLight);
+const rimLight = new THREE.DirectionalLight(0x4422aa, 0.6);
+rimLight.position.set(-8, 12, -6);
+scene.add(rimLight);
+
+// ---- Ground ---------------------------------------------------------
+const groundGeo = new THREE.PlaneGeometry(44, 44, 22, 22);
+// Slightly perturb ground vertices for rocky feel
+const gPos = groundGeo.attributes.position;
+for (let i = 0; i < gPos.count; i++) {
+  const dx = gPos.getX(i), dz = gPos.getZ(i);
+  const r = Math.sqrt(dx*dx + dz*dz);
+  gPos.setY(i, r > 1 ? (Math.random() - 0.5) * 0.12 : 0);
+}
+groundGeo.computeVertexNormals();
+const groundMat = new THREE.MeshPhongMaterial({ color: 0x0a0520, shininess: 20, specular: 0x221144 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// ---- Grid rings (danger zones) -------------------------------------
+function makeRing(r, col, opacity) {
+  const pts = [];
+  for (let i = 0; i <= 80; i++) {
+    const a = (i / 80) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a) * r, 0.03, Math.sin(a) * r));
+  }
+  const g = new THREE.BufferGeometry().setFromPoints(pts);
+  const m = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity });
+  return new THREE.Line(g, m);
+}
+const ring1 = makeRing(3,  0xff3333, 0.35);
+const ring2 = makeRing(6,  0xff8800, 0.22);
+const ring3 = makeRing(9,  0x8844ff, 0.18);
+scene.add(ring1, ring2, ring3);
+
+// ---- Decorative stones around perimeter ----------------------------
+const stoneMat = new THREE.MeshPhongMaterial({ color: 0x221144, shininess: 40, emissive: 0x110022 });
+for (let i = 0; i < 12; i++) {
+  const a = (i / 12) * Math.PI * 2;
+  const r = 10 + (Math.random() - 0.5) * 1.5;
+  const s = new THREE.Mesh(new THREE.DodecahedronGeometry(0.25 + Math.random() * 0.2, 0), stoneMat);
+  s.position.set(Math.cos(a) * r, 0.15, Math.sin(a) * r);
+  s.rotation.set(Math.random(), Math.random(), Math.random());
+  scene.add(s);
+}
+
+// ---- Central Spire -------------------------------------------------
+const spireGroup = new THREE.Group();
+
+const baseMat  = new THREE.MeshPhongMaterial({ color: 0x2a0d55, shininess: 80, emissive: 0x110033 });
+const midMat   = new THREE.MeshPhongMaterial({ color: 0x442288, shininess: 120, emissive: 0x221155 });
+const tipMat   = new THREE.MeshPhongMaterial({ color: 0x8844ff, shininess: 200, emissive: 0x6633cc });
+const crystMat = new THREE.MeshPhongMaterial({ color: 0xccaaff, shininess: 300, emissive: 0x441188, transparent: true, opacity: 0.85 });
+
+const spireBase = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.5, 0.5, 8), baseMat);
+const spireMid  = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 1.1, 2.8, 8), midMat);
+const spireTip  = new THREE.Mesh(new THREE.ConeGeometry(0.45, 1.4, 8), tipMat);
+spireMid.position.y = 1.65;
+spireTip.position.y = 3.7;
+spireGroup.add(spireBase, spireMid, spireTip);
+
+// Crystal clusters around base
+for (let i = 0; i < 8; i++) {
+  const a = (i / 8) * Math.PI * 2;
+  const c = new THREE.Mesh(new THREE.ConeGeometry(0.08 + Math.random() * 0.08, 0.4 + Math.random() * 0.6, 5), crystMat);
+  c.position.set(Math.cos(a) * (0.7 + Math.random() * 0.4), 0.3 + Math.random() * 0.2, Math.sin(a) * (0.7 + Math.random() * 0.4));
+  c.rotation.z = (Math.random() - 0.5) * 0.8;
+  c.rotation.x = (Math.random() - 0.5) * 0.5;
+  spireGroup.add(c);
+}
+
+// Glow orb at top
+const glowOrb = new THREE.Mesh(
+  new THREE.SphereGeometry(0.55, 10, 10),
+  new THREE.MeshBasicMaterial({ color: 0xaa66ff, transparent: true, opacity: 0.35 })
+);
+glowOrb.position.y = 3.7;
+spireGroup.add(glowOrb);
+
+scene.add(spireGroup);
+
+// ---- Rune geometries (shared) --------------------------------------
+const RUNE_GEOS = [
+  new THREE.IcosahedronGeometry(0.42, 0),
+  new THREE.OctahedronGeometry(0.48, 0),
+  new THREE.TetrahedronGeometry(0.5, 0),
+  new THREE.BoxGeometry(0.58, 0.58, 0.58),
+  new THREE.DodecahedronGeometry(0.4, 0),
+];
+const RUNE_COLS = [0xff3355, 0xff6600, 0xffcc00, 0x44ffaa, 0xff44ee, 0x44aaff, 0xff2200, 0x00ffcc];
+
+// ---- Game State ----------------------------------------------------
+let gState      = 'menu';
+let score       = 0;
+let lives       = 3;
+let combo       = 0;
+let comboTimer  = 0;
+let spawnTimer  = 0;
+let spawnRate   = 2.2;
+let wave        = 1;
+let waveKills   = 0;
+let waveTarget  = 10;
+let shakeAmt    = 0;
+let time        = 0;
+let runes       = [];
+let particles   = [];
+let rings       = [];   // visual ring pulses
+
+// ---- Spawn a rune --------------------------------------------------
+function spawnRune() {
+  const angle  = Math.random() * Math.PI * 2;
+  const spawnR = 9.5 + Math.random() * 1.2;
+  const x = Math.cos(angle) * spawnR;
+  const z = Math.sin(angle) * spawnR;
+
+  const geoIdx = Math.floor(Math.random() * RUNE_GEOS.length);
+  const col    = RUNE_COLS[Math.floor(Math.random() * RUNE_COLS.length)];
+  const mat    = new THREE.MeshPhongMaterial({
+    color: col, emissive: col, emissiveIntensity: 0.45,
+    shininess: 90, transparent: true, opacity: 0
+  });
+  const mesh = new THREE.Mesh(RUNE_GEOS[geoIdx], mat);
+  mesh.position.set(x, 0.5 + Math.random() * 0.5, z);
+  mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+  scene.add(mesh);
+
+  const speed = 0.75 + Math.random() * 0.5 + Math.min(wave * 0.12, 1.2);
+  runes.push({ mesh, mat, col, speed, alive: true, age: 0, fadein: 0 });
+}
+
+// ---- Destroy a rune -----------------------------------------------
+function destroyRune(rune) {
+  if (!rune.alive) return;
+  rune.alive = false;
+  scene.remove(rune.mesh);
+  rune.mat.dispose();
+
+  spawnBurst(rune.mesh.position.clone(), rune.col, 22);
+  spawnRingPulse(rune.mesh.position.clone(), rune.col);
+
+  const dist = rune.mesh.position.length();
+  const distBonus = dist < 3 ? 3 : dist < 6 ? 2 : 1;
+  combo++;
+  comboTimer = 1.6;
+  const pts = 10 * distBonus * Math.max(1, Math.floor(combo / 3));
+  score += pts;
+  waveKills++;
+  scoreEl.textContent = score;
+
+  if (combo >= 8) {
+    showFeedback('BLAZING!!', '#ff6600');
+    doFlash('#ff660033');
+    shakeAmt = 0.5;
+  } else if (combo >= 5) {
+    showFeedback(`${combo}× COMBO`, '#ffdd44');
+    doFlash('#ffdd4422');
+    shakeAmt = 0.25;
+  } else if (combo >= 3) {
+    showFeedback('NICE!', '#aaffaa');
+    shakeAmt = 0.1;
+  }
+  updateComboUI();
+  checkWave();
+}
+
+function hitSpire() {
+  lives = Math.max(0, lives - 1);
+  updateLives();
+  doFlash('#ff003355');
+  shakeAmt = 0.55;
+  showFeedback('SHATTERED!', '#ff4444');
+  spireTip.material.emissive.set(0xff1111);
+  spireTip.material.emissiveIntensity = 1.5;
+  setTimeout(() => {
+    spireTip.material.emissive.set(0x6633cc);
+    spireTip.material.emissiveIntensity = 1;
+  }, 350);
+  if (lives <= 0) endGame();
+}
+
+// ---- Wave progression ---------------------------------------------
+function checkWave() {
+  if (waveKills >= waveTarget) {
+    wave++;
+    waveKills = 0;
+    waveTarget = 10 + wave * 2;
+    spawnRate  = Math.max(0.4, 2.2 - wave * 0.18);
+    waveEl.textContent = `WAVE ${wave}`;
+    waveEl.style.color = '#aa88cc';
+    setTimeout(() => { waveEl.style.color = '#554477'; }, 1200);
+    showFeedback(`WAVE ${wave}`, '#c8aaff');
+    doFlash('#8844ff22');
+    spawnBurstAt(new THREE.Vector3(0, 3.7, 0), 0xaa66ff, 16);
+  }
+}
+
+// ---- Particle burst -----------------------------------------------
+function spawnBurst(pos, col, count) {
+  const geo  = new THREE.BufferGeometry();
+  const pos3 = new Float32Array(count * 3);
+  const vels = [];
+  for (let i = 0; i < count; i++) {
+    pos3[i*3]   = pos.x;
+    pos3[i*3+1] = pos.y;
+    pos3[i*3+2] = pos.z;
+    const phi   = Math.random() * Math.PI * 2;
+    const theta = Math.random() * Math.PI;
+    const spd   = 1.5 + Math.random() * 3.5;
+    vels.push(new THREE.Vector3(
+      Math.sin(theta) * Math.cos(phi) * spd,
+      Math.abs(Math.cos(theta)) * spd * 0.8 + 0.5,
+      Math.sin(theta) * Math.sin(phi) * spd
+    ));
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos3, 3));
+  const mat = new THREE.PointsMaterial({ color: col, size: 0.16, transparent: true, opacity: 1, depthWrite: false });
+  const pts = new THREE.Points(geo, mat);
+  scene.add(pts);
+  particles.push({ pts, geo, mat, vels, life: 1.0 });
+}
+
+function spawnBurstAt(pos, col, count) { spawnBurst(pos, col, count); }
+
+// ---- Ring pulse ---------------------------------------------------
+function spawnRingPulse(pos, col) {
+  const pts2 = [];
+  for (let i = 0; i <= 32; i++) {
+    const a = (i / 32) * Math.PI * 2;
+    pts2.push(new THREE.Vector3(Math.cos(a) * 0.01, 0.05, Math.sin(a) * 0.01));
+  }
+  const g = new THREE.BufferGeometry().setFromPoints(pts2);
+  const m = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.9 });
+  const line = new THREE.Line(g, m);
+  line.position.copy(pos);
+  line.position.y = 0.1;
+  scene.add(line);
+  rings.push({ line, g, m, pos, r: 0.01, life: 1.0 });
+}
+
+// ---- UI helpers ---------------------------------------------------
+function updateComboUI() {
+  if (combo >= 2) {
+    comboEl.textContent = `×${combo} COMBO`;
+    comboEl.style.opacity = '1';
+  } else {
+    comboEl.style.opacity = '0';
+  }
+}
+
+function updateLives() {
+  for (let i = 0; i < 3; i++) {
+    const el = document.getElementById('l' + i);
+    if (el) el.classList.toggle('dead', i >= lives);
+  }
+}
+
+let fbTimer = null;
+function showFeedback(text, color) {
+  fbEl.textContent = text;
+  fbEl.style.color = color;
+  fbEl.style.opacity = '1';
+  clearTimeout(fbTimer);
+  fbTimer = setTimeout(() => { fbEl.style.opacity = '0'; }, 650);
+}
+
+function doFlash(color) {
+  flashEl.style.background = color;
+  flashEl.style.opacity = '1';
+  setTimeout(() => { flashEl.style.opacity = '0'; }, 110);
+}
+
+// ---- Raycasting / tap detection -----------------------------------
+const raycaster = new THREE.Raycaster();
+const ptr = new THREE.Vector2();
+
+function handleTap(cx, cy) {
+  if (gState !== 'playing') return;
+  const rect = canvas.getBoundingClientRect();
+  ptr.x =  ((cx - rect.left) / rect.width)  * 2 - 1;
+  ptr.y = -((cy - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ptr, camera);
+
+  let hit = false;
+  // Use sphere-distance for generous hit detection
+  for (const rune of runes) {
+    if (!rune.alive) continue;
+    const d = raycaster.ray.distanceToPoint(rune.mesh.position);
+    if (d < 0.9) {
+      destroyRune(rune);
+      hit = true;
+      break;
+    }
+  }
+  if (!hit) {
+    // miss tap — break combo
+    if (combo > 2) {
+      combo = Math.max(0, combo - 1);
+      updateComboUI();
+    }
+  }
+}
+
+canvas.addEventListener('click',      e => handleTap(e.clientX, e.clientY));
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  handleTap(t.clientX, t.clientY);
+}, { passive: false });
+
+// ---- Resize -------------------------------------------------------
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- Game flow ----------------------------------------------------
+btn.addEventListener('click',    startGame);
+btn.addEventListener('touchend', e => { e.preventDefault(); startGame(); });
+
+function clearGameObjects() {
+  runes.forEach(r => { scene.remove(r.mesh); if (r.mat) r.mat.dispose(); });
+  runes = [];
+  particles.forEach(p => { scene.remove(p.pts); p.geo.dispose(); p.mat.dispose(); });
+  particles = [];
+  rings.forEach(r => { scene.remove(r.line); r.g.dispose(); r.m.dispose(); });
+  rings = [];
+}
+
+function startGame() {
+  gState      = 'playing';
+  score       = 0;
+  lives       = 3;
+  combo       = 0;
+  comboTimer  = 0;
+  spawnTimer  = 0;
+  spawnRate   = 2.2;
+  wave        = 1;
+  waveKills   = 0;
+  waveTarget  = 10;
+  shakeAmt    = 0;
+  clearGameObjects();
+  scoreEl.textContent = '0';
+  comboEl.style.opacity = '0';
+  fscoreEl.style.display = 'none';
+  waveEl.textContent = 'WAVE 1';
+  updateLives();
+  overlay.classList.add('gone');
+  camera.position.set(camBase.x, camBase.y, camBase.z);
+  camera.lookAt(0, 0, 0);
+}
+
+function endGame() {
+  gState = 'dead';
+  clearGameObjects();
+  overlay.classList.remove('gone');
+  overlay.querySelector('h1').textContent = 'SPIRE FALLEN';
+  overlay.querySelector('.sub').innerHTML = `You reached <b style="color:#c8aaff">Wave ${wave}</b><br>Ancient runes reclaim the land.`;
+  fscoreEl.textContent = score;
+  fscoreEl.style.display = 'block';
+  btn.textContent = 'RISE AGAIN';
+}
+
+// ---- Main loop ----------------------------------------------------
+let lastTs = 0;
+
+function tick(ts) {
+  requestAnimationFrame(tick);
+  const dt = Math.min((ts - lastTs) / 1000, 0.1);
+  lastTs = ts;
+  time += dt;
+
+  // Always animate spire
+  spireGroup.rotation.y = time * 0.35;
+  glowOrb.material.opacity = 0.25 + Math.sin(time * 2.2) * 0.12;
+  pLight.intensity = 3 + Math.sin(time * 1.8) * 0.8;
+
+  if (gState !== 'playing') {
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // Spawn runes
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnRune();
+    spawnTimer = spawnRate * (0.65 + Math.random() * 0.7);
+  }
+
+  // Update runes
+  for (let i = runes.length - 1; i >= 0; i--) {
+    const rune = runes[i];
+    if (!rune.alive) { runes.splice(i, 1); continue; }
+
+    rune.age += dt;
+
+    // Fade in
+    if (rune.fadein < 1) {
+      rune.fadein = Math.min(1, rune.fadein + dt * 3);
+      rune.mat.opacity = rune.fadein;
+    }
+
+    // Move toward spire
+    const pos  = rune.mesh.position;
+    const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+    if (dist > 0.5) {
+      pos.x -= (pos.x / dist) * rune.speed * dt;
+      pos.z -= (pos.z / dist) * rune.speed * dt;
+    }
+
+    // Rotate
+    rune.mesh.rotation.x += dt * 1.2;
+    rune.mesh.rotation.y += dt * 0.9;
+
+    // Pulse emissive
+    rune.mat.emissiveIntensity = 0.3 + Math.sin(time * 5 + rune.age * 2.5) * 0.2;
+
+    // Danger: pulse red when inside ring2
+    if (dist < 6) {
+      const pulse = 0.5 + Math.sin(time * 8) * 0.4;
+      rune.mat.emissiveIntensity = pulse;
+    }
+
+    // Reached spire
+    if (dist < 1.3) {
+      rune.alive = false;
+      scene.remove(rune.mesh);
+      rune.mat.dispose();
+      runes.splice(i, 1);
+      hitSpire();
+    }
+  }
+
+  // Update particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt * 1.6;
+    if (p.life <= 0) {
+      scene.remove(p.pts);
+      p.geo.dispose();
+      p.mat.dispose();
+      particles.splice(i, 1);
+      continue;
+    }
+    const arr = p.geo.attributes.position.array;
+    for (let j = 0; j < p.vels.length; j++) {
+      arr[j*3]   += p.vels[j].x * dt;
+      arr[j*3+1] += p.vels[j].y * dt;
+      arr[j*3+2] += p.vels[j].z * dt;
+      p.vels[j].y -= 5 * dt;
+    }
+    p.geo.attributes.position.needsUpdate = true;
+    p.mat.opacity = p.life;
+  }
+
+  // Update ring pulses
+  for (let i = rings.length - 1; i >= 0; i--) {
+    const rp = rings[i];
+    rp.life -= dt * 2.5;
+    if (rp.life <= 0) {
+      scene.remove(rp.line);
+      rp.g.dispose();
+      rp.m.dispose();
+      rings.splice(i, 1);
+      continue;
+    }
+    rp.r += dt * 6;
+    const arr = rp.g.attributes.position.array;
+    for (let j = 0; j <= 32; j++) {
+      const a = (j / 32) * Math.PI * 2;
+      arr[j*3]   = rp.pos.x + Math.cos(a) * rp.r;
+      arr[j*3+2] = rp.pos.z + Math.sin(a) * rp.r;
+    }
+    rp.g.attributes.position.needsUpdate = true;
+    rp.m.opacity = rp.life * 0.8;
+  }
+
+  // Combo decay
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) {
+      combo = 0;
+      updateComboUI();
+    }
+  }
+
+  // Camera shake
+  if (shakeAmt > 0.01) {
+    camera.position.x = camBase.x + (Math.random() - 0.5) * shakeAmt;
+    camera.position.z = camBase.z + (Math.random() - 0.5) * shakeAmt;
+    camera.lookAt(0, 0, 0);
+    shakeAmt *= 0.82;
+  } else if (shakeAmt > 0) {
+    shakeAmt = 0;
+    camera.position.set(camBase.x, camBase.y, camBase.z);
+    camera.lookAt(0, 0, 0);
+  }
+
+  renderer.render(scene, camera);
+}
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

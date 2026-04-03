@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>STONE SKIP</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #030810; overflow: hidden; width: 100vw; height: 100vh; }
+canvas { display: block; }
+#ui {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; font-family: 'Courier New', monospace; color: #fff;
+}
+#score-wrap {
+  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+  text-align: center;
+}
+#score { font-size: 2.8em; font-weight: bold; color: #88eeff; text-shadow: 0 0 20px #44aaff; letter-spacing: 2px; }
+#combo { font-size: 1em; color: #ffcc44; text-shadow: 0 0 12px #ff8800; opacity: 0; transition: opacity 0.2s; margin-top: 2px; }
+#lives { position: absolute; top: 22px; right: 18px; display: flex; gap: 7px; align-items: center; }
+.life-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #44aaff; box-shadow: 0 0 8px #44aaff; transition: all 0.2s;
+}
+.life-dot.dead { background: #1a2233; box-shadow: none; }
+#hint {
+  position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%);
+  font-size: 0.95em; color: #66ccee; opacity: 0.7; text-align: center;
+  letter-spacing: 1px; transition: opacity 0.5s;
+}
+#skip-count {
+  position: absolute; bottom: 18px; left: 18px;
+  font-size: 0.85em; color: #336688; letter-spacing: 1px;
+}
+#flash {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; opacity: 0; transition: opacity 0.05s;
+}
+#popup {
+  position: absolute; top: 38%; left: 50%; transform: translateX(-50%);
+  font-size: 1.5em; font-weight: bold; color: #ffcc44;
+  text-shadow: 0 0 20px #ff8800; opacity: 0;
+  pointer-events: none; text-align: center; transition: opacity 0.15s;
+  letter-spacing: 3px;
+}
+#overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(3,8,16,0.93); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; pointer-events: all; z-index: 10;
+}
+#overlay h1 {
+  font-family: 'Courier New', monospace; font-size: 3.2em; color: #88eeff;
+  text-shadow: 0 0 30px #44aaff, 0 0 60px #2266aa; letter-spacing: 5px; margin-bottom: 6px;
+}
+#overlay .sub {
+  color: #3a6888; font-family: 'Courier New', monospace; font-size: 0.9em;
+  letter-spacing: 3px; margin-bottom: 10px;
+}
+#overlay .inst {
+  color: #4488aa; font-family: 'Courier New', monospace; font-size: 0.8em;
+  letter-spacing: 1px; margin-bottom: 36px; text-align: center; opacity: 0.8;
+}
+#final-score {
+  font-family: 'Courier New', monospace; font-size: 1.2em;
+  color: #ffcc44; margin-bottom: 28px; display: none; text-align: center;
+  line-height: 1.6;
+}
+#start-btn {
+  background: none; border: 2px solid #44aaff; color: #88eeff;
+  font-family: 'Courier New', monospace; font-size: 1.1em;
+  padding: 14px 44px; letter-spacing: 3px; cursor: pointer;
+  text-transform: uppercase; box-shadow: 0 0 20px #44aaff33;
+  transition: all 0.2s;
+}
+#start-btn:hover, #start-btn:active {
+  background: #44aaff22; box-shadow: 0 0 35px #44aaff66;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score-wrap">
+    <div id="score">0</div>
+    <div id="combo"></div>
+  </div>
+  <div id="lives">
+    <div class="life-dot" id="l0"></div>
+    <div class="life-dot" id="l1"></div>
+    <div class="life-dot" id="l2"></div>
+  </div>
+  <div id="hint">TAP when stone hits water</div>
+  <div id="skip-count">SKIPS: 0</div>
+  <div id="flash"></div>
+  <div id="popup"></div>
+</div>
+<div id="overlay">
+  <h1>STONE SKIP</h1>
+  <div class="sub">ancient ritual skipping</div>
+  <div class="inst">Tap when the glowing stone<br>touches the water surface</div>
+  <div id="final-score"></div>
+  <button id="start-btn">TAP TO BEGIN</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// --- Telegram WebApp ---
+if (window.Telegram && window.Telegram.WebApp) {
+  window.Telegram.WebApp.ready();
+  window.Telegram.WebApp.expand();
+}
+
+// --- Renderer ---
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x030810);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x030810, 0.035);
+
+const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 200);
+camera.position.set(0, 7, 16);
+camera.lookAt(0, 0, 0);
+
+function resize() {
+  var w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Lighting ---
+scene.add(new THREE.AmbientLight(0x0a1828, 1.4));
+var pLight1 = new THREE.PointLight(0x44aaff, 2.8, 60);
+pLight1.position.set(0, 10, 0);
+scene.add(pLight1);
+var pLight2 = new THREE.PointLight(0x001133, 1.8, 40);
+pLight2.position.set(-10, 3, 6);
+scene.add(pLight2);
+
+// --- Water plane ---
+var waterGeo = new THREE.PlaneGeometry(100, 100, 12, 12);
+var waterMat = new THREE.MeshPhongMaterial({
+  color: 0x001219, emissive: 0x001525, emissiveIntensity: 0.4,
+  shininess: 100, specular: 0x0055aa
+});
+var water = new THREE.Mesh(waterGeo, waterMat);
+water.rotation.x = -Math.PI / 2;
+water.position.y = 0;
+scene.add(water);
+
+// --- Atmospheric distant rocks ---
+for (var ri = 0; ri < 14; ri++) {
+  var angle = (ri / 14) * Math.PI * 2;
+  var dist = 20 + Math.random() * 12;
+  var h = 2 + Math.random() * 4;
+  var rgeo = new THREE.ConeGeometry(0.5 + Math.random() * 0.7, h, 4 + Math.floor(Math.random() * 2));
+  var rmat = new THREE.MeshPhongMaterial({
+    color: 0x071018, emissive: 0x000d1a, emissiveIntensity: 0.15
+  });
+  var rm = new THREE.Mesh(rgeo, rmat);
+  rm.position.set(Math.cos(angle) * dist, h / 2, Math.sin(angle) * dist);
+  rm.rotation.y = Math.random() * Math.PI;
+  scene.add(rm);
+}
+
+// --- Stone (player object) ---
+var stoneGeo = new THREE.OctahedronGeometry(0.38, 0);
+var stoneMat = new THREE.MeshPhongMaterial({
+  color: 0x55bbff, emissive: 0x1155cc, emissiveIntensity: 0.9,
+  shininess: 140, specular: 0x99ddff
+});
+var stone = new THREE.Mesh(stoneGeo, stoneMat);
+scene.add(stone);
+
+// --- Stone trail ---
+var TRAIL_LEN = 18;
+var trailMeshes = [];
+var trailHistory = [];
+for (var ti = 0; ti < TRAIL_LEN; ti++) {
+  var tscale = (1 - ti / TRAIL_LEN) * 0.42;
+  var tgeo = new THREE.OctahedronGeometry(tscale, 0);
+  var tmat = new THREE.MeshBasicMaterial({
+    color: 0x44aaff, transparent: true, opacity: (1 - ti / TRAIL_LEN) * 0.35
+  });
+  var tm = new THREE.Mesh(tgeo, tmat);
+  tm.visible = false;
+  scene.add(tm);
+  trailMeshes.push(tm);
+}
+
+// --- Hit zone ring at water surface ---
+var hitRingGeo = new THREE.RingGeometry(0.55, 0.85, 18);
+var hitRingMat = new THREE.MeshBasicMaterial({
+  color: 0xffcc44, transparent: true, opacity: 0.65, side: THREE.DoubleSide
+});
+var hitRing = new THREE.Mesh(hitRingGeo, hitRingMat);
+hitRing.rotation.x = -Math.PI / 2;
+hitRing.position.y = 0.02;
+hitRing.visible = false;
+scene.add(hitRing);
+
+// --- Ripple pool ---
+var RIPPLE_MAX = 10;
+var ripplePool = [];
+for (var rpi = 0; rpi < RIPPLE_MAX; rpi++) {
+  var rpgeo = new THREE.RingGeometry(0.1, 0.22, 18);
+  var rpmat = new THREE.MeshBasicMaterial({
+    color: 0x44aaff, transparent: true, opacity: 0, side: THREE.DoubleSide
+  });
+  var rpmesh = new THREE.Mesh(rpgeo, rpmat);
+  rpmesh.rotation.x = -Math.PI / 2;
+  rpmesh.position.y = 0.05;
+  rpmesh.visible = false;
+  scene.add(rpmesh);
+  ripplePool.push({ mesh: rpmesh, active: false, age: 0 });
+}
+
+// --- Particle pool ---
+var PART_MAX = 160;
+var partPool = [];
+var partGeo = new THREE.OctahedronGeometry(0.09, 0);
+for (var pi = 0; pi < PART_MAX; pi++) {
+  var pmat = new THREE.MeshBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0 });
+  var pmesh = new THREE.Mesh(partGeo, pmat);
+  pmesh.visible = false;
+  scene.add(pmesh);
+  partPool.push({ mesh: pmesh, active: false, vx: 0, vy: 0, vz: 0, age: 0, maxAge: 1 });
+}
+
+// --- Game state ---
+var gameState = 'idle'; // idle | playing | dead
+var score = 0;
+var lives = 3;
+var combo = 0;
+var skipCount = 0;
+var speedMult = 1.0;
+var shakeAmt = 0;
+var hintHidden = false;
+
+// Arc state
+var arcStartX = 0, arcStartZ = 0;
+var arcEndX = 0, arcEndZ = 0;
+var arcHeight = 0, arcDuration = 0, arcTime = 0;
+var arcDone = false;
+var tapDone = false;
+var stoneX = 0, stoneZ = 0, stoneY = 0;
+var baseY = 6; // camera base Y
+
+// --- UI elements ---
+var scoreEl = document.getElementById('score');
+var comboEl = document.getElementById('combo');
+var flashEl = document.getElementById('flash');
+var popupEl = document.getElementById('popup');
+var hintEl  = document.getElementById('hint');
+var skipEl  = document.getElementById('skip-count');
+var overlay = document.getElementById('overlay');
+var finalEl = document.getElementById('final-score');
+var startBtn = document.getElementById('start-btn');
+var dots = [
+  document.getElementById('l0'),
+  document.getElementById('l1'),
+  document.getElementById('l2')
+];
+
+var popTimer = null;
+function showPopup(txt, color) {
+  popupEl.textContent = txt;
+  popupEl.style.color = color;
+  popupEl.style.opacity = '1';
+  if (popTimer) clearTimeout(popTimer);
+  popTimer = setTimeout(function() { popupEl.style.opacity = '0'; }, 620);
+}
+
+var comboTimer = null;
+function showCombo(c) {
+  if (c < 2) { comboEl.style.opacity = '0'; return; }
+  comboEl.textContent = 'x' + c + ' CHAIN';
+  comboEl.style.opacity = '1';
+  if (comboTimer) clearTimeout(comboTimer);
+  comboTimer = setTimeout(function() { comboEl.style.opacity = '0'; }, 1200);
+}
+
+function doFlash(col, alpha) {
+  flashEl.style.background = col;
+  flashEl.style.opacity = String(alpha || 0.3);
+  setTimeout(function() { flashEl.style.opacity = '0'; }, 80);
+}
+
+function updateLives() {
+  for (var i = 0; i < 3; i++) {
+    dots[i].className = 'life-dot' + (i >= lives ? ' dead' : '');
+  }
+}
+
+// --- Spawn effects ---
+function spawnSplash(x, z, quality) {
+  var count = quality === 'perfect' ? 20 : quality === 'good' ? 11 : 4;
+  var col = quality === 'perfect' ? 0xffcc44 : quality === 'good' ? 0x44aaff : 0x223344;
+  var spawned = 0;
+  for (var i = 0; i < PART_MAX && spawned < count; i++) {
+    var p = partPool[i];
+    if (p.active) continue;
+    p.active = true;
+    p.mesh.visible = true;
+    p.mesh.material.color.setHex(col);
+    p.mesh.material.opacity = 1;
+    p.mesh.position.set(x, 0.12, z);
+    var a = Math.random() * Math.PI * 2;
+    var spd = 0.025 + Math.random() * 0.085;
+    p.vx = Math.cos(a) * spd;
+    p.vy = 0.055 + Math.random() * 0.11;
+    p.vz = Math.sin(a) * spd;
+    p.age = 0;
+    p.maxAge = 32 + Math.random() * 22;
+    spawned++;
+  }
+}
+
+function spawnRipple(x, z, col) {
+  for (var i = 0; i < RIPPLE_MAX; i++) {
+    var r = ripplePool[i];
+    if (r.active) continue;
+    r.active = true;
+    r.mesh.visible = true;
+    r.mesh.material.color.setHex(col || 0x44aaff);
+    r.mesh.position.set(x, 0.05, z);
+    r.mesh.scale.set(0.4, 0.4, 0.4);
+    r.mesh.material.opacity = 0.75;
+    r.age = 0;
+    break;
+  }
+}
+
+// --- Arc management ---
+function startArc(fromX, fromZ) {
+  arcStartX = fromX;
+  arcStartZ = fromZ;
+  var len = 2.8 + Math.random() * 1.8;
+  arcEndX = fromX - len;
+  arcEndZ = fromZ - (0.2 + Math.random() * 0.8);
+  arcHeight = 1.6 + Math.random() * 1.4;
+  arcDuration = Math.max(0.38, (0.78 - skipCount * 0.008)) / speedMult;
+  arcTime = 0;
+  arcDone = false;
+  tapDone = false;
+  hitRing.position.set(arcEndX, 0.02, arcEndZ);
+  hitRing.material.color.setHex(0x44aaff);
+  hitRing.scale.set(1, 1, 1);
+  hitRing.visible = true;
+}
+
+function initRound() {
+  score = 0;
+  lives = 3;
+  combo = 0;
+  skipCount = 0;
+  speedMult = 1.0;
+  shakeAmt = 0;
+  hintHidden = false;
+  hintEl.style.opacity = '0.7';
+  scoreEl.textContent = '0';
+  skipEl.textContent = 'SKIPS: 0';
+  comboEl.style.opacity = '0';
+  popupEl.style.opacity = '0';
+  updateLives();
+  trailHistory = [];
+  trailMeshes.forEach(function(m) { m.visible = false; });
+  partPool.forEach(function(p) { p.active = false; p.mesh.visible = false; });
+  ripplePool.forEach(function(r) { r.active = false; r.mesh.visible = false; });
+  camera.position.set(0, 7, 16);
+  startArc(14, 2.5);
+}
+
+function endGame() {
+  gameState = 'dead';
+  hitRing.visible = false;
+  finalEl.style.display = 'block';
+  finalEl.innerHTML = 'SKIPS &nbsp;' + skipCount + '<br>SCORE &nbsp;' + score;
+  startBtn.textContent = 'SKIP AGAIN';
+  overlay.style.display = 'flex';
+}
+
+// --- Input ---
+function onTap() {
+  if (gameState !== 'playing') return;
+  if (tapDone) return;
+  tapDone = true;
+  if (!hintHidden) { hintHidden = true; hintEl.style.opacity = '0'; }
+
+  var t = arcTime / arcDuration;
+  // Hit window: 0.70 – 1.05 (near water touch)
+  if (t >= 0.70 && t <= 1.05) {
+    var center = 0.86;
+    var dist = Math.abs(t - center);
+    var quality, pts;
+    if (dist < 0.09) {
+      quality = 'perfect';
+      pts = 10 + combo * 4;
+      showPopup('PERFECT!', '#ffcc44');
+      doFlash('#ffcc44', 0.35);
+      shakeAmt = 0.18;
+      hitRing.material.color.setHex(0xffcc44);
+    } else {
+      quality = 'good';
+      pts = 5 + combo * 2;
+      showPopup('GOOD', '#44aaff');
+      doFlash('#44aaff', 0.22);
+      shakeAmt = 0.09;
+    }
+    combo++;
+    score += pts;
+    skipCount++;
+    speedMult = 1.0 + skipCount * 0.012;
+    scoreEl.textContent = score;
+    skipEl.textContent = 'SKIPS: ' + skipCount;
+    showCombo(combo);
+    spawnSplash(arcEndX, arcEndZ, quality);
+    spawnRipple(arcEndX, arcEndZ, quality === 'perfect' ? 0xffcc44 : 0x44aaff);
+    setTimeout(function() { spawnRipple(arcEndX, arcEndZ, 0x224466); }, 140);
+  } else {
+    // Early tap — no splash, just feedback
+    showPopup('EARLY', '#ff4444');
+    combo = 0;
+    showCombo(0);
+  }
+}
+
+canvas.addEventListener('pointerdown', function(e) {
+  e.preventDefault();
+  onTap();
+}, { passive: false });
+
+document.addEventListener('keydown', function(e) {
+  if (e.code === 'Space' || e.code === 'Enter') onTap();
+});
+
+startBtn.addEventListener('click', function() {
+  overlay.style.display = 'none';
+  initRound();
+  gameState = 'playing';
+});
+
+// --- Tick ---
+var lastTs = 0;
+function tick(ts) {
+  requestAnimationFrame(tick);
+  var dt = Math.min((ts - lastTs) / 1000, 0.05);
+  lastTs = ts;
+
+  // Light flicker
+  pLight1.intensity = 2.5 + 0.25 * Math.sin(ts * 0.0028);
+
+  if (gameState === 'playing') {
+    arcTime += dt;
+    var t = arcTime / arcDuration;
+    var tc = Math.min(t, 1);
+
+    // Stone position: parabolic arc
+    stoneX = arcStartX + (arcEndX - arcStartX) * tc;
+    stoneZ = arcStartZ + (arcEndZ - arcStartZ) * tc;
+    stoneY = arcHeight * 4 * tc * (1 - tc);
+    if (stoneY < 0) stoneY = 0;
+
+    // Hit ring pulse in window
+    var inWin = (t >= 0.70 && t <= 1.05);
+    if (inWin) {
+      var pulse = 1.0 + 0.14 * Math.sin(ts * 0.025);
+      hitRing.scale.set(pulse, pulse, pulse);
+      hitRing.material.color.setHex(0xffcc44);
+    } else {
+      hitRing.material.color.setHex(0x44aaff);
+    }
+
+    // Arc complete
+    if (t >= 1.0 && !arcDone) {
+      arcDone = true;
+      if (!tapDone) {
+        // Miss
+        combo = 0;
+        lives--;
+        updateLives();
+        showPopup('MISS!', '#ff4444');
+        doFlash('#ff2211', 0.42);
+        shakeAmt = 0.22;
+        spawnSplash(arcEndX, arcEndZ, 'miss');
+        showCombo(0);
+        if (lives <= 0) {
+          setTimeout(endGame, 700);
+          return;
+        }
+      }
+      // Stone drifted off left edge?
+      if (arcEndX < -16) {
+        endGame();
+        return;
+      }
+      // Next arc after brief pause
+      var nextX = arcEndX, nextZ = arcEndZ;
+      setTimeout(function() {
+        if (gameState === 'playing') startArc(nextX, nextZ);
+      }, 90);
+    }
+
+    // Update stone mesh
+    stone.position.set(stoneX, stoneY + 0.18, stoneZ);
+    stone.rotation.x += 0.06;
+    stone.rotation.z += 0.045;
+    stone.material.emissiveIntensity = 0.8 + 0.2 * Math.sin(ts * 0.008);
+
+    // Trail
+    trailHistory.unshift({ x: stoneX, y: stoneY + 0.18, z: stoneZ });
+    if (trailHistory.length > TRAIL_LEN) trailHistory.pop();
+    for (var ti = 0; ti < TRAIL_LEN; ti++) {
+      if (ti < trailHistory.length) {
+        trailMeshes[ti].visible = true;
+        trailMeshes[ti].position.set(trailHistory[ti].x, trailHistory[ti].y, trailHistory[ti].z);
+      } else {
+        trailMeshes[ti].visible = false;
+      }
+    }
+
+    // Camera smoothly tracks stone (pans left)
+    var targetCamX = stoneX - 1.5;
+    camera.position.x += (targetCamX - camera.position.x) * 0.05;
+    camera.lookAt(stoneX - 0.5, 0.5, stoneZ - 2);
+
+    // Camera shake
+    if (shakeAmt > 0.005) {
+      camera.position.y = baseY + (Math.random() - 0.5) * shakeAmt * 2;
+      camera.position.z = 16 + (Math.random() - 0.5) * shakeAmt;
+      shakeAmt *= 0.82;
+    } else {
+      camera.position.y += (baseY - camera.position.y) * 0.12;
+      camera.position.z += (16 - camera.position.z) * 0.12;
+    }
+  }
+
+  // Particles
+  for (var pi = 0; pi < PART_MAX; pi++) {
+    var p = partPool[pi];
+    if (!p.active) continue;
+    p.age++;
+    if (p.age >= p.maxAge) { p.active = false; p.mesh.visible = false; continue; }
+    p.mesh.position.x += p.vx;
+    p.mesh.position.y += p.vy;
+    p.mesh.position.z += p.vz;
+    p.vy -= 0.0035;
+    p.mesh.material.opacity = (1 - p.age / p.maxAge) * 0.95;
+  }
+
+  // Ripples
+  for (var rpi = 0; rpi < RIPPLE_MAX; rpi++) {
+    var r = ripplePool[rpi];
+    if (!r.active) continue;
+    r.age++;
+    if (r.age >= 50) { r.active = false; r.mesh.visible = false; continue; }
+    var prog = r.age / 50;
+    r.mesh.scale.set(0.4 + prog * 4.5, 0.4 + prog * 4.5, 1);
+    r.mesh.material.opacity = (1 - prog) * 0.65;
+  }
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

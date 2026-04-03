@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>VOID BURST</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; font-family:'Courier New',monospace; }
+canvas { display:block; position:fixed; top:0; left:0; }
+#hud { position:fixed; inset:0; pointer-events:none; z-index:10; }
+#score-el {
+  position:absolute; top:16px; left:50%; transform:translateX(-50%);
+  color:#fff; font-size:40px; font-weight:900; letter-spacing:3px;
+  text-shadow:0 0 18px #0ff, 0 0 36px #0ff;
+}
+#chain-el {
+  position:absolute; top:68px; left:50%; transform:translateX(-50%);
+  color:#ff0; font-size:20px; font-weight:900; letter-spacing:2px;
+  text-shadow:0 0 12px #ff0; opacity:0; transition:opacity 0.4s;
+}
+#hint-el {
+  position:absolute; bottom:56px; left:50%; transform:translateX(-50%);
+  color:rgba(255,255,255,0.4); font-size:14px; letter-spacing:3px;
+  animation: blink 2s ease-in-out infinite;
+}
+@keyframes blink { 0%,100%{opacity:0.3} 50%{opacity:0.8} }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="score-el">0</div>
+  <div id="chain-el">CHAIN</div>
+  <div id="hint-el">TAP TO BURST</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// VOID BURST — Lane 004 Rando's House
+// lc_lane_004_unknown_43661d | feel:juice | hook:instant_start
+// Single-file Three.js, STD-025 compliant
+
+const W = window.innerWidth, H = window.innerHeight;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, W / H, 0.1, 500);
+camera.position.z = 36;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x040008);
+document.body.appendChild(renderer.domElement);
+
+// Fog
+scene.fog = new THREE.FogExp2(0x040008, 0.011);
+
+// Lights
+const ambient = new THREE.AmbientLight(0x223355, 2);
+scene.add(ambient);
+const pA = new THREE.PointLight(0x6644ff, 5, 70);
+pA.position.set(0, 10, 18);
+scene.add(pA);
+const pB = new THREE.PointLight(0xff4488, 3, 60);
+pB.position.set(0, -10, 14);
+scene.add(pB);
+
+// Starfield
+(function buildStars() {
+    const verts = [];
+    for (let i = 0; i < 1600; i++) {
+        verts.push((Math.random() - 0.5) * 220, (Math.random() - 0.5) * 220, -15 - Math.random() * 100);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.13, sizeAttenuation: true })));
+})();
+
+// --- ORB POOL ---
+const PALETTE = [0xff3366, 0x33ccff, 0xffcc00, 0x66ff99, 0xff6600, 0xcc33ff, 0x00ffcc, 0xff99cc];
+const ORB_COUNT = 44;
+const BLAST_R0 = 7.5;
+const orbGeo = new THREE.SphereGeometry(1, 12, 12);
+const orbs = [];
+
+function makeOrb() {
+    const col = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+    const mat = new THREE.MeshPhongMaterial({
+        color: col, emissive: col, emissiveIntensity: 0.3,
+        transparent: true, opacity: 0.92
+    });
+    const mesh = new THREE.Mesh(orbGeo, mat);
+    scene.add(mesh);
+    return {
+        mesh, col,
+        baseScale: 0.45 + Math.random() * 0.75,
+        alive: true, state: 'idle', popT: 0,
+        vel: new THREE.Vector3((Math.random() - 0.5) * 0.016, (Math.random() - 0.5) * 0.014, (Math.random() - 0.5) * 0.008),
+        phase: Math.random() * Math.PI * 2
+    };
+}
+
+function placeOrb(orb) {
+    orb.mesh.position.set((Math.random() - 0.5) * 46, (Math.random() - 0.5) * 28, (Math.random() - 0.5) * 13);
+    orb.mesh.scale.setScalar(orb.baseScale);
+    orb.mesh.material.opacity = 0.92;
+    orb.mesh.material.emissiveIntensity = 0.3;
+    orb.alive = true;
+    orb.state = 'idle';
+    orb.popT = 0;
+}
+
+for (let i = 0; i < ORB_COUNT; i++) {
+    const o = makeOrb();
+    placeOrb(o);
+    orbs.push(o);
+}
+
+// --- PARTICLE POOL ---
+const P_SIZE = 160;
+const pGeo = new THREE.SphereGeometry(0.22, 4, 4);
+const pPool = [];
+for (let i = 0; i < P_SIZE; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
+    const mesh = new THREE.Mesh(pGeo, mat);
+    mesh.visible = false;
+    scene.add(mesh);
+    pPool.push({ mesh, active: false, vel: new THREE.Vector3(), life: 0, maxLife: 1 });
+}
+
+function emitParticles(pos, col, count) {
+    let n = 0;
+    for (let i = 0; i < P_SIZE && n < count; i++) {
+        const p = pPool[i];
+        if (p.active) continue;
+        p.active = true;
+        p.mesh.visible = true;
+        p.mesh.position.copy(pos);
+        p.mesh.material.color.setHex(col);
+        p.mesh.material.opacity = 1;
+        p.vel.set((Math.random() - 0.5) * 0.52, (Math.random() - 0.5) * 0.52 + 0.1, (Math.random() - 0.5) * 0.52);
+        p.life = 1.0;
+        p.maxLife = 0.55 + Math.random() * 0.65;
+        n++;
+    }
+}
+
+// --- RING POOL ---
+const R_SIZE = 24;
+const ringGeo = new THREE.RingGeometry(0.1, 0.45, 32);
+const rPool = [];
+for (let i = 0; i < R_SIZE; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0 });
+    const mesh = new THREE.Mesh(ringGeo, mat);
+    mesh.visible = false;
+    scene.add(mesh);
+    rPool.push({ mesh, active: false, scale: 1, life: 0 });
+}
+
+function emitRing(pos, col) {
+    for (let i = 0; i < R_SIZE; i++) {
+        const r = rPool[i];
+        if (r.active) continue;
+        r.active = true;
+        r.mesh.visible = true;
+        r.mesh.position.copy(pos);
+        r.mesh.lookAt(camera.position);
+        r.mesh.material.color.setHex(col);
+        r.mesh.material.opacity = 0.9;
+        r.scale = 0.25;
+        r.mesh.scale.setScalar(r.scale);
+        r.life = 1.0;
+        break;
+    }
+}
+
+// --- SCORE POPUPS (DOM) ---
+const popups = [];
+function emitPopup(worldPos, text, hexCol) {
+    const v = worldPos.clone().project(camera);
+    const sx = (v.x * 0.5 + 0.5) * W;
+    const sy = (-v.y * 0.5 + 0.5) * H;
+    const el = document.createElement('div');
+    const cs = hexCol.toString(16).padStart(6, '0');
+    el.style.cssText = `position:fixed;left:${sx}px;top:${sy}px;color:#${cs};font-size:20px;font-weight:900;pointer-events:none;font-family:'Courier New',monospace;text-shadow:0 0 8px #${cs};z-index:20;transform:translateX(-50%);`;
+    el.textContent = text;
+    document.body.appendChild(el);
+    popups.push({ el, y: sy, life: 1.0 });
+}
+
+// --- GAME STATE ---
+let score = 0;
+let shakeAmt = 0;
+let firstTap = true;
+let frame = 0;
+
+const scoreEl = document.getElementById('score-el');
+const chainEl = document.getElementById('chain-el');
+const hintEl  = document.getElementById('hint-el');
+let chainTimeout = null;
+
+function showChain(label) {
+    chainEl.textContent = label;
+    chainEl.style.opacity = '1';
+    clearTimeout(chainTimeout);
+    chainTimeout = setTimeout(() => { chainEl.style.opacity = '0'; }, 1400);
+}
+
+// --- BURST ENGINE ---
+function burstAt(pos, radius, level, chainLen) {
+    if (level > 4) return;
+
+    const hits = [];
+    for (let i = 0; i < ORB_COUNT; i++) {
+        const o = orbs[i];
+        if (!o.alive || o.state !== 'idle') continue;
+        const d = pos.distanceTo(o.mesh.position);
+        if (d < radius) hits.push({ orb: o, d });
+    }
+
+    if (hits.length === 0) {
+        if (level === 0) {
+            emitParticles(pos, 0x4466ff, 7);
+            emitRing(pos, 0x2233aa);
+        }
+        return;
+    }
+
+    emitRing(pos, 0xffffff);
+
+    const total = chainLen + hits.length;
+
+    hits.forEach(({ orb, d }) => {
+        const delay = (d / radius) * 130;
+        setTimeout(() => {
+            try {
+                if (!orb.alive || orb.state !== 'idle') return;
+                popOrb(orb, level, total);
+            } catch (err) {
+                console.warn('[VOID BURST] popOrb error:', err);
+            }
+        }, delay);
+    });
+
+    try { Telegram.WebApp.HapticFeedback.impactOccurred(level === 0 ? 'medium' : 'light'); } catch (_e) {}
+}
+
+function popOrb(orb, level, chainLen) {
+    orb.alive = false;
+    orb.state = 'popping';
+    orb.popT = 0;
+
+    const pos = orb.mesh.position.clone();
+    const col = orb.col;
+
+    emitParticles(pos, col, 10 + level * 3);
+    emitRing(pos, col);
+    shakeAmt = Math.max(shakeAmt, 0.14 + level * 0.07);
+
+    const pts = Math.max(1, Math.pow(2, level) * chainLen);
+    score += pts;
+    scoreEl.textContent = score;
+    emitPopup(pos, `+${pts}`, col);
+
+    if (chainLen >= 3 && level === 0) showChain(`CHAIN ×${chainLen}!`);
+    if (chainLen >= 6) showChain(`MEGA BURST ×${chainLen}!!`);
+
+    // Cascade secondary burst
+    const nextR = BLAST_R0 * (0.72 - level * 0.1);
+    if (nextR > 1.8) {
+        setTimeout(() => {
+            try { burstAt(pos, nextR, level + 1, chainLen); } catch (err) {
+                console.warn('[VOID BURST] chain burst error:', err);
+            }
+        }, 170 + level * 55);
+    }
+
+    // Respawn orb
+    setTimeout(() => {
+        try { placeOrb(orb); } catch (err) {
+            console.warn('[VOID BURST] respawn error:', err);
+        }
+    }, 2600 + Math.random() * 3400);
+}
+
+// --- INPUT ---
+function onPointerDown(cx, cy) {
+    if (firstTap) { firstTap = false; hintEl.style.display = 'none'; }
+
+    const ndx = (cx / W) * 2 - 1;
+    const ndy = -(cy / H) * 2 + 1;
+    const ray = new THREE.Vector3(ndx, ndy, 0.5).unproject(camera);
+    const dir = ray.sub(camera.position).normalize();
+    const t = (0 - camera.position.z) / dir.z;
+    const wp = camera.position.clone().addScaledVector(dir, t);
+
+    burstAt(wp, BLAST_R0, 0, 0);
+}
+
+renderer.domElement.addEventListener('pointerdown', e => {
+    try { onPointerDown(e.clientX, e.clientY); } catch (err) {
+        console.warn('[VOID BURST] input error:', err);
+    }
+});
+
+// --- ANIMATION LOOP ---
+const clock = new THREE.Clock();
+(function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    frame++;
+
+    // Screen shake decay
+    if (shakeAmt > 0.005) {
+        camera.position.x = (Math.random() - 0.5) * shakeAmt * 2;
+        camera.position.y = (Math.random() - 0.5) * shakeAmt * 2;
+        shakeAmt *= 0.8;
+    } else {
+        camera.position.x = 0;
+        camera.position.y = 0;
+        shakeAmt = 0;
+    }
+
+    // Animated lights
+    pA.position.x = Math.sin(frame * 0.009) * 20;
+    pA.position.y = Math.cos(frame * 0.007) * 13;
+    pB.position.x = -Math.sin(frame * 0.010) * 18;
+
+    // Orbs
+    for (let i = 0; i < ORB_COUNT; i++) {
+        const o = orbs[i];
+        if (o.state === 'idle') {
+            o.mesh.position.addScaledVector(o.vel, 1);
+            const p = o.mesh.position;
+            if (Math.abs(p.x) > 24) o.vel.x *= -1;
+            if (Math.abs(p.y) > 15) o.vel.y *= -1;
+            if (Math.abs(p.z) > 7.5) o.vel.z *= -1;
+            const pulse = 1 + Math.sin(frame * 0.042 + o.phase) * 0.055;
+            o.mesh.scale.setScalar(o.baseScale * pulse);
+            o.mesh.rotation.y += 0.006;
+        } else if (o.state === 'popping') {
+            o.popT += dt;
+            const t = Math.min(o.popT * 2.8, 1);
+            o.mesh.scale.setScalar(o.baseScale * (1 + t * 1.6));
+            o.mesh.material.opacity = 1 - t;
+            o.mesh.material.emissiveIntensity = 1.2 - t;
+        }
+    }
+
+    // Particles
+    for (let i = 0; i < P_SIZE; i++) {
+        const p = pPool[i];
+        if (!p.active) continue;
+        p.life -= dt / p.maxLife;
+        if (p.life <= 0) {
+            p.active = false;
+            p.mesh.visible = false;
+        } else {
+            p.mesh.position.addScaledVector(p.vel, 1);
+            p.vel.y -= 0.009;
+            p.vel.multiplyScalar(0.97);
+            p.mesh.scale.setScalar(p.life * 0.85 + 0.15);
+            p.mesh.material.opacity = p.life;
+        }
+    }
+
+    // Rings
+    for (let i = 0; i < R_SIZE; i++) {
+        const r = rPool[i];
+        if (!r.active) continue;
+        r.life -= dt * 2.4;
+        if (r.life <= 0) {
+            r.active = false;
+            r.mesh.visible = false;
+        } else {
+            r.scale += dt * 24;
+            r.mesh.scale.setScalar(r.scale);
+            r.mesh.material.opacity = r.life * 0.8;
+            r.mesh.lookAt(camera.position);
+        }
+    }
+
+    // DOM popups
+    for (let i = popups.length - 1; i >= 0; i--) {
+        const pop = popups[i];
+        pop.life -= dt * 1.7;
+        if (pop.life <= 0) {
+            pop.el.remove();
+            popups.splice(i, 1);
+        } else {
+            pop.y -= 1.1;
+            pop.el.style.top = pop.y + 'px';
+            pop.el.style.opacity = pop.life;
+        }
+    }
+
+    renderer.render(scene, camera);
+})();
+
+// Resize
+window.addEventListener('resize', () => {
+    try {
+        const nw = window.innerWidth, nh = window.innerHeight;
+        camera.aspect = nw / nh;
+        camera.updateProjectionMatrix();
+        renderer.setSize(nw, nh);
+    } catch (err) {
+        console.warn('[VOID BURST] resize error:', err);
+    }
+});
+
+// Telegram
+try { Telegram.WebApp.ready(); Telegram.WebApp.expand(); } catch (_e) {}
+
+console.log('[VOID BURST] ready | Lane 004 | lc_lane_004_unknown_43661d');
+</script>
+</body>
+</html>

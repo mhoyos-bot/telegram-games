@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>GRID HUNT</title>
+<style>
+/* GRID HUNT | ga_grid_movement_20260328_1059 | STD-031: 398L justified — d-pad HTML + 6 draw fns */
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0b0014;overflow:hidden;touch-action:none;font-family:'Courier New',monospace;user-select:none}
+canvas{display:block;position:fixed;top:0;left:0}
+#ui{position:fixed;top:0;left:0;right:0;padding:10px 16px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;z-index:10}
+#score{color:#14f195;font-size:30px;font-weight:bold;text-shadow:0 0 12px #14f195;line-height:1}
+#score-lbl{color:#0d2a1a;font-size:10px;letter-spacing:3px;margin-top:2px}
+#right{text-align:right}
+#lives{color:#f64;font-size:20px;letter-spacing:3px;text-shadow:0 0 8px #f64;min-height:24px}
+#wave-el{color:#7af;font-size:10px;letter-spacing:3px;margin-top:4px;opacity:0.65}
+#msg{position:fixed;top:44%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:32px;font-weight:bold;text-align:center;pointer-events:none;z-index:20;text-shadow:0 0 16px #14f195,0 0 40px #0f6;opacity:0;transition:opacity 0.25s;letter-spacing:3px;line-height:1.6;white-space:pre}
+#dpad{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:5px;pointer-events:auto;z-index:15}
+.dp{background:rgba(20,241,149,0.06);border:1px solid rgba(20,241,149,0.18);border-radius:8px;color:#14f195;font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background 0.1s;-webkit-tap-highlight-color:transparent}
+.dp:active{background:rgba(20,241,149,0.22)}
+.dp.mid{background:transparent;border-color:transparent;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div><div id="score">0</div><div id="score-lbl">SCORE</div></div>
+  <div id="right"><div id="lives">♥♥♥</div><div id="wave-el">WAVE 1</div></div>
+</div>
+<div id="msg"></div>
+<div id="dpad">
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-u">▲</div>
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-l">◀</div>
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-r">▶</div>
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-d">▼</div>
+  <div class="dp mid"></div>
+</div>
+
+<script>
+// GRID HUNT | ga_grid_movement_20260328_1059 | Mechanic: grid_movement
+// Atoms: GRID_MOVE, TURN_CHASE, GEM_COLLECT, TRAIL_FADE, FREEZE_POWER, SCREEN_SHAKE, WAVE_ESCALATION
+// STD-030: All exceptions caught+logged. STD-031: ≤400L justified in header.
+// Kernel: NO — standalone game build. Bloodflow: input→move→checkGems→moveEnemies→hitCheck→frame
+
+const CV = document.getElementById('c');
+const X = CV.getContext('2d');
+const COLS = 9, ROWS = 9;
+let T, OX, OY, bgGrad;
+let shX = 0, shY = 0, shF = 0, now = 0;
+let P, gems, enems, trail, score, lives, wave, dead, frozen, gemTotal, touchSt, moveCount;
+
+// ── RESIZE ────────────────────────────────────────────────────────────────────
+function resize() {
+    CV.width = window.innerWidth; CV.height = window.innerHeight;
+    const dpadH = 195;
+    T  = Math.floor(Math.min(CV.width / COLS, (CV.height - 60 - dpadH) / ROWS));
+    OX = Math.floor((CV.width  - T * COLS) / 2);
+    OY = Math.floor((CV.height - dpadH - T * ROWS) / 2) + 50;
+    bgGrad = X.createRadialGradient(CV.width/2,CV.height/2,0,CV.width/2,CV.height/2,CV.width*0.65);
+    bgGrad.addColorStop(0,'rgba(10,40,25,0.18)'); bgGrad.addColorStop(1,'rgba(0,0,0,0)');
+}
+window.addEventListener('resize', resize);
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+function init() {
+    score = 0; lives = 3; wave = 1; dead = false; frozen = 0; gemTotal = 0; moveCount = 0;
+    spawnWave(); updateUI();
+}
+
+function spawnWave() {
+    P = { x: Math.floor(COLS/2), y: Math.floor(ROWS/2) };
+    trail = [];
+    gems  = spawnItems(Math.min(3 + wave, 7));
+    enems = spawnEnemies(Math.min(wave, 5));
+    document.getElementById('wave-el').textContent = 'WAVE ' + wave;
+}
+
+function spawnItems(n) {
+    const out = []; let tries = 0;
+    while (out.length < n && tries++ < 800) {
+        const x = Math.floor(Math.random() * COLS), y = Math.floor(Math.random() * ROWS);
+        if (!near(x,y,P.x,P.y,2) && !out.some(g => g.x===x && g.y===y))
+            out.push({ x, y, ph: Math.random() * Math.PI * 2 });
+    }
+    return out;
+}
+
+function spawnEnemies(n) {
+    const out = []; let tries = 0;
+    while (out.length < n && tries++ < 800) {
+        const x = Math.floor(Math.random() * COLS), y = Math.floor(Math.random() * ROWS);
+        if (!near(x,y,P.x,P.y,3) && !out.some(e => e.x===x && e.y===y) && !gems.some(g => g.x===x && g.y===y))
+            out.push({ x, y, ph: Math.random() * Math.PI * 2 });
+    }
+    return out;
+}
+
+function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+function near(ax, ay, bx, by, d) { return Math.abs(ax-bx) <= d && Math.abs(ay-by) <= d; }
+
+// ── MOVE ──────────────────────────────────────────────────────────────────────
+function move(dx, dy) {
+    if (dead) { restart(); return; }
+    const nx = P.x + dx, ny = P.y + dy;
+    if (!inBounds(nx, ny)) { shake(4, 7); return; }
+    trail.unshift({ x: P.x, y: P.y, age: 0 });
+    if (trail.length > 5) trail.length = 5;
+    P.x = nx; P.y = ny;
+    moveCount++;
+    checkGems();
+    if (!dead) moveEnemies();
+    if (!dead) hitCheck();
+}
+
+function checkGems() {
+    for (let i = gems.length - 1; i >= 0; i--) {
+        if (gems[i].x === P.x && gems[i].y === P.y) {
+            gems.splice(i, 1);
+            gemTotal++; score += 10 + wave * 5;
+            if (gemTotal % 5 === 0) frozen = 5; // every 5 gems: freeze burst
+            updateUI();
+        }
+    }
+    if (gems.length === 0) {
+        wave++; score += 50 * wave; shake(5, 9); updateUI(); spawnWave();
+    }
+}
+
+function moveEnemies() {
+    if (frozen > 0) { frozen--; return; }
+    if (moveCount % 2 !== 0) return; // enemies move every other player move
+    for (const e of enems) {
+        const ddx = P.x - e.x, ddy = P.y - e.y;
+        const steps = [];
+        if (Math.abs(ddx) >= Math.abs(ddy)) {
+            if (ddx !== 0) steps.push([Math.sign(ddx), 0]);
+            if (ddy !== 0) steps.push([0, Math.sign(ddy)]);
+        } else {
+            if (ddy !== 0) steps.push([0, Math.sign(ddy)]);
+            if (ddx !== 0) steps.push([Math.sign(ddx), 0]);
+        }
+        if (Math.random() < 0.18 && steps.length > 1) steps.reverse();
+        for (const [sx, sy] of steps) {
+            const nx = e.x + sx, ny = e.y + sy;
+            if (inBounds(nx, ny) && !enems.some(o => o !== e && o.x === nx && o.y === ny)) {
+                e.x = nx; e.y = ny; break;
+            }
+        }
+    }
+}
+
+function hitCheck() {
+    for (const e of enems) {
+        if (e.x === P.x && e.y === P.y) {
+            lives--; shake(10, 18); updateUI();
+            if (lives <= 0) { dead = true; showMsg('GAME OVER\n\n' + score + ' PTS\n\nTAP TO PLAY'); }
+            else { P.x = Math.floor(COLS/2); P.y = Math.floor(ROWS/2); trail = []; }
+            return;
+        }
+    }
+}
+
+function restart() { hideMsg(); init(); }
+
+// ── SHAKE ─────────────────────────────────────────────────────────────────────
+function shake(str, frames) {
+    shX = (Math.random() - 0.5) * str * 2;
+    shY = (Math.random() - 0.5) * str * 2;
+    shF = frames || 8;
+}
+
+// ── UI ────────────────────────────────────────────────────────────────────────
+function updateUI() {
+    document.getElementById('score').textContent = score;
+    document.getElementById('lives').textContent = '♥'.repeat(Math.max(0, lives));
+}
+function showMsg(t) { const el=document.getElementById('msg'); el.textContent=t; el.style.opacity='1'; }
+function hideMsg()  { document.getElementById('msg').style.opacity='0'; }
+
+// ── FRAME LOOP ────────────────────────────────────────────────────────────────
+function frame(ts) {
+    try {
+        now = ts;
+        if (shF > 0) { shF--; shX *= 0.62; shY *= 0.62; } else { shX = 0; shY = 0; }
+        X.save();
+        X.fillStyle = '#0b0014'; X.fillRect(0, 0, CV.width, CV.height);
+        X.fillStyle = bgGrad;    X.fillRect(0, 0, CV.width, CV.height);
+        X.translate(shX, shY);
+        drawGrid();
+        drawTrail();
+        drawGems();
+        drawEnems();
+        drawPlayer();
+        X.restore();
+        for (const t of trail) t.age += 0.07;
+        trail = trail.filter(t => t.age < 1.0);
+    } catch (err) {
+        console.warn('[WARN] frame render:', err);
+    }
+    requestAnimationFrame(frame);
+}
+
+// ── DRAW: GRID ────────────────────────────────────────────────────────────────
+function drawGrid() {
+    X.strokeStyle = 'rgba(20,241,149,0.05)'; X.lineWidth = 0.5;
+    for (let i = 0; i <= COLS; i++) {
+        X.beginPath(); X.moveTo(OX+i*T, OY); X.lineTo(OX+i*T, OY+ROWS*T); X.stroke();
+    }
+    for (let j = 0; j <= ROWS; j++) {
+        X.beginPath(); X.moveTo(OX, OY+j*T); X.lineTo(OX+COLS*T, OY+j*T); X.stroke();
+    }
+    X.strokeStyle = 'rgba(20,241,149,0.2)'; X.lineWidth = 1;
+    X.strokeRect(OX, OY, COLS*T, ROWS*T);
+    if (frozen > 0) {
+        const fa = 0.12 + 0.12 * Math.sin(now * 0.012);
+        X.strokeStyle = 'rgba(80,160,255,' + fa + ')'; X.lineWidth = 2.5;
+        X.strokeRect(OX+1, OY+1, COLS*T-2, ROWS*T-2);
+    }
+}
+
+// ── DRAW: TRAIL ───────────────────────────────────────────────────────────────
+function drawTrail() {
+    for (const t of trail) {
+        const a = (1 - t.age) * 0.22;
+        const cx = OX + t.x*T + T/2, cy = OY + t.y*T + T/2;
+        X.fillStyle = 'rgba(20,241,149,' + a + ')';
+        X.beginPath(); X.arc(cx, cy, T * 0.36 * (1 - t.age * 0.5), 0, Math.PI*2); X.fill();
+    }
+}
+
+// ── DRAW: GEMS ────────────────────────────────────────────────────────────────
+function drawGems() {
+    for (const g of gems) {
+        g.ph += 0.042;
+        const glow = 0.65 + 0.35 * Math.sin(g.ph);
+        const cx = OX + g.x*T + T/2, cy = OY + g.y*T + T/2 + Math.sin(g.ph) * T * 0.06;
+        const r  = T * 0.22;
+        const gr = X.createRadialGradient(cx, cy, 0, cx, cy, T*0.5);
+        gr.addColorStop(0, 'rgba(20,241,149,' + (0.28*glow) + ')');
+        gr.addColorStop(1, 'rgba(20,241,149,0)');
+        X.fillStyle = gr; X.fillRect(cx-T*0.5, cy-T*0.5, T, T);
+        X.save(); X.translate(cx, cy); X.rotate(now * 0.0007);
+        X.fillStyle = 'rgba(20,241,149,' + (0.85+0.15*glow) + ')';
+        X.beginPath(); X.moveTo(0,-r); X.lineTo(r*0.55,0); X.lineTo(0,r); X.lineTo(-r*0.55,0); X.closePath(); X.fill();
+        X.fillStyle = 'rgba(200,255,230,0.65)';
+        X.beginPath(); X.moveTo(0,-r*0.45); X.lineTo(r*0.25,0); X.lineTo(0,r*0.45); X.lineTo(-r*0.25,0); X.closePath(); X.fill();
+        X.restore();
+    }
+}
+
+// ── DRAW: ENEMIES ─────────────────────────────────────────────────────────────
+function drawEnems() {
+    for (const e of enems) {
+        const fr = frozen > 0;
+        const p  = fr ? 0.45 : 0.78 + 0.22 * Math.sin(now * 0.005 + e.ph);
+        const cx = OX + e.x*T + T/2, cy = OY + e.y*T + T/2;
+        const r  = T * 0.28;
+        const ec = fr ? '60,120,255' : '245,50,50';
+        const gr = X.createRadialGradient(cx, cy, 0, cx, cy, r*2.4);
+        gr.addColorStop(0, 'rgba(' + ec + ',' + (0.22*p) + ')');
+        gr.addColorStop(1, 'rgba(' + ec + ',0)');
+        X.fillStyle = gr; X.fillRect(cx-r*2.4, cy-r*2.4, r*4.8, r*4.8);
+        X.save(); X.translate(cx, cy); X.rotate(now * 0.002 + e.ph);
+        X.fillStyle = 'rgba(' + ec + ',' + p + ')';
+        const s = r * 0.88;
+        X.fillRect(-s, -s, s*2, s*2);
+        X.restore();
+        X.strokeStyle = 'rgba(' + ec + ',' + (0.55*p) + ')'; X.lineWidth = 1;
+        X.strokeRect(cx-r*0.58, cy-r*0.58, r*1.16, r*1.16);
+    }
+}
+
+// ── DRAW: PLAYER ──────────────────────────────────────────────────────────────
+function drawPlayer() {
+    const cx = OX + P.x*T + T/2, cy = OY + P.y*T + T/2;
+    const p  = 0.88 + 0.12 * Math.sin(now * 0.006);
+    const r  = T * 0.33;
+    const gr = X.createRadialGradient(cx, cy, 0, cx, cy, r*3);
+    gr.addColorStop(0, 'rgba(20,241,149,' + (0.22*p) + ')');
+    gr.addColorStop(1, 'rgba(20,241,149,0)');
+    X.fillStyle = gr; X.fillRect(cx-r*3, cy-r*3, r*6, r*6);
+    X.fillStyle = 'rgba(20,241,149,' + p + ')';
+    X.beginPath(); X.arc(cx, cy, r, 0, Math.PI*2); X.fill();
+    X.fillStyle = 'rgba(255,255,255,0.9)';
+    X.beginPath(); X.arc(cx, cy, r*0.28, 0, Math.PI*2); X.fill();
+    X.strokeStyle = 'rgba(120,255,200,' + (0.55*p) + ')'; X.lineWidth = 1.5;
+    X.beginPath(); X.arc(cx, cy, r*0.65, 0, Math.PI*2); X.stroke();
+}
+
+// ── INPUT: KEYBOARD ───────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+    const MAP = {
+        ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0],
+        w:[0,-1], s:[0,1], a:[-1,0], d:[1,0], W:[0,-1], S:[0,1], A:[-1,0], D:[1,0]
+    };
+    const dir = MAP[e.key];
+    if (dir) { e.preventDefault(); move(dir[0], dir[1]); }
+    if ((e.key === 'r' || e.key === 'R') && dead) restart();
+});
+
+// ── INPUT: SWIPE ──────────────────────────────────────────────────────────────
+CV.addEventListener('touchstart', e => {
+    e.preventDefault();
+    touchSt = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: false });
+
+CV.addEventListener('touchend', e => {
+    e.preventDefault();
+    if (!touchSt) return;
+    const dx = e.changedTouches[0].clientX - touchSt.x;
+    const dy = e.changedTouches[0].clientY - touchSt.y;
+    touchSt = null;
+    const adx = Math.abs(dx), ady = Math.abs(dy);
+    if (adx < 12 && ady < 12) { if (dead) restart(); return; }
+    if (adx > ady) move(dx > 0 ? 1 : -1, 0);
+    else           move(0, dy > 0 ? 1 : -1);
+}, { passive: false });
+
+// ── INPUT: D-PAD ──────────────────────────────────────────────────────────────
+function bindDpad(id, dx, dy) {
+    const el = document.getElementById(id);
+    el.addEventListener('touchstart', e => { e.preventDefault(); move(dx, dy); }, { passive: false });
+    el.addEventListener('mousedown',  e => { e.preventDefault(); move(dx, dy); });
+}
+bindDpad('dp-u',  0, -1); bindDpad('dp-d',  0,  1);
+bindDpad('dp-l', -1,  0); bindDpad('dp-r',  1,  0);
+
+// ── TELEGRAM ──────────────────────────────────────────────────────────────────
+try {
+    if (window.Telegram?.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
+} catch (err) {
+    console.warn('[WARN] Telegram WebApp init:', err);
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+resize();
+init();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

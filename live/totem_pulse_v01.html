@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>TOTEM PULSE</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #050a0f; overflow: hidden; touch-action: none; font-family: 'Courier New', monospace; }
+    canvas { display: block; position: fixed; inset: 0; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 16px 20px; pointer-events: none;
+    }
+    #score { color: #14f195; font: bold 32px/1 monospace; text-shadow: 0 0 20px rgba(20,241,149,0.8); }
+    #mult { color: #ffbb44; font: bold 16px/1 monospace; margin-top: 6px; min-height: 16px;
+            text-shadow: 0 0 12px rgba(255,187,68,0.7); }
+    #lives { color: rgba(255,100,100,0.9); font: 22px/1 monospace; letter-spacing: 4px; }
+    #wave { color: rgba(140,200,255,0.55); font: 11px/1 monospace; margin-top: 4px;
+            letter-spacing: 0.18em; text-align: right; }
+    #pop {
+      position: fixed; z-index: 20; top: 35%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 42px/1 monospace; pointer-events: none; opacity: 0;
+      text-shadow: 0 0 28px currentColor; white-space: nowrap;
+    }
+    #flash { position: fixed; inset: 0; z-index: 5; pointer-events: none; opacity: 0; }
+    #hint {
+      position: fixed; z-index: 10; bottom: 32px; left: 50%; transform: translateX(-50%);
+      color: rgba(20,241,149,0.4); font: 12px/1 monospace; letter-spacing: 0.2em;
+      pointer-events: none; transition: opacity 2s;
+    }
+    #hint.gone { opacity: 0; }
+    #go {
+      position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(5,10,15,0.93);
+    }
+    #go h1 { color: #14f195; font: bold 48px/1.1 monospace; margin-bottom: 8px;
+              text-shadow: 0 0 32px rgba(20,241,149,0.7); letter-spacing: 0.08em; }
+    #go .sub { color: rgba(20,241,149,0.35); font: 11px/1 monospace; letter-spacing: 0.25em; margin-bottom: 30px; }
+    #go-score { color: #ffbb44; font: bold 18px/1.7 monospace; margin-bottom: 36px; text-align: center; }
+    #play {
+      background: rgba(20,241,149,0.07); border: 1px solid rgba(20,241,149,0.4);
+      color: rgba(20,241,149,0.9); font: bold 15px/1 monospace; padding: 16px 52px;
+      cursor: pointer; letter-spacing: 0.18em;
+    }
+    #play:active { background: rgba(20,241,149,0.2); }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <div>
+    <div id="score">0</div>
+    <div id="mult"></div>
+  </div>
+  <div style="text-align:right">
+    <div id="lives">♦♦♦</div>
+    <div id="wave">PULSE 1</div>
+  </div>
+</div>
+<div id="pop"></div>
+<div id="flash"></div>
+<div id="hint">TAP WHEN THE RING REACHES THE TOTEM</div>
+<div id="go">
+  <h1>TOTEM PULSE</h1>
+  <div class="sub">WILD LANDS · TIME THE SACRED RINGS</div>
+  <div id="go-score"></div>
+  <button id="play">BEGIN</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+'use strict';
+
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+// ── STATE ────────────────────────────────────────────────────────────────────
+const G = {
+  score: 0, combo: 0, maxCombo: 0, lives: 3,
+  level: 1, running: false,
+  pulseSpeed: 0.55,  // ring expansion speed (units/sec)
+  pulseInterval: 1.8, // seconds between new rings
+  nextPulse: 0,
+  rings: [],         // active rings: { mesh, r, maxR, alive }
+  targetR: 3.2,      // the "hit zone" radius on totem
+  tolerance: 0.55,   // ±tolerance = hit window
+  lastTap: 0,
+  particles: [],     // burst particles
+  shakeTime: 0,
+  shakeAmt: 0,
+};
+
+// ── THREE SETUP ───────────────────────────────────────────────────────────────
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x050a0f);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050a0f, 0.06);
+
+const camera = new THREE.PerspectiveCamera(55, W / H, 0.1, 80);
+camera.position.set(0, 5.5, 12);
+camera.lookAt(0, 1.5, 0);
+
+// Lights
+const ambient = new THREE.AmbientLight(0x1a3a2a, 1.2);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0x14f195, 1.4);
+dirLight.position.set(2, 8, 4);
+scene.add(dirLight);
+const rimLight = new THREE.PointLight(0x4466ff, 1.8, 18);
+rimLight.position.set(-4, 3, -3);
+scene.add(rimLight);
+
+// ── GROUND ────────────────────────────────────────────────────────────────────
+const groundGeo = new THREE.CircleGeometry(18, 32);
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x0a1a10 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// Ground ring rings (decorative)
+for (let i = 1; i <= 4; i++) {
+  const rg = new THREE.RingGeometry(i * 2.2, i * 2.2 + 0.06, 48);
+  const rm = new THREE.MeshBasicMaterial({ color: 0x143322, side: THREE.DoubleSide });
+  const r = new THREE.Mesh(rg, rm);
+  r.rotation.x = -Math.PI / 2;
+  r.position.y = 0.01;
+  scene.add(r);
+}
+
+// ── TOTEM ─────────────────────────────────────────────────────────────────────
+const totemGroup = new THREE.Group();
+scene.add(totemGroup);
+
+// Base stone
+const baseGeo = new THREE.CylinderGeometry(0.9, 1.1, 0.4, 8);
+const stoneMat = new THREE.MeshLambertMaterial({ color: 0x2a3a30 });
+const base = new THREE.Mesh(baseGeo, stoneMat);
+base.position.y = 0.2;
+totemGroup.add(base);
+
+// Pole segments (stacked cylinders)
+const poleColors = [0x1a2d20, 0x162818, 0x1e3528, 0x142210];
+for (let i = 0; i < 4; i++) {
+  const pg = new THREE.CylinderGeometry(0.35 - i * 0.02, 0.38 - i * 0.02, 0.9, 8);
+  const pm = new THREE.MeshLambertMaterial({ color: poleColors[i] });
+  const p = new THREE.Mesh(pg, pm);
+  p.position.y = 0.65 + i * 0.92;
+  totemGroup.add(p);
+}
+
+// Glowing crown ring
+const crownGeo = new THREE.TorusGeometry(0.55, 0.12, 8, 24);
+const crownMat = new THREE.MeshBasicMaterial({ color: 0x14f195 });
+const crown = new THREE.Mesh(crownGeo, crownMat);
+crown.position.y = 4.35;
+totemGroup.add(crown);
+
+// Crown orb
+const orbGeo = new THREE.SphereGeometry(0.28, 10, 8);
+const orbMat = new THREE.MeshBasicMaterial({ color: 0x80ffcc });
+const orb = new THREE.Mesh(orbGeo, orbMat);
+orb.position.y = 4.72;
+totemGroup.add(orb);
+
+// ── TARGET RING (static, shows the hit zone) ───────────────────────────────
+const targetRingGeo = new THREE.RingGeometry(
+  G.targetR - 0.08, G.targetR + 0.08, 64
+);
+const targetRingMat = new THREE.MeshBasicMaterial({
+  color: 0x14f195, side: THREE.DoubleSide, transparent: true, opacity: 0.5
+});
+const targetRing = new THREE.Mesh(targetRingGeo, targetRingMat);
+targetRing.rotation.x = -Math.PI / 2;
+targetRing.position.y = 0.05;
+scene.add(targetRing);
+
+// Tolerance band
+const tolGeo = new THREE.RingGeometry(
+  G.targetR - G.tolerance, G.targetR + G.tolerance, 64
+);
+const tolMat = new THREE.MeshBasicMaterial({
+  color: 0x14f195, side: THREE.DoubleSide, transparent: true, opacity: 0.07
+});
+const tolBand = new THREE.Mesh(tolGeo, tolMat);
+tolBand.rotation.x = -Math.PI / 2;
+tolBand.position.y = 0.04;
+scene.add(tolBand);
+
+// ── BACKGROUND TREES ──────────────────────────────────────────────────────────
+const treeMat = new THREE.MeshLambertMaterial({ color: 0x0e1e14 });
+const trunkMat = new THREE.MeshLambertMaterial({ color: 0x0a1208 });
+function makeTree(x, z, h) {
+  const g = new THREE.Group();
+  const tk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, h * 0.5, 6), trunkMat);
+  tk.position.y = h * 0.25;
+  g.add(tk);
+  const cn = new THREE.Mesh(new THREE.ConeGeometry(h * 0.35, h * 0.8, 6), treeMat);
+  cn.position.y = h * 0.75;
+  g.add(cn);
+  g.position.set(x, 0, z);
+  scene.add(g);
+}
+const treePositions = [
+  [-8,  -6], [-10, -2], [-9,  4], [-7,  8],
+  [ 8,  -6], [ 10, -2], [ 9,  4], [ 7,  8],
+  [-4, -10], [ 0, -11], [ 4, -10], [-6,  11], [6, 11],
+];
+treePositions.forEach(([x, z]) => makeTree(x, z, 3.5 + Math.random() * 2));
+
+// ── PULSE RING POOL ────────────────────────────────────────────────────────────
+const RING_POOL = 8;
+const ringPool = [];
+for (let i = 0; i < RING_POOL; i++) {
+  const rg = new THREE.RingGeometry(0.1, 0.22, 64);
+  const rm = new THREE.MeshBasicMaterial({
+    color: 0x14f195, side: THREE.DoubleSide, transparent: true, opacity: 0.0
+  });
+  const mesh = new THREE.Mesh(rg, rm);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = 0.06;
+  mesh.visible = false;
+  scene.add(mesh);
+  ringPool.push({ mesh, r: 0, alive: false });
+}
+
+function spawnRing() {
+  const slot = ringPool.find(rp => !rp.alive);
+  if (!slot) return;
+  slot.r = 0.3;
+  slot.alive = true;
+  slot.mesh.visible = true;
+  slot.mesh.material.opacity = 0.9;
+}
+
+function updateRings(dt) {
+  for (const rp of ringPool) {
+    if (!rp.alive) continue;
+    rp.r += G.pulseSpeed * dt;
+    // rebuild ring geo? No — scale the mesh instead
+    const s = rp.r / 0.3;
+    rp.mesh.scale.set(s, s, 1);
+
+    // fade as it expands beyond target
+    const dist = Math.abs(rp.r - G.targetR);
+    const nearness = Math.max(0, 1 - dist / (G.targetR * 0.7));
+    rp.mesh.material.opacity = 0.15 + nearness * 0.75;
+
+    if (rp.r > G.targetR + G.tolerance * 2.5) {
+      rp.alive = false;
+      rp.mesh.visible = false;
+    }
+  }
+}
+
+// ── PARTICLE POOL ─────────────────────────────────────────────────────────────
+const PART_POOL = 60;
+const partPool = [];
+for (let i = 0; i < PART_POOL; i++) {
+  const pg = new THREE.SphereGeometry(0.1, 4, 3);
+  const pm = new THREE.MeshBasicMaterial({ color: 0x14f195, transparent: true, opacity: 1 });
+  const mesh = new THREE.Mesh(pg, pm);
+  mesh.visible = false;
+  scene.add(mesh);
+  partPool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0 });
+}
+
+function burst(x, z, color, count) {
+  for (let i = 0; i < count; i++) {
+    const p = partPool.find(pp => pp.life <= 0);
+    if (!p) break;
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 2 + Math.random() * 4;
+    p.vx = Math.cos(angle) * speed;
+    p.vy = 2 + Math.random() * 3;
+    p.vz = Math.sin(angle) * speed;
+    p.life = 0.6 + Math.random() * 0.4;
+    p.maxLife = p.life;
+    p.mesh.material.color.setHex(color);
+    p.mesh.position.set(x, 0.2, z);
+    p.mesh.visible = true;
+  }
+}
+
+function updateParticles(dt) {
+  for (const p of partPool) {
+    if (p.life <= 0) continue;
+    p.life -= dt;
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    p.vy -= 8 * dt; // gravity
+    const t = p.life / p.maxLife;
+    p.mesh.material.opacity = t;
+    const s = 0.4 + t * 0.8;
+    p.mesh.scale.setScalar(s);
+    if (p.life <= 0) p.mesh.visible = false;
+  }
+}
+
+// ── FLOATING SCORE NUMBERS ────────────────────────────────────────────────────
+// (use the #pop div)
+let popTimer = 0;
+function showPop(txt, color) {
+  const el = document.getElementById('pop');
+  el.textContent = txt;
+  el.style.color = color;
+  el.style.opacity = '1';
+  popTimer = 0.7;
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+const scoreEl = document.getElementById('score');
+const multEl  = document.getElementById('mult');
+const livesEl = document.getElementById('lives');
+const waveEl  = document.getElementById('wave');
+const flashEl = document.getElementById('flash');
+const hintEl  = document.getElementById('hint');
+let hintGone  = false;
+
+function updateHUD() {
+  scoreEl.textContent = String(G.score);
+  multEl.textContent  = G.combo > 1 ? `×${G.combo} COMBO` : '';
+  const h = '♦'.repeat(G.lives) + '◇'.repeat(Math.max(0, 3 - G.lives));
+  livesEl.textContent = h;
+  waveEl.textContent  = `PULSE ${G.level}`;
+}
+
+function flash(color, dur) {
+  flashEl.style.background = color;
+  flashEl.style.opacity = '0.35';
+  flashEl.style.transition = 'none';
+  setTimeout(() => {
+    flashEl.style.transition = `opacity ${dur}s`;
+    flashEl.style.opacity = '0';
+  }, 30);
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────────────
+function onTap() {
+  if (!G.running) return;
+  if (!hintGone) { hintEl.classList.add('gone'); hintGone = true; }
+
+  // find the ring closest to targetR
+  let best = null;
+  let bestDist = Infinity;
+  for (const rp of ringPool) {
+    if (!rp.alive) continue;
+    const dist = Math.abs(rp.r - G.targetR);
+    if (dist < bestDist) { bestDist = dist; best = rp; }
+  }
+
+  if (best && bestDist <= G.tolerance) {
+    // HIT
+    const perfect = bestDist <= G.tolerance * 0.4;
+    best.alive = false;
+    best.mesh.visible = false;
+
+    G.combo++;
+    if (G.combo > G.maxCombo) G.maxCombo = G.combo;
+
+    const base = perfect ? 150 : 80;
+    const pts = base * Math.max(1, G.combo);
+    G.score += pts;
+
+    // Juice
+    const c = perfect ? 0x14f195 : 0xffbb44;
+    burst(0, 0, c, perfect ? 18 : 10);
+    flash(perfect ? '#14f195' : '#ffbb44', perfect ? 0.25 : 0.35);
+    if (tg) tg.HapticFeedback.impactOccurred(perfect ? 'heavy' : 'medium');
+    showPop(perfect ? 'PERFECT!' : `+${pts}`, perfect ? '#14f195' : '#ffbb44');
+    G.shakeTime = perfect ? 0.18 : 0.10;
+    G.shakeAmt  = perfect ? 0.18 : 0.09;
+
+    // Crown glow pulse
+    crownMat.color.setHex(perfect ? 0x80ffcc : 0xffdd88);
+    setTimeout(() => crownMat.color.setHex(0x14f195), 180);
+
+    // Level up
+    G.level = 1 + Math.floor(G.score / 2000);
+    G.pulseSpeed = 0.55 + (G.level - 1) * 0.07;
+    G.pulseInterval = Math.max(0.9, 1.8 - (G.level - 1) * 0.08);
+
+  } else {
+    // MISS — combo break only (no life lost for miss, only for expired rings)
+    G.combo = 0;
+    if (tg) tg.HapticFeedback.notificationOccurred('warning');
+    flash('#ff4444', 0.5);
+    showPop('MISS', '#ff6655');
+  }
+
+  G.lastTap = performance.now();
+  updateHUD();
+}
+
+renderer.domElement.addEventListener('pointerdown', onTap);
+
+// ── GAME OVER ─────────────────────────────────────────────────────────────────
+function gameOver() {
+  G.running = false;
+  if (tg) tg.HapticFeedback.notificationOccurred('error');
+  flash('#ff2200', 0.8);
+
+  const go = document.getElementById('go');
+  const gs = document.getElementById('go-score');
+  gs.innerHTML = `SCORE: ${G.score}<br>BEST COMBO: ×${G.maxCombo}<br>LEVEL: ${G.level}`;
+  go.style.display = 'flex';
+}
+
+function loseLife() {
+  G.lives--;
+  G.combo = 0;
+  flash('#ff2200', 0.6);
+  if (tg) tg.HapticFeedback.notificationOccurred('error');
+  updateHUD();
+  if (G.lives <= 0) gameOver();
+}
+
+// ── START / RESTART ───────────────────────────────────────────────────────────
+function startGame() {
+  G.score = 0; G.combo = 0; G.maxCombo = 0;
+  G.lives = 3; G.level = 1;
+  G.pulseSpeed = 0.55; G.pulseInterval = 1.8;
+  G.nextPulse = 0.5; G.running = true;
+  hintGone = false;
+  hintEl.classList.remove('gone');
+
+  // clear rings
+  for (const rp of ringPool) { rp.alive = false; rp.mesh.visible = false; }
+  for (const p  of partPool)  { p.life = 0;       p.mesh.visible   = false; }
+
+  document.getElementById('go').style.display = 'none';
+  updateHUD();
+}
+
+document.getElementById('play').addEventListener('click', startGame);
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
+let prev = 0;
+function tick(ts) {
+  requestAnimationFrame(tick);
+  const dt = Math.min((ts - prev) / 1000, 0.05);
+  prev = ts;
+
+  if (!G.running) {
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // Spawn rings
+  G.nextPulse -= dt;
+  if (G.nextPulse <= 0) {
+    spawnRing();
+    G.nextPulse = G.pulseInterval;
+  }
+
+  // Check for rings that passed beyond window (miss = lose life)
+  for (const rp of ringPool) {
+    if (!rp.alive) continue;
+    if (rp.r > G.targetR + G.tolerance + 0.1) {
+      // Ring escaped without being tapped — penalty
+      rp.alive = false;
+      rp.mesh.visible = false;
+      loseLife();
+      if (!G.running) break;
+    }
+  }
+
+  if (!G.running) { renderer.render(scene, camera); return; }
+
+  updateRings(dt);
+  updateParticles(dt);
+
+  // Camera shake
+  if (G.shakeTime > 0) {
+    G.shakeTime -= dt;
+    const s = G.shakeAmt * (G.shakeTime / 0.2);
+    camera.position.x = (Math.random() - 0.5) * s;
+    camera.position.z = 12 + (Math.random() - 0.5) * s;
+  } else {
+    camera.position.x = 0;
+    camera.position.z = 12;
+  }
+
+  // Totem idle bob
+  totemGroup.position.y = Math.sin(ts * 0.001) * 0.06;
+  crown.rotation.y = ts * 0.0015;
+  orb.rotation.y = ts * 0.002;
+
+  // Target ring pulse
+  const tp = Math.sin(ts * 0.003) * 0.12 + 0.5;
+  targetRingMat.opacity = tp;
+
+  // Pop timer
+  if (popTimer > 0) {
+    popTimer -= dt;
+    document.getElementById('pop').style.opacity = Math.max(0, popTimer / 0.7).toString();
+  }
+
+  // Ambient rim light drift
+  rimLight.intensity = 1.5 + Math.sin(ts * 0.0013) * 0.5;
+
+  renderer.render(scene, camera);
+}
+
+requestAnimationFrame(tick);
+
+// ── RESIZE ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+</script>
+</body>
+</html>

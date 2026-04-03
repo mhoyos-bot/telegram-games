@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <title>PULSE</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+    #flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; z-index: 50; }
+    #score-wrap {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      text-align: center; pointer-events: none; z-index: 10;
+    }
+    #score {
+      color: #fff; font-family: monospace; font-size: 40px; font-weight: bold;
+      letter-spacing: 3px; text-shadow: 0 0 20px rgba(255,255,255,0.5);
+    }
+    #combo-text {
+      color: rgba(255,210,50,0.9); font-family: monospace; font-size: 14px;
+      letter-spacing: 3px; margin-top: 4px; min-height: 18px;
+      text-shadow: 0 0 12px rgba(255,210,50,0.8);
+    }
+    #hp-wrap {
+      position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 7px; pointer-events: none; z-index: 10;
+    }
+    .hp-pip {
+      width: 22px; height: 8px; border-radius: 3px;
+      transition: background 0.3s, opacity 0.3s, transform 0.15s;
+    }
+    #feedback {
+      position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+      font-family: monospace; font-size: 22px; font-weight: bold;
+      pointer-events: none; z-index: 15; opacity: 0; white-space: nowrap;
+      text-shadow: 0 0 18px currentColor;
+    }
+    #gameover {
+      position: fixed; inset: 0; display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.78); color: white;
+      font-family: monospace; text-align: center; z-index: 20;
+    }
+    #gameover h1 {
+      font-size: 34px; letter-spacing: 6px; color: #ff4444;
+      margin-bottom: 14px; text-shadow: 0 0 30px #ff4444;
+    }
+    #gameover .stat { font-size: 22px; margin: 6px 0; color: rgba(255,255,255,0.9); }
+    #gameover .hint {
+      color: rgba(255,255,255,0.4); font-size: 12px;
+      letter-spacing: 4px; margin-top: 22px;
+    }
+  </style>
+</head>
+<body>
+<div id="flash"></div>
+<div id="score-wrap">
+  <div id="score">0</div>
+  <div id="combo-text"></div>
+</div>
+<div id="hp-wrap"></div>
+<div id="feedback"></div>
+<div id="gameover">
+  <h1>GAME OVER</h1>
+  <div class="stat" id="go-score"></div>
+  <div class="stat" id="go-combo"></div>
+  <div class="hint">TAP TO RETRY</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ══════════════════════════════════════════════════════════════════════
+// PULSE — Lane 004 Rando's House
+// Mechanic: timing_tap | Feel: juice | Hook: instant_start
+// Atoms: ATOM_TIMING_WINDOW_TOLERANCE, ATOM_RING_PULSE_CUE,
+//        ATOM_ADDITIVE_COMBO_SCORE, ATOM_COLOR_ZONE_FEEDBACK
+// Build: pulse_001.html | Three.js r128, single-file, <500KB
+// ══════════════════════════════════════════════════════════════════════
+
+let W = window.innerWidth, H = window.innerHeight;
+
+// ── Renderer ──────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+document.body.appendChild(renderer.domElement);
+
+// ── Ortho scene — 10 units tall ───────────────────────────────────────
+const scene = new THREE.Scene();
+const CAM_H = 10;
+let aspect = W / H;
+
+const camera = new THREE.OrthographicCamera(
+  -CAM_H * aspect / 2,  CAM_H * aspect / 2,
+   CAM_H / 2,          -CAM_H / 2,
+  0.1, 100
+);
+camera.position.z = 10;
+
+// Background
+scene.add(Object.assign(
+  new THREE.Mesh(new THREE.PlaneGeometry(60, 60),
+    new THREE.MeshBasicMaterial({ color: 0x030307 })),
+  { position: new THREE.Vector3(0, 0, -1) }
+));
+
+// ── Ring geometry helper ──────────────────────────────────────────────
+const RING_SEGS = 80;
+
+function buildRingGeo(r) {
+  const pts = new Float32Array((RING_SEGS + 1) * 3);
+  for (let i = 0; i <= RING_SEGS; i++) {
+    const a = (i / RING_SEGS) * Math.PI * 2;
+    pts[i * 3]     = Math.cos(a) * r;
+    pts[i * 3 + 1] = Math.sin(a) * r;
+    pts[i * 3 + 2] = 0;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position',
+    new THREE.BufferAttribute(pts, 3).setUsage(THREE.DynamicDrawUsage));
+  return geo;
+}
+
+function setRingRadius(geo, r) {
+  const arr = geo.attributes.position.array;
+  for (let i = 0; i <= RING_SEGS; i++) {
+    const a = (i / RING_SEGS) * Math.PI * 2;
+    arr[i * 3]     = Math.cos(a) * r;
+    arr[i * 3 + 1] = Math.sin(a) * r;
+  }
+  geo.attributes.position.needsUpdate = true;
+}
+
+// ── Game constants ────────────────────────────────────────────────────
+const INNER_R    = 0.38;   // source ring radius
+const TARGET_R   = 2.0;    // target zone center
+const TARGET_W   = 0.30;   // tap tolerance half-width
+const PERFECT_W  = 0.10;   // perfect zone half-width
+const FADE_START = TARGET_R + TARGET_W + 0.05;
+const MAX_R      = 3.3;    // ring disappears
+
+// ── Static decorative rings ───────────────────────────────────────────
+function staticRing(r, hex, alpha) {
+  const mesh = new THREE.LineLoop(buildRingGeo(r),
+    new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: alpha }));
+  scene.add(mesh);
+  return mesh;
+}
+
+staticRing(TARGET_R + TARGET_W, 0x334488, 0.65);
+staticRing(TARGET_R - TARGET_W, 0x334488, 0.65);
+staticRing(TARGET_R,            0x223366, 0.35);
+
+// Source ring
+const srcGeo = buildRingGeo(INNER_R);
+const srcMat = new THREE.LineBasicMaterial({ color: 0x9999ff, transparent: true, opacity: 0.9 });
+scene.add(new THREE.LineLoop(srcGeo, srcMat));
+
+// ── Expanding ring pool ───────────────────────────────────────────────
+const RING_POOL = 14;
+const rings = [];
+
+for (let i = 0; i < RING_POOL; i++) {
+  const geo = buildRingGeo(0.001);
+  const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 });
+  const mesh = new THREE.LineLoop(geo, mat);
+  scene.add(mesh);
+  rings.push({ mesh, geo, mat, radius: 0, speed: 1, active: false });
+}
+
+function spawnRing(speed) {
+  for (const r of rings) {
+    if (r.active) continue;
+    r.radius  = INNER_R;
+    r.speed   = speed;
+    r.active  = true;
+    r.mat.opacity = 0.9;
+    r.mat.color.setHex(0xffffff);
+    setRingRadius(r.geo, INNER_R);
+    return;
+  }
+  // Force-free first slot
+  const r = rings[0];
+  r.radius = INNER_R; r.speed = speed; r.active = true;
+  r.mat.opacity = 0.9; r.mat.color.setHex(0xffffff);
+  setRingRadius(r.geo, INNER_R);
+}
+
+// ── Particle pool ─────────────────────────────────────────────────────
+const PPOOL = 700;
+const pX   = new Float32Array(PPOOL);
+const pY   = new Float32Array(PPOOL);
+const pVX  = new Float32Array(PPOOL);
+const pVY  = new Float32Array(PPOOL);
+const pBR  = new Float32Array(PPOOL);
+const pBG  = new Float32Array(PPOOL);
+const pBB  = new Float32Array(PPOOL);
+const pSz  = new Float32Array(PPOOL);
+const pBSz = new Float32Array(PPOOL);
+const pLif = new Float32Array(PPOOL);
+const pML  = new Float32Array(PPOOL);
+const pAct = new Uint8Array(PPOOL);
+let pNext  = 0;
+
+const partPos = new Float32Array(PPOOL * 3);
+const partCol = new Float32Array(PPOOL * 3);
+const partSz  = new Float32Array(PPOOL);
+
+const partGeo = new THREE.BufferGeometry();
+partGeo.setAttribute('position',
+  new THREE.BufferAttribute(partPos, 3).setUsage(THREE.DynamicDrawUsage));
+partGeo.setAttribute('pCol',
+  new THREE.BufferAttribute(partCol, 3).setUsage(THREE.DynamicDrawUsage));
+partGeo.setAttribute('pSz',
+  new THREE.BufferAttribute(partSz,  1).setUsage(THREE.DynamicDrawUsage));
+
+const partMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute vec3 pCol;
+    attribute float pSz;
+    varying vec3 vC;
+    void main() {
+      vC = pCol;
+      gl_PointSize = pSz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vC;
+    void main() {
+      float d = distance(gl_PointCoord, vec2(0.5)) * 2.0;
+      if (d > 1.0) discard;
+      float a = pow(1.0 - d, 2.2);
+      gl_FragColor = vec4(vC, a);
+    }
+  `,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  transparent: true
+});
+scene.add(new THREE.Points(partGeo, partMat));
+
+function hexToRgb(hex) {
+  return [
+    ((hex >> 16) & 0xff) / 255,
+    ((hex >>  8) & 0xff) / 255,
+    ( hex        & 0xff) / 255
+  ];
+}
+
+function burst(radius, hex, count) {
+  const [r, g, b] = hexToRgb(hex);
+  for (let k = 0; k < count; k++) {
+    const i   = (pNext++) % PPOOL;
+    const ang = (k / count) * Math.PI * 2 + Math.random() * 0.5;
+    const spd = 0.8 + Math.random() * 3.5;
+    pX[i]  = Math.cos(ang) * radius;
+    pY[i]  = Math.sin(ang) * radius;
+    pVX[i] = Math.cos(ang) * spd;
+    pVY[i] = Math.sin(ang) * spd;
+    pBR[i] = r; pBG[i] = g; pBB[i] = b;
+    const ml = 0.28 + Math.random() * 0.55;
+    pLif[i] = ml; pML[i] = ml;
+    const sz = (2.5 + Math.random() * 6) * window.devicePixelRatio;
+    pSz[i] = sz; pBSz[i] = sz;
+    pAct[i] = 1;
+  }
+}
+
+// ── UI ────────────────────────────────────────────────────────────────
+const MAX_HP   = 8;
+const scoreEl  = document.getElementById('score');
+const comboEl  = document.getElementById('combo-text');
+const hpWrap   = document.getElementById('hp-wrap');
+const fbEl     = document.getElementById('feedback');
+const goEl     = document.getElementById('gameover');
+const flashEl  = document.getElementById('flash');
+
+for (let i = 0; i < MAX_HP; i++) {
+  const d = document.createElement('div');
+  d.className = 'hp-pip'; d.id = 'pip' + i;
+  hpWrap.appendChild(d);
+}
+
+function updateHP() {
+  const ratio = hp / MAX_HP;
+  const col   = ratio > 0.5 ? '#44dd88' : ratio > 0.25 ? '#ffaa22' : '#ff3333';
+  for (let i = 0; i < MAX_HP; i++) {
+    const el = document.getElementById('pip' + i);
+    if (i < hp) {
+      el.style.background = col;
+      el.style.opacity    = '1';
+      el.style.transform  = 'scaleY(1)';
+    } else {
+      el.style.background = 'rgba(255,255,255,0.08)';
+      el.style.opacity    = '0.4';
+      el.style.transform  = 'scaleY(0.6)';
+    }
+  }
+}
+
+let _fbT = null;
+function showFeedback(txt, col) {
+  fbEl.style.transition = 'none';
+  fbEl.style.opacity    = '1';
+  fbEl.style.color      = col;
+  fbEl.textContent      = txt;
+  clearTimeout(_fbT);
+  _fbT = setTimeout(() => {
+    fbEl.style.transition = 'opacity 0.35s';
+    fbEl.style.opacity    = '0';
+  }, 240);
+}
+
+let _flT = null;
+function doFlash(col, alpha) {
+  flashEl.style.transition  = 'none';
+  flashEl.style.background  = col;
+  flashEl.style.opacity     = String(alpha);
+  clearTimeout(_flT);
+  _flT = setTimeout(() => {
+    flashEl.style.transition = 'opacity 0.22s';
+    flashEl.style.opacity    = '0';
+  }, 30);
+}
+
+// ── Game state ────────────────────────────────────────────────────────
+let hp, score, combo, maxCombo, elapsed, ringTimer, ringSpeed, ringInterval, alive;
+
+function resetGame() {
+  hp           = MAX_HP;
+  score        = 0;
+  combo        = 0;
+  maxCombo     = 0;
+  elapsed      = 0;
+  ringTimer    = 0;
+  ringSpeed    = 1.6;
+  ringInterval = 1.1;
+  alive        = true;
+
+  rings.forEach(r => { r.active = false; r.mat.opacity = 0; });
+  goEl.style.display = 'none';
+  scoreEl.textContent = '0';
+  comboEl.textContent = '';
+  updateHP();
+  spawnRing(ringSpeed);   // instant_start — first ring immediately
+}
+
+function onDie() {
+  alive = false;
+  rings.forEach(r => { r.active = false; r.mat.opacity = 0; });
+  document.getElementById('go-score').textContent = 'SCORE  ' + score;
+  document.getElementById('go-combo').textContent = 'COMBO  ' + maxCombo + '×';
+  goEl.style.display = 'flex';
+  doFlash('#ff0000', 0.35);
+  burst(0, 0xff3333, 60);
+}
+
+function onTap() {
+  if (!alive) { resetGame(); return; }
+
+  // Find nearest ring in tap window
+  let best = null, bestDist = Infinity;
+  for (const r of rings) {
+    if (!r.active) continue;
+    const d = Math.abs(r.radius - TARGET_R);
+    if (d < TARGET_W * 1.5 && d < bestDist) {
+      bestDist = d;
+      best = r;
+    }
+  }
+
+  if (best) {
+    // Hit
+    best.active = false;
+    best.mat.opacity = 0;
+
+    combo++;
+    if (combo > maxCombo) maxCombo = combo;
+
+    const isPerfect = bestDist <= PERFECT_W;
+    const pts       = isPerfect ? (2 + Math.min(combo, 10)) : 1;
+    score += pts;
+    scoreEl.textContent = score;
+    comboEl.textContent = combo > 1 ? combo + '× COMBO' : '';
+
+    if (isPerfect) {
+      showFeedback(combo > 4 ? 'PERFECT ×' + combo + '!' : 'PERFECT!', '#ffdd33');
+      burst(TARGET_R, 0xffdd33, 55);
+      doFlash('#ffee00', 0.15);
+      if (hp < MAX_HP) { hp++; updateHP(); }
+    } else {
+      showFeedback(combo > 4 ? 'GOOD ×' + combo : 'GOOD', '#88ff99');
+      burst(TARGET_R, 0x88ff99, 30);
+      doFlash('#88ff99', 0.08);
+    }
+  } else {
+    // Miss
+    combo = 0;
+    comboEl.textContent = '';
+    hp--;
+    updateHP();
+    showFeedback('MISS', '#ff4444');
+    doFlash('#ff0000', 0.18);
+    if (hp <= 0) onDie();
+  }
+}
+
+window.addEventListener('click',      onTap);
+window.addEventListener('touchstart', e => { e.preventDefault(); onTap(); }, { passive: false });
+window.addEventListener('keydown',    e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'Enter') onTap();
+});
+
+// ── Tick ──────────────────────────────────────────────────────────────
+let prev = performance.now();
+resetGame();  // instant_start
+
+function tick() {
+  requestAnimationFrame(tick);
+  const now = performance.now();
+  const dt  = Math.min((now - prev) / 1000, 0.05);
+  prev = now;
+
+  if (alive) {
+    elapsed      += dt;
+    ringSpeed     = 1.6 + elapsed * 0.048;
+    ringInterval  = Math.max(0.42, 1.1 - elapsed * 0.009);
+
+    ringTimer += dt;
+    if (ringTimer >= ringInterval) {
+      ringTimer = 0;
+      spawnRing(ringSpeed);
+    }
+
+    for (const r of rings) {
+      if (!r.active) continue;
+      r.radius += r.speed * dt;
+
+      if (r.radius > MAX_R) {
+        // Auto-miss
+        r.active = false; r.mat.opacity = 0;
+        combo = 0; comboEl.textContent = '';
+        hp--; updateHP();
+        showFeedback('MISS', '#ff4444');
+        doFlash('#ff0000', 0.12);
+        if (hp <= 0) onDie();
+        continue;
+      }
+
+      // Color feedback: white → green (good zone) → yellow (perfect zone)
+      const dist = Math.abs(r.radius - TARGET_R);
+      if (r.radius < FADE_START) {
+        if (dist <= PERFECT_W) {
+          r.mat.color.setHex(0xffee33);
+        } else if (dist <= TARGET_W) {
+          r.mat.color.setHex(0x88ff99);
+        } else {
+          r.mat.color.setHex(0xffffff);
+        }
+        r.mat.opacity = 0.9;
+      } else {
+        r.mat.color.setHex(0xffffff);
+        r.mat.opacity = 1 - (r.radius - FADE_START) / (MAX_R - FADE_START);
+      }
+      setRingRadius(r.geo, r.radius);
+    }
+
+    // Source ring pulse
+    srcMat.opacity = 0.35 + Math.abs(Math.sin(elapsed * 5.5)) * 0.55;
+  }
+
+  // Particle update
+  for (let i = 0; i < PPOOL; i++) {
+    if (!pAct[i]) {
+      partSz[i] = 0;
+      continue;
+    }
+    pLif[i] -= dt;
+    if (pLif[i] <= 0) {
+      pAct[i] = 0;
+      partSz[i] = 0;
+      partCol[i*3] = partCol[i*3+1] = partCol[i*3+2] = 0;
+      continue;
+    }
+    const t = pLif[i] / pML[i];
+    pVX[i] *= 0.93; pVY[i] *= 0.93;
+    pX[i] += pVX[i] * dt;
+    pY[i] += pVY[i] * dt;
+    partPos[i*3]   = pX[i];
+    partPos[i*3+1] = pY[i];
+    partPos[i*3+2] = 0;
+    partCol[i*3]   = pBR[i] * t;
+    partCol[i*3+1] = pBG[i] * t;
+    partCol[i*3+2] = pBB[i] * t;
+    partSz[i]      = pBSz[i] * Math.sqrt(t);
+  }
+
+  partGeo.attributes.position.needsUpdate = true;
+  partGeo.attributes.pCol.needsUpdate     = true;
+  partGeo.attributes.pSz.needsUpdate      = true;
+
+  renderer.render(scene, camera);
+}
+
+tick();
+
+// ── Resize ────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  W = window.innerWidth; H = window.innerHeight; aspect = W / H;
+  camera.left   = -CAM_H * aspect / 2;
+  camera.right  =  CAM_H * aspect / 2;
+  camera.top    =  CAM_H / 2;
+  camera.bottom = -CAM_H / 2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(W, H);
+});
+</script>
+</body>
+</html>

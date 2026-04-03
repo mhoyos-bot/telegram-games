@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>CUBE CATCH — Three.js Minimal Renderer Exp</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #020810; overflow: hidden; touch-action: none; font-family: monospace; }
+    #game-canvas { display: block; position: fixed; top: 0; left: 0; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; pointer-events: none;
+      padding: 14px 16px; display: flex; justify-content: space-between; align-items: center;
+    }
+    #score { color: #50c8ff; font: bold 22px monospace; letter-spacing: 0.06em;
+      text-shadow: 0 0 12px rgba(80,200,255,0.8); }
+    #lives { color: #ff7040; font: bold 18px monospace; }
+    #hint {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.35); font: 11px monospace; letter-spacing: 0.18em;
+      pointer-events: none; text-align: center;
+    }
+    #overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(2,4,16,0.94); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; color: white; text-align: center;
+    }
+    #overlay h1 { font: bold 28px monospace; color: #50c8ff; margin-bottom: 8px;
+      letter-spacing: 0.12em; text-shadow: 0 0 20px rgba(80,200,255,0.9); }
+    #overlay .sub { font: 13px monospace; color: rgba(255,255,255,0.45); margin-bottom: 10px; }
+    #overlay button {
+      background: transparent; border: 1px solid rgba(80,200,255,0.5);
+      color: #50c8ff; padding: 12px 34px; font: bold 14px monospace;
+      letter-spacing: 0.1em; cursor: pointer; margin-top: 14px; transition: all 0.15s;
+    }
+    #overlay button:hover { background: rgba(80,200,255,0.08); }
+    #overlay.hidden { display: none; }
+    #combo-pop {
+      position: fixed; top: 38%; left: 50%; transform: translate(-50%, -50%);
+      font: bold 30px monospace; color: #50c8ff; pointer-events: none;
+      opacity: 0; text-shadow: 0 0 18px rgba(80,200,255,1);
+      transition: opacity 0.1s;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="hud">
+    <div id="score">0</div>
+    <div id="lives">▲▲▲</div>
+  </div>
+  <div id="hint">TAP CUBES TO CATCH THEM</div>
+  <div id="combo-pop"></div>
+  <div id="overlay">
+    <h1>CUBE CATCH</h1>
+    <div class="sub">EXP 02 · THREE.JS MINIMAL · RENDERER TEST</div>
+    <div class="sub" style="font-size:11px; color:rgba(255,255,255,0.25);">3D cubes fall — tap to catch before they land</div>
+    <button id="start-btn">TAP TO START</button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.expand();
+      window.Telegram.WebApp.ready();
+    }
+
+    const scoreEl = document.getElementById('score');
+    const livesEl = document.getElementById('lives');
+    const overlay = document.getElementById('overlay');
+    const comboPop = document.getElementById('combo-pop');
+    const hintEl = document.getElementById('hint');
+
+    // THREE SETUP — minimal
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('game-canvas'), antialias: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x020810);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x020810, 18, 35);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 50);
+    camera.position.set(0, 2, 12);
+    camera.lookAt(0, 0, 0);
+
+    // Lighting — minimal: 1 ambient + 1 directional
+    scene.add(new THREE.AmbientLight(0x334466, 0.8));
+    const sun = new THREE.DirectionalLight(0x50c8ff, 1.2);
+    sun.position.set(5, 10, 5);
+    scene.add(sun);
+
+    // Floor plane
+    const floorGeo = new THREE.PlaneGeometry(20, 2);
+    const floorMat = new THREE.MeshLambertMaterial({ color: 0x0a1a2a });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -3;
+    scene.add(floor);
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // Game state
+    let score = 0, lives = 3, combo = 0, wave = 1;
+    let cubes = [], particles = [];
+    let running = false, frameCount = 0;
+    let spawnTimer = 0, spawnInterval = 100;
+
+    const CUBE_COLORS = [0x50c8ff, 0xff4466, 0xb4ff50, 0xffe840, 0xc880ff, 0xff9030];
+    const cubeGeos = [
+      new THREE.BoxGeometry(0.9, 0.9, 0.9),
+      new THREE.OctahedronGeometry(0.6),
+      new THREE.TetrahedronGeometry(0.7)
+    ];
+
+    function spawnCube() {
+      const color = CUBE_COLORS[Math.floor(Math.random() * CUBE_COLORS.length)];
+      const geo = cubeGeos[Math.floor(Math.random() * cubeGeos.length)];
+      const mat = new THREE.MeshLambertMaterial({ color });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set((Math.random() - 0.5) * 10, 8 + Math.random() * 4, (Math.random() - 0.5) * 2);
+      mesh.rotation.set(Math.random(), Math.random(), Math.random());
+      const speed = 0.04 + wave * 0.008 + Math.random() * 0.03;
+      cubes.push({ mesh, speed, color, alive: true, rotSpeed: (Math.random()-0.5)*0.08 });
+      scene.add(mesh);
+    }
+
+    function spawnBurst(pos, color) {
+      for (let i = 0; i < 8; i++) {
+        const geo = new THREE.SphereGeometry(0.08 + Math.random() * 0.08, 4, 4);
+        const mat = new THREE.MeshBasicMaterial({ color });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.copy(pos);
+        const v = new THREE.Vector3(
+          (Math.random()-0.5)*0.3, Math.random()*0.25, (Math.random()-0.5)*0.3
+        );
+        particles.push({ mesh, v, life: 1, decay: 0.04 + Math.random()*0.04 });
+        scene.add(mesh);
+      }
+    }
+
+    // Raycaster for tap
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function onTap(clientX, clientY) {
+      if (!running) return;
+      mouse.x = (clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const meshes = cubes.filter(c => c.alive).map(c => c.mesh);
+      const hits = raycaster.intersectObjects(meshes);
+      if (hits.length > 0) {
+        const hitMesh = hits[0].object;
+        const cube = cubes.find(c => c.mesh === hitMesh);
+        if (cube && cube.alive) {
+          cube.alive = false;
+          combo++;
+          const pts = combo >= 4 ? combo * 3 : combo;
+          score += pts;
+          scoreEl.textContent = score;
+          if (combo >= 3) {
+            comboPop.textContent = `x${combo}!`;
+            comboPop.style.opacity = '1';
+            setTimeout(() => { comboPop.style.opacity = '0'; }, 400);
+          }
+          spawnBurst(cube.mesh.position, cube.color);
+          scene.remove(cube.mesh);
+        }
+      } else {
+        combo = 0;
+      }
+    }
+
+    document.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      onTap(t.clientX, t.clientY);
+    }, { passive: false });
+    document.addEventListener('mousedown', (e) => onTap(e.clientX, e.clientY));
+
+    function updateLives() {
+      livesEl.textContent = '▲'.repeat(lives) + '△'.repeat(Math.max(0, 3 - lives));
+    }
+
+    function gameOver() {
+      running = false;
+      overlay.innerHTML = `
+        <h1 style="color:#ff4466">GAME OVER</h1>
+        <div class="sub">SCORE: ${score}</div>
+        <div class="sub" style="font-size:11px; color:rgba(255,255,255,0.25);">THREE.JS MINIMAL · ${frameCount} frames</div>
+        <button onclick="startGame()">PLAY AGAIN</button>
+      `;
+      overlay.classList.remove('hidden');
+    }
+
+    function startGame() {
+      // Clean up
+      cubes.forEach(c => scene.remove(c.mesh));
+      particles.forEach(p => scene.remove(p.mesh));
+      cubes = []; particles = [];
+      score = 0; lives = 3; combo = 0; wave = 1; frameCount = 0;
+      spawnTimer = 0; spawnInterval = 100;
+      scoreEl.textContent = '0';
+      updateLives();
+      overlay.classList.add('hidden');
+      running = true;
+    }
+
+    document.getElementById('start-btn').addEventListener('click', startGame);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (!running) { renderer.render(scene, camera); return; }
+      frameCount++;
+
+      // Spawn
+      spawnTimer++;
+      if (spawnTimer >= spawnInterval) {
+        spawnTimer = 0;
+        const n = 1 + Math.floor(wave / 3);
+        for (let i = 0; i < n; i++) spawnCube();
+        spawnInterval = Math.max(40, 100 - wave * 6);
+      }
+
+      // Wave
+      if (score > wave * 20) {
+        wave++;
+        hintEl.textContent = `WAVE ${wave}`;
+        setTimeout(() => { hintEl.textContent = 'TAP CUBES TO CATCH THEM'; }, 1200);
+      }
+
+      // Update cubes
+      for (let i = cubes.length - 1; i >= 0; i--) {
+        const c = cubes[i];
+        if (!c.alive) { cubes.splice(i, 1); continue; }
+        c.mesh.position.y -= c.speed;
+        c.mesh.rotation.x += c.rotSpeed;
+        c.mesh.rotation.z += c.rotSpeed * 0.7;
+        if (c.mesh.position.y < -3.5) {
+          scene.remove(c.mesh);
+          cubes.splice(i, 1);
+          lives--;
+          combo = 0;
+          updateLives();
+          if (lives <= 0) { gameOver(); return; }
+        }
+      }
+
+      // Update particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life -= p.decay;
+        if (p.life <= 0) { scene.remove(p.mesh); particles.splice(i, 1); continue; }
+        p.mesh.position.addScaledVector(p.v, 1);
+        p.v.y -= 0.01;
+        p.mesh.material.opacity = p.life;
+        p.mesh.scale.setScalar(p.life);
+      }
+
+      // Camera subtle sway
+      camera.position.x = Math.sin(Date.now() * 0.0003) * 0.3;
+
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>

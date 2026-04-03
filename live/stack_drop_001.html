@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>STACK DROP</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; touch-action:none; }
+canvas { display:block; }
+#score {
+  position:fixed; top:16px; left:50%; transform:translateX(-50%);
+  font-family:'Courier New',monospace; font-size:38px; font-weight:bold;
+  color:#0ff; text-shadow:0 0 14px #0ff,0 0 28px #0cf;
+  letter-spacing:6px; pointer-events:none;
+}
+#level-badge {
+  position:fixed; top:18px; right:18px;
+  font-family:'Courier New',monospace; font-size:12px; color:#336;
+  letter-spacing:3px; pointer-events:none;
+}
+#best-badge {
+  position:fixed; top:18px; left:18px;
+  font-family:'Courier New',monospace; font-size:12px; color:#336;
+  letter-spacing:3px; pointer-events:none;
+}
+#perfect-msg {
+  position:fixed; top:38%; left:50%; transform:translate(-50%,-50%);
+  font-family:'Courier New',monospace; font-size:26px; font-weight:bold;
+  color:#ff0; text-shadow:0 0 16px #ff0,0 0 32px #fa0;
+  letter-spacing:5px; pointer-events:none; opacity:0;
+  transition:opacity 0.12s; white-space:nowrap;
+}
+#hint-tap {
+  position:fixed; bottom:28px; left:50%; transform:translateX(-50%);
+  font-family:'Courier New',monospace; font-size:11px; color:#334;
+  letter-spacing:4px; pointer-events:none;
+}
+#overlay {
+  position:fixed; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  background:rgba(2,0,12,0.9); transition:opacity 0.35s;
+}
+#overlay h1 {
+  font-family:'Courier New',monospace; font-size:46px; font-weight:bold;
+  color:#0ff; text-shadow:0 0 22px #0ff,0 0 44px #0cf;
+  letter-spacing:8px; text-align:center; line-height:1.1; margin-bottom:12px;
+}
+#overlay .sub {
+  font-family:'Courier New',monospace; font-size:13px; color:#335;
+  letter-spacing:3px; margin-bottom:32px;
+}
+#overlay .final {
+  font-family:'Courier New',monospace; font-size:17px; color:#ff0;
+  text-shadow:0 0 10px #ff0; letter-spacing:4px; margin-bottom:28px;
+  display:none;
+}
+#overlay .tap-hint {
+  font-family:'Courier New',monospace; font-size:17px; color:#fff;
+  letter-spacing:4px; animation:blink 1.15s ease-in-out infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+</style>
+</head>
+<body>
+<div id="score">0</div>
+<div id="level-badge">LVL 1</div>
+<div id="best-badge">BEST 0</div>
+<div id="perfect-msg">PERFECT!</div>
+<div id="hint-tap">TAP TO DROP</div>
+<div id="overlay">
+  <h1>STACK<br>DROP</h1>
+  <div class="sub">TAP TO STACK · DON'T MISS</div>
+  <div class="final" id="final-line"></div>
+  <div class="tap-hint">[ TAP TO START ]</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ── RENDERER ─────────────────────────────────────────────────────────────────
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x02000c);
+scene.fog = new THREE.Fog(0x02000c, 35, 70);
+
+// ── CAMERA ────────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(42, W / H, 0.1, 200);
+const CAM_R = 18;
+camera.position.set(CAM_R, 12, CAM_R);
+camera.lookAt(0, 0, 0);
+let camLookY = 0, camPosY = 12;
+
+// ── LIGHTS ────────────────────────────────────────────────────────────────────
+const ambient = new THREE.AmbientLight(0x2233aa, 1.8);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+dirLight.position.set(10, 20, 8);
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0x004488, 0.4);
+fillLight.position.set(-8, 5, -10);
+scene.add(fillLight);
+
+// ── CONSTANTS ─────────────────────────────────────────────────────────────────
+const BLK_H = 0.38;
+const INIT_SIZE = 3.0;
+const MIN_SIZE = 0.35;
+const PERFECT_THRESH = 0.1;
+const BASE_SPD = 4.2;
+const MAX_SPD = 13;
+const LEVEL_COLORS = [
+  0x00ccff, 0x00ffdd, 0x00ff88, 0x44ff00,
+  0xaaff00, 0xffee00, 0xff8800, 0xff4400,
+  0xff0055, 0xff00cc, 0x8800ff, 0x0055ff
+];
+
+// ── GAME STATE ────────────────────────────────────────────────────────────────
+let state = 'menu';
+let stack = [];         // { mesh, x, z, w, d, y }
+let moveMesh = null;
+let mblk = {};          // moving block data
+let fallers = [];       // { mesh, vy, vx, vz }
+let level = 0;
+let score = 0;
+let best = +localStorage.getItem('sd_best') || 0;
+let perfectStreak = 0;
+let speed = BASE_SPD;
+let perfectAlpha = 0;
+let shakeMag = 0;
+let shakeX = 0, shakeY = 0;
+let landSquish = [];    // { mesh, timer }
+
+const scoreEl     = document.getElementById('score');
+const levelEl     = document.getElementById('level-badge');
+const bestEl      = document.getElementById('best-badge');
+const perfectEl   = document.getElementById('perfect-msg');
+const overlayEl   = document.getElementById('overlay');
+const finalEl     = document.getElementById('final-line');
+bestEl.textContent = 'BEST ' + best;
+
+// ── BLOCK CREATION ────────────────────────────────────────────────────────────
+function mkBlock(w, h, d, color) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mat = new THREE.MeshLambertMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 })
+  );
+  mesh.add(edges);
+  return mesh;
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+function initGame() {
+  // Remove old block meshes
+  stack.forEach(b => scene.remove(b.mesh));
+  fallers.forEach(f => scene.remove(f.mesh));
+  if (moveMesh) scene.remove(moveMesh);
+  stack = []; fallers = []; landSquish = [];
+  moveMesh = null;
+
+  // Re-add lights (scene.clear removes them on restart path, but we only remove meshes)
+  level = 0; score = 0; perfectStreak = 0;
+  speed = BASE_SPD; shakeMag = 0;
+  camLookY = 0; camPosY = 12;
+
+  // Base platform
+  const baseMesh = mkBlock(INIT_SIZE, BLK_H, INIT_SIZE, 0x001133);
+  baseMesh.position.set(0, 0, 0);
+  scene.add(baseMesh);
+  stack.push({ mesh: baseMesh, x: 0, z: 0, w: INIT_SIZE, d: INIT_SIZE, y: 0 });
+
+  spawnMover();
+}
+
+// ── SPAWN MOVER ───────────────────────────────────────────────────────────────
+function spawnMover() {
+  const prev = stack[stack.length - 1];
+  const newY  = prev.y + BLK_H;
+  const axis  = level % 2 === 0 ? 'x' : 'z';
+  const color = LEVEL_COLORS[level % LEVEL_COLORS.length];
+
+  mblk = { x: prev.x, z: prev.z, w: prev.w, d: prev.d, y: newY, axis, dir: 1, color };
+
+  const side = axis === 'x' ? prev.w : prev.d;
+  const offset = side / 2 + 6;
+  if (axis === 'x') mblk.x = prev.x + offset;
+  else               mblk.z = prev.z + offset;
+
+  if (moveMesh) scene.remove(moveMesh);
+  moveMesh = mkBlock(mblk.w, BLK_H, mblk.d, color);
+  moveMesh.position.set(mblk.x, newY, mblk.z);
+  scene.add(moveMesh);
+
+  speed = Math.min(BASE_SPD + level * 0.28, MAX_SPD);
+}
+
+// ── DROP ──────────────────────────────────────────────────────────────────────
+function drop() {
+  const prev = stack[stack.length - 1];
+  let kept, overhangW, overhangD, overhangX, overhangZ;
+
+  if (mblk.axis === 'x') {
+    const pL = prev.x - prev.w / 2, pR = prev.x + prev.w / 2;
+    const mL = mblk.x - mblk.w / 2, mR = mblk.x + mblk.w / 2;
+    kept = Math.min(pR, mR) - Math.max(pL, mL);
+    if (kept <= 0)        { gameOver(); return; }
+    if (mblk.w - kept < PERFECT_THRESH) {
+      mblk.x = prev.x; mblk.w = prev.w;
+      onPerfect();
+    } else {
+      overhangW  = mblk.w - kept;
+      const newCx = (Math.max(pL, mL) + Math.min(pR, mR)) / 2;
+      const ohCx  = mL < pL ? mL + overhangW / 2 : mR - overhangW / 2;
+      spawnFaller(overhangW, BLK_H, mblk.d, ohCx, mblk.y, mblk.z, mblk.color);
+      mblk.x = newCx; mblk.w = kept;
+    }
+  } else {
+    const pF = prev.z - prev.d / 2, pB = prev.z + prev.d / 2;
+    const mF = mblk.z - mblk.d / 2, mB = mblk.z + mblk.d / 2;
+    kept = Math.min(pB, mB) - Math.max(pF, mF);
+    if (kept <= 0)        { gameOver(); return; }
+    if (mblk.d - kept < PERFECT_THRESH) {
+      mblk.z = prev.z; mblk.d = prev.d;
+      onPerfect();
+    } else {
+      overhangD  = mblk.d - kept;
+      const newCz = (Math.max(pF, mF) + Math.min(pB, mB)) / 2;
+      const ohCz  = mF < pF ? mF + overhangD / 2 : mB - overhangD / 2;
+      spawnFaller(mblk.w, BLK_H, overhangD, mblk.x, mblk.y, ohCz, mblk.color);
+      mblk.z = newCz; mblk.d = kept;
+    }
+  }
+
+  // Too narrow = death threshold
+  if (mblk.w < MIN_SIZE || mblk.d < MIN_SIZE) { gameOver(); return; }
+
+  // Snap mesh to final dimensions
+  scene.remove(moveMesh);
+  moveMesh = mkBlock(mblk.w, BLK_H, mblk.d, mblk.color);
+  moveMesh.position.set(mblk.x, mblk.y, mblk.z);
+  moveMesh.scale.set(1.06, 0.72, 1.06);
+  scene.add(moveMesh);
+  landSquish.push({ mesh: moveMesh, timer: 1 });
+
+  stack.push({ mesh: moveMesh, x: mblk.x, z: mblk.z, w: mblk.w, d: mblk.d, y: mblk.y });
+  moveMesh = null;
+
+  shake(0.14);
+  level++;
+  score = level + Math.floor(perfectStreak * 0.5);
+  scoreEl.textContent = level;
+  levelEl.textContent = 'LVL ' + (level + 1);
+
+  // Trim stack memory beyond 80 blocks
+  if (stack.length > 80) { const old = stack.shift(); scene.remove(old.mesh); }
+
+  spawnMover();
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+function spawnFaller(w, h, d, x, y, z, color) {
+  const m = mkBlock(w, h, d, color);
+  m.position.set(x, y, z);
+  scene.add(m);
+  fallers.push({
+    mesh: m, vy: 0,
+    vx: (Math.random() - 0.5) * 1.5,
+    vz: (Math.random() - 0.5) * 1.5
+  });
+}
+
+function onPerfect() {
+  perfectStreak++;
+  perfectEl.textContent = perfectStreak > 1 ? '×' + perfectStreak + ' PERFECT!' : 'PERFECT!';
+  perfectAlpha = 1.0;
+  shake(0.07);
+}
+
+function shake(mag) { shakeMag = Math.max(shakeMag, mag); }
+
+// ── GAME OVER ─────────────────────────────────────────────────────────────────
+function gameOver() {
+  state = 'dead';
+  if (moveMesh) {
+    for (let i = 0; i < 8; i++) {
+      spawnFaller(
+        mblk.w * 0.4, BLK_H * 0.5, mblk.d * 0.4,
+        mblk.x + (Math.random() - 0.5) * mblk.w,
+        mblk.y,
+        mblk.z + (Math.random() - 0.5) * mblk.d,
+        mblk.color
+      );
+    }
+    scene.remove(moveMesh); moveMesh = null;
+  }
+  shake(0.45);
+
+  const isNew = level > best;
+  if (isNew) { best = level; localStorage.setItem('sd_best', best); bestEl.textContent = 'BEST ' + best; }
+
+  setTimeout(() => {
+    overlayEl.querySelector('h1').innerHTML = 'GAME<br>OVER';
+    overlayEl.querySelector('.sub').textContent = isNew ? '★ NEW BEST ★' : 'KEEP STACKING';
+    finalEl.textContent = 'HEIGHT: ' + level + '  |  SCORE: ' + score;
+    finalEl.style.display = 'block';
+    overlayEl.querySelector('.tap-hint').textContent = '[ TAP TO RETRY ]';
+    overlayEl.style.opacity = '0';
+    overlayEl.style.display = 'flex';
+    setTimeout(() => { overlayEl.style.opacity = '1'; }, 40);
+  }, 900);
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────────────
+function handleInput() {
+  if (state === 'menu' || state === 'dead') {
+    startGame();
+  } else if (state === 'playing') {
+    drop();
+  }
+}
+document.addEventListener('pointerdown', handleInput);
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowDown' || e.code === 'ArrowUp') handleInput();
+});
+
+// ── START ─────────────────────────────────────────────────────────────────────
+function startGame() {
+  state = 'playing';
+  overlayEl.style.opacity = '0';
+  setTimeout(() => { overlayEl.style.display = 'none'; }, 350);
+  scoreEl.textContent = '0';
+  levelEl.textContent = 'LVL 1';
+  finalEl.style.display = 'none';
+  initGame();
+}
+
+// ── CLOCK & LOOP ──────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+let bobT = 0;
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (state === 'playing') {
+    bobT += dt;
+
+    // Move block
+    if (mblk.axis === 'x') {
+      mblk.x += speed * mblk.dir * dt;
+      if (moveMesh) moveMesh.position.x = mblk.x;
+      const lim = 9 + mblk.w / 2;
+      if (mblk.x > lim || mblk.x < -lim) mblk.dir *= -1;
+    } else {
+      mblk.z += speed * mblk.dir * dt;
+      if (moveMesh) moveMesh.position.z = mblk.z;
+      const lim = 9 + mblk.d / 2;
+      if (mblk.z > lim || mblk.z < -lim) mblk.dir *= -1;
+    }
+
+    // Floating bob on moving block
+    if (moveMesh) moveMesh.position.y = mblk.y + Math.sin(bobT * 3.5) * 0.06 + 0.06;
+  }
+
+  // Falling offcuts
+  fallers = fallers.filter(f => {
+    f.vy -= 12 * dt;
+    f.mesh.position.y += f.vy * dt;
+    f.mesh.position.x += f.vx * dt;
+    f.mesh.position.z += f.vz * dt;
+    f.mesh.rotation.x += 1.8 * dt;
+    f.mesh.rotation.z += 1.2 * dt;
+    if (f.mesh.position.y < -25) { scene.remove(f.mesh); return false; }
+    return true;
+  });
+
+  // Land squish animation
+  landSquish = landSquish.filter(ls => {
+    ls.timer -= dt * 8;
+    const t = Math.max(0, ls.timer);
+    ls.mesh.scale.set(1 + t * 0.06, 1 - t * 0.28 + 1e-4, 1 + t * 0.06);
+    return t > 0;
+  });
+
+  // Perfect flash decay
+  if (perfectAlpha > 0) {
+    perfectAlpha -= dt * 1.8;
+    perfectEl.style.opacity = Math.max(0, perfectAlpha).toString();
+  }
+
+  // Camera tracks stack top
+  const topY = stack.length ? stack[stack.length - 1].y : 0;
+  const tgtCamY = topY + 13;
+  const tgtLookY = topY;
+  camPosY  += (tgtCamY  - camPosY)  * 0.055;
+  camLookY += (tgtLookY - camLookY) * 0.055;
+
+  // Shake
+  if (shakeMag > 0.005) {
+    shakeX = (Math.random() - 0.5) * shakeMag;
+    shakeY = (Math.random() - 0.5) * shakeMag * 0.5;
+    shakeMag *= 0.78;
+  } else { shakeX = 0; shakeY = 0; shakeMag = 0; }
+
+  camera.position.set(CAM_R + shakeX, camPosY + shakeY, CAM_R);
+  camera.lookAt(shakeX * 0.3, camLookY, 0);
+
+  renderer.render(scene, camera);
+}
+
+tick();
+</script>
+</body>
+</html>

@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>HYPERBLAST</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{width:100%;height:100%;background:#080012;overflow:hidden;touch-action:none}
+canvas{display:block}
+#hud{position:fixed;top:0;left:0;right:0;padding:max(env(safe-area-inset-top),8px) 14px 6px;display:flex;align-items:center;justify-content:space-between;pointer-events:none}
+#sc{color:#fff;font:bold 22px/1 monospace;text-shadow:0 0 10px #f80}
+#lv{color:#c8f;font:bold 15px/1 monospace}
+#cm{color:#ff0;font:bold 20px/1 monospace;text-shadow:0 0 12px #ff0;min-width:52px;text-align:center}
+#hp{display:flex;gap:3px;font-size:17px;line-height:1}
+#xpb{position:fixed;bottom:max(env(safe-area-inset-bottom),0px);left:0;right:0;height:5px;background:#1a0030}
+#xpf{height:100%;background:linear-gradient(90deg,#c8f,#f80);width:0%;transition:width .12s}
+#upg{position:fixed;inset:0;background:rgba(5,0,16,.93);display:none;flex-direction:column;align-items:center;justify-content:center;gap:11px;z-index:50;padding:20px}
+#upg h2{color:#ff0;font:bold 26px monospace;text-shadow:0 0 14px #ff0;margin-bottom:6px}
+.ub{background:rgba(10,0,28,.95);border:2px solid #c8f;color:#fff;font:bold 14px/1.6 monospace;padding:13px 18px;border-radius:10px;cursor:pointer;width:100%;max-width:310px;text-align:left}
+.ub .ui{color:#f80;font-size:19px;margin-right:6px}
+.ub .ud{display:block;color:#999;font-size:11px;font-weight:normal;margin-top:2px}
+.ub:active{transform:scale(.97);border-color:#f80;background:rgba(40,0,80,.95)}
+#go{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:100}
+#go h1{color:#f44;font:bold 42px monospace;text-shadow:0 0 22px #f44;letter-spacing:4px}
+#goSc{color:#fff;font:bold 20px monospace}
+#goLv{color:#c8f;font:15px monospace;margin-top:-6px}
+#rb{background:rgba(10,0,28,.95);border:2px solid #f80;color:#fff;font:bold 17px monospace;padding:15px 44px;border-radius:10px;cursor:pointer;letter-spacing:2px}
+#rb:active{transform:scale(.96)}
+#hint{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);color:rgba(255,200,100,.6);font:13px monospace;pointer-events:none;transition:opacity 1s}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div id="sc">0</div>
+  <div id="lv">LVL 1</div>
+  <div id="cm"></div>
+  <div id="hp"></div>
+</div>
+<div id="xpb"><div id="xpf"></div></div>
+<div id="upg">
+  <h2>⚡ LEVEL UP!</h2>
+  <div id="uc" style="display:flex;flex-direction:column;gap:10px;width:100%;align-items:center"></div>
+</div>
+<div id="go">
+  <h1>BLASTED</h1>
+  <div id="goSc"></div>
+  <div id="goLv"></div>
+  <button id="rb">PLAY AGAIN</button>
+</div>
+<div id="hint">TAP to jump · Swipe ↓ to slam</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+// ── Telegram ──────────────────────────────────────────────────────────────────
+const _tg = window.Telegram && window.Telegram.WebApp;
+if (_tg) { _tg.ready(); _tg.expand(); }
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+const W = window.innerWidth, H = window.innerHeight;
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x080012);
+
+const scene = new THREE.Scene();
+
+// Orthographic side-scrolling camera
+const ASP = W / H;
+const VH = 13;
+const VW = VH * ASP;
+const cam = new THREE.OrthographicCamera(-VW / 2, VW / 2, VH / 2, -VH / 2, -10, 100);
+cam.position.z = 10;
+
+scene.add(new THREE.AmbientLight(0x553388, 1.4));
+const sun = new THREE.DirectionalLight(0xffcc88, 0.8);
+sun.position.set(4, 8, 6);
+scene.add(sun);
+
+// ── World Constants ───────────────────────────────────────────────────────────
+const GY   = -4.5;          // ground Y
+const PX   = -VW * 0.34;    // player fixed X (left third)
+const SPX  = VW * 0.5 + 2;  // enemy spawn X (right edge)
+const GRAV = -22;
+const JUMP_VEL = 10.5;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function bmat(color, transparent, opacity) {
+  return new THREE.MeshBasicMaterial({ color: color, transparent: !!transparent, opacity: opacity !== undefined ? opacity : 1 });
+}
+function lmat(color) {
+  return new THREE.MeshLambertMaterial({ color: color });
+}
+
+// ── Shared Geometry ───────────────────────────────────────────────────────────
+const GEM_GEO = new THREE.OctahedronGeometry(0.21, 0);
+
+// ── Game State ────────────────────────────────────────────────────────────────
+function mkState() {
+  return {
+    score: 0, combo: 1, comboKills: 0, comboDecay: 0,
+    hp: 3, maxHp: 3,
+    xp: 0, xpNext: 12, level: 1,
+    fireRate: 0.30, fireCool: 0,
+    bulletCount: 1, piercing: false, gemRadius: 3.2,
+    speedBonus: 0,
+    worldTime: 0, shake: 0,
+    paused: false, dead: false
+  };
+}
+let G = mkState();
+
+// ── Player Object ─────────────────────────────────────────────────────────────
+let P = {
+  mesh: null, glow: null,
+  y: GY, vy: 0,
+  grounded: true, jumps: 0,
+  iframes: 0,
+  trail: [], trailMeshes: []
+};
+
+// ── Arrays ────────────────────────────────────────────────────────────────────
+let bullets = [], enemies = [], gems = [], particles = [], bgLines = [];
+
+// ── Wave State ────────────────────────────────────────────────────────────────
+let waveTimer = 1.4;
+let waveInterval = 1.9;
+
+// ── Upgrade Definitions ───────────────────────────────────────────────────────
+const UPG_DEFS = [
+  { id: 'rapid',  icon: '⚡', name: 'RAPID FIRE',  desc: 'Fire rate +50%' },
+  { id: 'twin',   icon: '🔫', name: 'TWIN SHOT',   desc: 'Fire 2 bullets at once' },
+  { id: 'triple', icon: '💥', name: 'TRIPLE SHOT', desc: '3-way spread burst' },
+  { id: 'pierce', icon: '🗡', name: 'PIERCE',      desc: 'Bullets pass through enemies' },
+  { id: 'speed',  icon: '🚀', name: 'OVERDRIVE',   desc: 'World +25% speed & score' },
+  { id: 'magnet', icon: '🧲', name: 'MAGNET',      desc: 'Gem pull range ×2' },
+  { id: 'mend',   icon: '❤', name: 'REPAIR',      desc: 'Restore 1 HP' },
+  { id: 'surge',  icon: '☄', name: 'SURGE MODE',  desc: 'Combo stays 3x longer' }
+];
+let upgPool = [...UPG_DEFS];
+
+// ── Enemy Type Configs ────────────────────────────────────────────────────────
+const ETYPES = {
+  walker:   { color: 0xff2244, w: 0.75, h: 0.75, hp: 1, spd: 3.5,  fly: false, jmp: false },
+  sprinter: { color: 0xff6600, w: 0.60, h: 0.60, hp: 1, spd: 6.5,  fly: false, jmp: false },
+  flier:    { color: 0xcc22ff, w: 0.68, h: 0.50, hp: 1, spd: 4.8,  fly: true,  jmp: false },
+  tank:     { color: 0xff8800, w: 1.10, h: 1.10, hp: 3, spd: 1.8,  fly: false, jmp: false },
+  jumper:   { color: 0x44ff22, w: 0.68, h: 0.68, hp: 1, spd: 3.8,  fly: false, jmp: true  },
+  shooter:  { color: 0xff2288, w: 0.68, h: 0.68, hp: 2, spd: 1.2,  fly: true,  jmp: false }
+};
+
+// ── Build Scene ───────────────────────────────────────────────────────────────
+function buildGround() {
+  const gm = new THREE.Mesh(new THREE.BoxGeometry(VW * 4, 2, 1), lmat(0x1a0040));
+  gm.position.set(0, GY - 1, 0);
+  scene.add(gm);
+  const gl = new THREE.Mesh(new THREE.BoxGeometry(VW * 4, 0.09, 0.6), bmat(0x8800ff));
+  gl.position.set(0, GY + 0.04, 0.31);
+  scene.add(gl);
+  // Static BG pillars
+  for (let i = 0; i < 7; i++) {
+    const h = 1.2 + Math.random() * 4.5;
+    const bx = (i / 6 - 0.5) * VW * 0.9;
+    const pm = new THREE.Mesh(new THREE.BoxGeometry(0.35, h, 0.3), bmat(0x220044, true, 0.4 + Math.random() * 0.35));
+    pm.position.set(bx, GY + h / 2, -2.5);
+    scene.add(pm);
+  }
+}
+
+function buildBgLines() {
+  bgLines = [];
+  for (let i = 0; i < 26; i++) {
+    const len = 0.7 + Math.random() * 3.2;
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(len, 0.05, 0.1),
+      bmat(0x6600cc, true, 0.1 + Math.random() * 0.28)
+    );
+    m.position.set(
+      (Math.random() - 0.5) * VW,
+      GY + 0.5 + Math.random() * (VH - 2),
+      -1.5
+    );
+    scene.add(m);
+    bgLines.push({ m: m, spd: 1.0 + Math.random() * 4.5 });
+  }
+}
+
+// ── Player Init / Reset ───────────────────────────────────────────────────────
+function initPlayer() {
+  if (P.mesh) scene.remove(P.mesh);
+  if (P.glow) scene.remove(P.glow);
+  P.trailMeshes.forEach(function(t) { scene.remove(t); });
+  P.y = GY; P.vy = 0; P.grounded = true; P.jumps = 0; P.iframes = 0;
+  P.trail = []; P.trailMeshes = [];
+
+  P.mesh = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.76, 0.55), bmat(0xff8800).clone());
+  P.mesh.position.set(PX, GY + 0.4, 0.2);
+  scene.add(P.mesh);
+
+  P.glow = new THREE.Mesh(new THREE.BoxGeometry(1.05, 1.1, 0.1), bmat(0xff4400, true, 0.28));
+  P.glow.position.set(PX, GY + 0.4, 0.15);
+  scene.add(P.glow);
+
+  for (let i = 0; i < 9; i++) {
+    const s = 0.58 - i * 0.048;
+    const tm = new THREE.Mesh(
+      new THREE.BoxGeometry(s, s, 0.05),
+      bmat(0xff8800, true, 0)
+    );
+    scene.add(tm);
+    P.trailMeshes.push(tm);
+  }
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+let touchStartY = 0;
+let touchStartT = 0;
+
+document.addEventListener('touchstart', function(e) {
+  if (G.paused || G.dead) return;
+  touchStartY = e.touches[0].clientY;
+  touchStartT = Date.now();
+  doJump();
+}, { passive: true });
+
+document.addEventListener('touchend', function(e) {
+  if (G.paused || G.dead) return;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+  const dt = Date.now() - touchStartT;
+  if (dy > 65 && dt < 350 && !P.grounded) { doSlam(); }
+}, { passive: true });
+
+// Desktop fallback
+document.addEventListener('mousedown', function(e) {
+  if (G.paused || G.dead) return;
+  doJump();
+});
+
+function doJump() {
+  if (P.jumps >= 2) return;
+  P.vy = JUMP_VEL + (P.jumps === 1 ? 1 : 0);
+  P.grounded = false;
+  P.jumps++;
+  burst(PX, P.y, 5, 0xff8800, 3.0);
+}
+
+function doSlam() {
+  if (P.grounded) return;
+  P.vy = -21;
+  burst(PX, P.y + 0.4, 3, 0xffee00, 2.5);
+}
+
+// ── Spawning ──────────────────────────────────────────────────────────────────
+function pickEnemyType() {
+  const t = G.worldTime;
+  const r = Math.random();
+  if (t < 4)  return 'walker';
+  if (t < 8)  return r < 0.55 ? 'walker' : r < 0.8 ? 'flier' : 'jumper';
+  if (t < 15) return r < 0.3 ? 'walker' : r < 0.5 ? 'flier' : r < 0.65 ? 'tank' : r < 0.82 ? 'jumper' : 'shooter';
+  return r < 0.22 ? 'walker' : r < 0.38 ? 'flier' : r < 0.52 ? 'tank' : r < 0.65 ? 'sprinter' : r < 0.8 ? 'jumper' : 'shooter';
+}
+
+function spawnOneEnemy(typeId) {
+  const cfg = ETYPES[typeId];
+  const ey = cfg.fly ? GY + 1.5 + Math.random() * 3.2 : GY;
+  const mat = lmat(cfg.color);
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(cfg.w, cfg.h, 0.5), mat);
+  mesh.position.set(SPX, ey + cfg.h / 2, 0.2);
+  scene.add(mesh);
+  // Small white eye
+  const eye = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.1), bmat(0xffffff));
+  eye.position.set(-cfg.w * 0.22, cfg.h * 0.18, 0.28);
+  mesh.add(eye);
+  enemies.push({
+    mesh: mesh, typeId: typeId, cfg: cfg,
+    x: SPX, y: ey,
+    vy: cfg.jmp ? 8.5 : 0,
+    hp: cfg.hp, maxHp: cfg.hp,
+    speed: cfg.spd * (1 + G.worldTime * 0.027 + G.speedBonus * 0.15),
+    flashTimer: 0,
+    shootTimer: typeId === 'shooter' ? 0.8 + Math.random() * 0.8 : 9999,
+    alive: true
+  });
+}
+
+function spawnBullet() {
+  const cnt = G.bulletCount;
+  const yOff = cnt === 1 ? [0] : cnt === 2 ? [-0.18, 0.18] : [-0.28, 0, 0.28];
+  for (let i = 0; i < cnt; i++) {
+    const bx = PX + 0.52, by = P.y + 0.42 + yOff[i] * 1.8;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.13, 0.13), bmat(0xffee00));
+    mesh.position.set(bx, by, 0.2);
+    scene.add(mesh);
+    bullets.push({ mesh: mesh, x: bx, y: by, vx: 22, vy: yOff[i] * 2.5, isEnemy: false, pierce: G.piercing ? 3 : 0, dead: false });
+  }
+}
+
+function spawnEnemyBullet(ex, ey) {
+  const dx = PX - ex, dy = (P.y + 0.4) - ey;
+  const ln = Math.hypot(dx, dy) || 1;
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.27, 0.2), bmat(0xff3355));
+  mesh.position.set(ex, ey, 0.2);
+  scene.add(mesh);
+  bullets.push({ mesh: mesh, x: ex, y: ey, vx: (dx / ln) * 5.5, vy: (dy / ln) * 5.5, isEnemy: true, pierce: 0, dead: false });
+}
+
+function burst(x, y, count, color, speed) {
+  for (let i = 0; i < count; i++) {
+    const ang = (Math.PI * 2 / count) * i + Math.random() * 1.0;
+    const s = speed * (0.5 + Math.random() * 0.9);
+    const mat = bmat(color, true, 1);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.14), mat);
+    mesh.position.set(x, y, 0.2);
+    scene.add(mesh);
+    particles.push({ mesh: mesh, mat: mat, x: x, y: y, vx: Math.cos(ang) * s, vy: Math.sin(ang) * s, life: 1.0 });
+  }
+}
+
+function spawnGem(x, y) {
+  const mesh = new THREE.Mesh(GEM_GEO, bmat(0x00ffcc));
+  mesh.position.set(x, y, 0.2);
+  scene.add(mesh);
+  gems.push({ mesh: mesh, x: x, y: y, vy: 3.5 + Math.random() * 2, alive: true });
+}
+
+// ── Damage ────────────────────────────────────────────────────────────────────
+function takeDamage() {
+  G.hp--;
+  P.iframes = 1.5;
+  G.combo = 1; G.comboKills = 0;
+  G.shake = Math.max(G.shake, 0.7);
+  burst(PX, P.y + 0.4, 10, 0xff2200, 4.5);
+  updateHearts();
+  if (G.hp <= 0) doGameOver();
+}
+
+function hitEnemy(e, dmg) {
+  e.hp -= dmg;
+  e.flashTimer = 0.1;
+  if (e.hp <= 0) killEnemy(e);
+}
+
+function killEnemy(e) {
+  if (!e.alive) return;
+  e.alive = false;
+  scene.remove(e.mesh);
+  const cnt = e.maxHp >= 3 ? 14 : 7;
+  burst(e.x, e.y + e.cfg.h / 2, cnt, e.cfg.color, 3.5 + e.maxHp * 0.5);
+  G.shake = Math.max(G.shake, 0.12 + e.maxHp * 0.06);
+  for (let k = 0; k < e.maxHp; k++) {
+    spawnGem(e.x + (Math.random() - 0.5) * 0.7, e.y + e.cfg.h / 2 + 0.3);
+  }
+  G.score += e.maxHp * 120 * G.combo;
+  G.comboKills++;
+  G.comboDecay = G.surgeMode ? 7 : 3.5;
+  if (G.comboKills >= 5) G.combo = Math.min(8, 1 + Math.floor(G.comboKills / 5));
+}
+
+// ── Update Functions ──────────────────────────────────────────────────────────
+function updatePlayer(dt) {
+  if (!P.grounded) P.vy += GRAV * dt;
+  P.y += P.vy * dt;
+
+  if (P.y <= GY) {
+    const wasSlam = P.vy < -12;
+    P.y = GY; P.vy = 0; P.grounded = true; P.jumps = 0;
+    if (wasSlam) {
+      enemies.forEach(function(e) {
+        if (!e.alive || e.cfg.fly) return;
+        if (Math.abs(e.x - PX) < 2.8) hitEnemy(e, 9999);
+      });
+      burst(PX, GY, 12, 0xff8800, 5.5);
+      G.shake = Math.max(G.shake, 0.55);
+    }
+  }
+  if (P.y > VH / 2 - 0.8) { P.y = VH / 2 - 0.8; P.vy = 0; }
+  if (P.iframes > 0) P.iframes -= dt;
+
+  P.mesh.position.set(PX, P.y + 0.4, 0.2);
+  P.glow.position.set(PX, P.y + 0.4, 0.15);
+
+  const pulse = P.iframes > 0
+    ? (Math.sin(G.worldTime * 28) > 0 ? 0.65 : 0.0)
+    : 0.22 + 0.1 * Math.sin(G.worldTime * 5);
+  P.glow.material.opacity = pulse;
+
+  P.trail.unshift({ x: PX, y: P.y + 0.4 });
+  if (P.trail.length > 9) P.trail.pop();
+}
+
+function updateTrail() {
+  for (let i = 0; i < P.trailMeshes.length; i++) {
+    const tm = P.trailMeshes[i];
+    if (i < P.trail.length) {
+      const t = P.trail[i];
+      const alpha = (1 - i / 9) * 0.42 * (G.combo > 1 ? 1.6 : 1);
+      tm.material.opacity = Math.min(1, alpha);
+      const sc = 0.88 - i * 0.08;
+      tm.scale.set(sc, sc, 1);
+      tm.position.set(t.x - i * 0.07, t.y, 0.1 + i * 0.001);
+      tm.material.color.setHex(G.combo > 4 ? 0xffff00 : G.combo > 1 ? 0xff8800 : 0xff6000);
+    } else {
+      tm.material.opacity = 0;
+    }
+  }
+}
+
+function updateBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    if (b.dead) { scene.remove(b.mesh); bullets.splice(i, 1); continue; }
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.mesh.position.set(b.x, b.y, 0.2);
+
+    if (b.x > SPX + 2 || b.x < -SPX - 2 || b.y < GY - 1) {
+      b.dead = true; scene.remove(b.mesh); bullets.splice(i, 1); continue;
+    }
+
+    if (b.isEnemy) {
+      if (P.iframes <= 0) {
+        const dx = b.x - PX, dy = b.y - (P.y + 0.4);
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) { takeDamage(); b.dead = true; }
+      }
+      continue;
+    }
+
+    // Player bullet vs enemies
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (!e.alive) continue;
+      const hr = e.cfg.w * 0.55;
+      const dx = b.x - e.x, dy = b.y - (e.y + e.cfg.h / 2);
+      if (Math.abs(dx) < hr && Math.abs(dy) < hr) {
+        hitEnemy(e, 1);
+        burst(b.x, b.y, 3, 0xffee00, 2.2);
+        if (b.pierce > 0) { b.pierce--; } else { b.dead = true; break; }
+      }
+    }
+  }
+}
+
+function updateEnemies(dt) {
+  const spd = 1 + G.speedBonus * 0.25;
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (!e.alive) { enemies.splice(i, 1); continue; }
+
+    e.x -= e.speed * dt * spd;
+
+    // Jumper bounce
+    if (e.cfg.jmp) {
+      e.vy += GRAV * dt;
+      e.y += e.vy * dt;
+      if (e.y <= GY) { e.y = GY; e.vy = 8.5; }
+    }
+
+    // Shooter fires
+    if (e.typeId === 'shooter') {
+      e.shootTimer -= dt;
+      if (e.shootTimer <= 0) {
+        spawnEnemyBullet(e.x, e.y + e.cfg.h / 2);
+        e.shootTimer = 2.0;
+      }
+    }
+
+    // Flash on hit
+    if (e.flashTimer > 0) {
+      e.flashTimer -= dt;
+      e.mesh.material.color.set(e.flashTimer > 0.05 ? 0xffffff : e.cfg.color);
+    }
+
+    e.mesh.position.set(e.x, e.y + e.cfg.h / 2, 0.2);
+
+    if (e.x < -SPX - 2) { e.alive = false; scene.remove(e.mesh); enemies.splice(i, 1); continue; }
+
+    // Player collision
+    if (P.iframes <= 0) {
+      const dx = e.x - PX, dy = (e.y + e.cfg.h / 2) - (P.y + 0.4);
+      if (Math.abs(dx) < e.cfg.w * 0.5 + 0.28 && Math.abs(dy) < e.cfg.h * 0.5 + 0.28) {
+        takeDamage();
+        e.alive = false; scene.remove(e.mesh); enemies.splice(i, 1);
+      }
+    }
+  }
+}
+
+function updateGems(dt) {
+  for (let i = gems.length - 1; i >= 0; i--) {
+    const g = gems[i];
+    if (!g.alive) { scene.remove(g.mesh); gems.splice(i, 1); continue; }
+
+    g.vy += GRAV * dt;
+    g.y += g.vy * dt;
+    if (g.y < GY + 0.26) { g.y = GY + 0.26; g.vy = 0; }
+
+    const dx = PX - g.x, dy = (P.y + 0.4) - g.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < G.gemRadius) {
+      const pull = 10 + (G.gemRadius - dist) * 3;
+      g.x += (dx / dist) * pull * dt;
+      g.y += (dy / dist) * pull * dt;
+    }
+    if (dist < 0.5) { g.alive = false; gainXP(1); continue; }
+
+    g.mesh.rotation.y += dt * 4;
+    g.mesh.rotation.x += dt * 2.5;
+    g.mesh.position.set(g.x, g.y, 0.2);
+
+    if (g.x < -SPX - 2) { g.alive = false; scene.remove(g.mesh); gems.splice(i, 1); }
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt * 1.7;
+    if (p.life <= 0) { scene.remove(p.mesh); particles.splice(i, 1); continue; }
+    p.vy -= 12 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.mesh.position.set(p.x, p.y, 0.2);
+    p.mat.opacity = p.life;
+    p.mesh.scale.set(p.life, p.life, p.life);
+  }
+}
+
+function updateBgLines(dt) {
+  const spd = 1 + G.speedBonus * 0.3;
+  for (let k = 0; k < bgLines.length; k++) {
+    const l = bgLines[k];
+    l.m.position.x -= l.spd * dt * spd;
+    if (l.m.position.x < -VW / 2 - 3) l.m.position.x = VW / 2 + Math.random() * 3;
+  }
+}
+
+function updateShake(dt) {
+  if (G.shake > 0.005) {
+    cam.position.x = (Math.random() - 0.5) * G.shake;
+    cam.position.y = (Math.random() - 0.5) * G.shake;
+    G.shake *= 0.62;
+  } else {
+    cam.position.x = 0; cam.position.y = 0; G.shake = 0;
+  }
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function updateHUD() {
+  document.getElementById('sc').textContent = Math.floor(G.score).toLocaleString();
+  const cm = document.getElementById('cm');
+  if (G.combo > 1) {
+    cm.textContent = '×' + G.combo;
+    cm.style.transform = 'scale(' + (1 + Math.min(0.35, (G.combo - 1) * 0.06)) + ')';
+  } else {
+    cm.textContent = '';
+    cm.style.transform = 'scale(1)';
+  }
+  document.getElementById('xpf').style.width = (G.xp / G.xpNext * 100) + '%';
+}
+
+function updateHearts() {
+  const el = document.getElementById('hp');
+  el.innerHTML = '';
+  for (let i = 0; i < G.maxHp; i++) {
+    const s = document.createElement('span');
+    s.textContent = i < G.hp ? '♥' : '♡';
+    s.style.color = i < G.hp ? '#ff5555' : '#443';
+    el.appendChild(s);
+  }
+}
+
+// ── XP / Level Up ─────────────────────────────────────────────────────────────
+function gainXP(n) {
+  G.xp += n;
+  if (G.xp >= G.xpNext) {
+    G.xp -= G.xpNext;
+    G.xpNext = Math.floor(G.xpNext * 1.38 + 2);
+    G.level++;
+    document.getElementById('lv').textContent = 'LVL ' + G.level;
+    showUpgrades();
+  }
+}
+
+function showUpgrades() {
+  G.paused = true;
+  const pool = [...upgPool];
+  const picks = [];
+  for (let i = 0; i < 3 && pool.length > 0; i++) {
+    const idx = Math.floor(Math.random() * pool.length);
+    picks.push(pool.splice(idx, 1)[0]);
+  }
+  const uc = document.getElementById('uc');
+  uc.innerHTML = '';
+  for (let k = 0; k < picks.length; k++) {
+    const p = picks[k];
+    const btn = document.createElement('button');
+    btn.className = 'ub';
+    btn.innerHTML = '<span class="ui">' + p.icon + '</span><b>' + p.name + '</b><span class="ud">' + p.desc + '</span>';
+    btn.addEventListener('click', (function(pid) {
+      return function() { applyUpg(pid); hideUpgrades(); };
+    }(p.id)));
+    uc.appendChild(btn);
+  }
+  document.getElementById('upg').style.display = 'flex';
+}
+
+function hideUpgrades() {
+  document.getElementById('upg').style.display = 'none';
+  G.paused = false;
+  lastT = performance.now();
+}
+
+function applyUpg(id) {
+  switch (id) {
+    case 'rapid':  G.fireRate = Math.max(0.09, G.fireRate * 0.52); break;
+    case 'twin':   if (G.bulletCount < 2) G.bulletCount = 2; break;
+    case 'triple': G.bulletCount = 3; break;
+    case 'pierce': G.piercing = true; break;
+    case 'speed':  G.speedBonus++; break;
+    case 'magnet': G.gemRadius += 2.8; break;
+    case 'mend':   G.hp = Math.min(G.hp + 1, G.maxHp); updateHearts(); break;
+    case 'surge':  G.surgeMode = true; break;
+  }
+}
+
+// ── Game Over ─────────────────────────────────────────────────────────────────
+function doGameOver() {
+  G.dead = true;
+  document.getElementById('goSc').textContent = 'SCORE: ' + Math.floor(G.score).toLocaleString();
+  document.getElementById('goLv').textContent = 'LEVEL ' + G.level + ' REACHED';
+  document.getElementById('go').style.display = 'flex';
+}
+
+// ── Restart ───────────────────────────────────────────────────────────────────
+function restart() {
+  bullets.forEach(function(o) { scene.remove(o.mesh); });
+  enemies.forEach(function(o) { if (o.mesh) scene.remove(o.mesh); });
+  gems.forEach(function(o) { scene.remove(o.mesh); });
+  particles.forEach(function(o) { scene.remove(o.mesh); });
+  bgLines.forEach(function(l) { scene.remove(l.m); });
+  bullets = []; enemies = []; gems = []; particles = []; bgLines = [];
+
+  G = mkState();
+  upgPool = [...UPG_DEFS];
+  waveTimer = 1.4; waveInterval = 1.9;
+
+  initPlayer();
+  buildBgLines();
+  updateHearts();
+  document.getElementById('lv').textContent = 'LVL 1';
+  document.getElementById('sc').textContent = '0';
+  document.getElementById('cm').textContent = '';
+  document.getElementById('xpf').style.width = '0%';
+  document.getElementById('go').style.display = 'none';
+  document.getElementById('upg').style.display = 'none';
+  lastT = performance.now();
+}
+
+// ── Main Loop ─────────────────────────────────────────────────────────────────
+let lastT = performance.now();
+
+function loop() {
+  requestAnimationFrame(loop);
+
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+
+  if (G.paused || G.dead) { renderer.render(scene, cam); return; }
+
+  G.worldTime += dt;
+  G.score += dt * 10 * G.combo * (1 + G.speedBonus * 0.15);
+
+  // Wave spawn
+  waveTimer -= dt;
+  if (waveTimer <= 0) {
+    waveTimer = waveInterval;
+    waveInterval = Math.max(0.52, waveInterval - 0.013);
+    spawnOneEnemy(pickEnemyType());
+    if (G.worldTime > 18 && Math.random() < 0.38) spawnOneEnemy(pickEnemyType());
+  }
+
+  // Auto-fire
+  G.fireCool -= dt;
+  if (G.fireCool <= 0) { spawnBullet(); G.fireCool = G.fireRate; }
+
+  // Combo decay
+  if (G.combo > 1) {
+    G.comboDecay -= dt;
+    if (G.comboDecay <= 0) { G.combo = 1; G.comboKills = 0; }
+  }
+
+  updatePlayer(dt);
+  updateBullets(dt);
+  updateEnemies(dt);
+  updateGems(dt);
+  updateParticles(dt);
+  updateBgLines(dt);
+  updateTrail();
+  updateShake(dt);
+  updateHUD();
+
+  renderer.render(scene, cam);
+}
+
+// ── Hint fade ─────────────────────────────────────────────────────────────────
+setTimeout(function() {
+  const h = document.getElementById('hint');
+  if (h) h.style.opacity = '0';
+}, 4000);
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+buildGround();
+buildBgLines();
+initPlayer();
+updateHearts();
+document.getElementById('rb').addEventListener('click', restart);
+lastT = performance.now();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

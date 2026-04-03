@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>ORBIT COLLAPSE</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace;touch-action:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;right:0;padding:14px 18px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;z-index:10}
+#score-block{display:flex;flex-direction:column}
+#score{color:#fff;font-size:32px;font-weight:bold;text-shadow:0 0 14px #88f,0 0 28px #44f;line-height:1}
+#score-label{color:#556;font-size:11px;letter-spacing:3px;margin-top:2px}
+#combo{color:#f8a;font-size:22px;font-weight:bold;text-shadow:0 0 12px #f6a,0 0 24px #f48;min-height:28px;transition:opacity 0.15s}
+#right-col{text-align:right}
+#level{color:#aaf;font-size:16px;letter-spacing:2px;text-shadow:0 0 8px #88f}
+#planets-left{color:#8af;font-size:13px;letter-spacing:1px;margin-top:4px;opacity:0.7}
+#msg{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:36px;font-weight:bold;text-align:center;pointer-events:none;z-index:20;text-shadow:0 0 20px #88f,0 0 40px #44f;opacity:0;transition:opacity 0.4s;letter-spacing:3px;white-space:nowrap}
+#hint{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);color:#446;font-size:12px;letter-spacing:4px;text-transform:uppercase;pointer-events:none;transition:opacity 0.6s}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="score-block">
+    <div id="score">0</div>
+    <div id="score-label">SCORE</div>
+  </div>
+  <div id="combo"></div>
+  <div id="right-col">
+    <div id="level">LVL 1</div>
+    <div id="planets-left"></div>
+  </div>
+</div>
+<div id="msg"></div>
+<div id="hint">TAP A PLANET TO COLLAPSE IT</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ORBIT COLLAPSE | orbit_collapse_001
+// mechanic: physics_puzzle — orbital chain collapse
+// atoms: ORBITAL_PHYSICS, CHAIN_COLLAPSE, DESTABILIZE_TAP, SHOCKWAVE_RING, PARTICLE_BURST
+
+const W = window.innerWidth, H = window.innerHeight;
+const scene = new THREE.Scene();
+const cam = new THREE.PerspectiveCamera(60, W/H, 0.1, 1000);
+cam.position.set(0, 0, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x000008);
+document.body.appendChild(renderer.domElement);
+
+// ── CONFIG ──────────────────────────────────────────
+const COLORS = [0x44ffee,0xff4488,0xffaa22,0x88ff44,0xaa44ff,0xff8844,0x44aaff,0xffee44];
+const STAR_COL = 0xffffcc;
+
+// ── STATE ────────────────────────────────────────────
+let score=0, combo=0, level=1, state='play';
+let planets=[], shockwaves=[];
+let shakeTimer=0, shakeMag=0;
+let comboTimer=null, levelCheckCooldown=0;
+
+// ── DOM REFS ─────────────────────────────────────────
+const scoreEl = document.getElementById('score');
+const comboEl = document.getElementById('combo');
+const levelEl = document.getElementById('level');
+const planetsLeftEl = document.getElementById('planets-left');
+const msgEl = document.getElementById('msg');
+const hintEl = document.getElementById('hint');
+
+// ── STAR ─────────────────────────────────────────────
+const starMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(1.3,20,20),
+  new THREE.MeshBasicMaterial({color:STAR_COL})
+);
+scene.add(starMesh);
+const starGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(2.6,20,20),
+  new THREE.MeshBasicMaterial({color:STAR_COL,transparent:true,opacity:0.1,side:THREE.BackSide})
+);
+scene.add(starGlow);
+const starGlow2 = new THREE.Mesh(
+  new THREE.SphereGeometry(4.0,20,20),
+  new THREE.MeshBasicMaterial({color:0xffff88,transparent:true,opacity:0.04,side:THREE.BackSide})
+);
+scene.add(starGlow2);
+
+// ── PARTICLES ─────────────────────────────────────────
+const MAX_P = 300;
+const pGeo = new THREE.BufferGeometry();
+const pPos = new Float32Array(MAX_P*3);
+const pCol = new Float32Array(MAX_P*3);
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos,3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol,3));
+const pMat = new THREE.PointsMaterial({size:0.4,vertexColors:true,transparent:true,opacity:0.95});
+const pSystem = new THREE.Points(pGeo,pMat);
+scene.add(pSystem);
+let pPool=[];
+
+function burst(x,y,col,n=20){
+  const c=new THREE.Color(col);
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2;
+    const s=4+Math.random()*8;
+    pPool.push({
+      x,y,z:0,
+      vx:Math.cos(a)*s, vy:Math.sin(a)*s, vz:(Math.random()-0.5)*s*0.5,
+      life:1, decay:0.025+Math.random()*0.035,
+      r:c.r, g:c.g, b:c.b
+    });
+    if(pPool.length>MAX_P) pPool.shift();
+  }
+}
+
+function updateParticles(dt){
+  for(let i=pPool.length-1;i>=0;i--){
+    const p=pPool[i];
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.z+=p.vz*dt;
+    p.vx*=0.90; p.vy*=0.90; p.vz*=0.90;
+    p.life-=p.decay;
+    if(p.life<=0) pPool.splice(i,1);
+  }
+  for(let i=0;i<MAX_P;i++){
+    const p=pPool[i];
+    if(p){
+      pPos[i*3]=p.x; pPos[i*3+1]=p.y; pPos[i*3+2]=p.z;
+      const a=Math.max(0,p.life);
+      pCol[i*3]=p.r*a; pCol[i*3+1]=p.g*a; pCol[i*3+2]=p.b*a;
+    } else {
+      pPos[i*3+2]=-9999;
+    }
+  }
+  pGeo.attributes.position.needsUpdate=true;
+  pGeo.attributes.color.needsUpdate=true;
+}
+
+// ── ORBIT RING ────────────────────────────────────────
+function makeOrbitRing(r,col){
+  const pts=[];
+  for(let i=0;i<=96;i++){
+    const a=(i/96)*Math.PI*2;
+    pts.push(new THREE.Vector3(Math.cos(a)*r,Math.sin(a)*r,0));
+  }
+  const g=new THREE.BufferGeometry().setFromPoints(pts);
+  const m=new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.07});
+  return new THREE.Line(g,m);
+}
+
+// ── TRAIL ─────────────────────────────────────────────
+class Trail{
+  constructor(col){
+    this.pts=[];
+    this.maxLen=60;
+    const g=new THREE.BufferGeometry();
+    const buf=new Float32Array(this.maxLen*3);
+    g.setAttribute('position',new THREE.BufferAttribute(buf,3));
+    g.setDrawRange(0,0);
+    this.line=new THREE.Line(g,new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.55}));
+    scene.add(this.line);
+  }
+  add(x,y){
+    this.pts.push(x,y,0);
+    if(this.pts.length>this.maxLen*3) this.pts.splice(0,3);
+    const buf=this.line.geometry.attributes.position.array;
+    const len=this.pts.length/3;
+    for(let i=0;i<len;i++){
+      buf[i*3]=this.pts[i*3];
+      buf[i*3+1]=this.pts[i*3+1];
+      buf[i*3+2]=0;
+    }
+    this.line.geometry.attributes.position.needsUpdate=true;
+    this.line.geometry.setDrawRange(0,len);
+  }
+  remove(){ scene.remove(this.line); }
+}
+
+// ── PLANET ────────────────────────────────────────────
+class Planet{
+  constructor(orbitR, speed, col, phase, size){
+    this.orbitR=orbitR;
+    this.speed=speed;
+    this.col=col;
+    this.angle=phase;
+    this.alive=true;
+    this.collapsing=false;
+    this.collapseV=0;
+    this.collapseDir=1; // -1=outward, 1=inward
+    this.size=size;
+    this.x=0; this.y=0;
+
+    this.mesh=new THREE.Mesh(
+      new THREE.SphereGeometry(size,14,14),
+      new THREE.MeshBasicMaterial({color:col})
+    );
+    scene.add(this.mesh);
+
+    this.glow=new THREE.Mesh(
+      new THREE.SphereGeometry(size*2,14,14),
+      new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:0.12,side:THREE.BackSide})
+    );
+    this.mesh.add(this.glow);
+
+    this.orbitRing=makeOrbitRing(orbitR,col);
+    scene.add(this.orbitRing);
+
+    this.trail=new Trail(col);
+  }
+
+  update(dt){
+    if(!this.alive) return;
+    if(this.collapsing){
+      this.collapseV+=5*dt;
+      this.orbitR-=this.collapseV*dt*this.collapseDir;
+      // Spin faster as it falls
+      const speedBoost=1+(1/Math.max(0.5,Math.abs(this.orbitR)))*3;
+      this.angle+=this.speed*dt*speedBoost;
+      // Remove orbit ring on collapse
+      scene.remove(this.orbitRing);
+      // Hit star?
+      if(this.orbitR<2.2){
+        this.destroy(true); return;
+      }
+      // Fly out?
+      if(this.orbitR>26){
+        this.destroy(false); return;
+      }
+    } else {
+      this.angle+=this.speed*dt;
+    }
+    this.x=Math.cos(this.angle)*this.orbitR;
+    this.y=Math.sin(this.angle)*this.orbitR;
+    this.mesh.position.set(this.x,this.y,0);
+    this.trail.add(this.x,this.y);
+  }
+
+  startCollapse(inward=true){
+    if(this.collapsing) return;
+    this.collapsing=true;
+    this.collapseDir=inward?1:-1;
+    this.collapseV=1.5;
+    scene.remove(this.orbitRing);
+    burst(this.x,this.y,this.col,12);
+    shakeTimer=0.12; shakeMag=0.25;
+  }
+
+  destroy(hitStar){
+    const extra=hitStar?40:20;
+    burst(this.x,this.y,this.col,extra);
+    if(hitStar){
+      burst(0,0,STAR_COL,15);
+      shakeTimer=0.3; shakeMag=1.0;
+    } else {
+      shakeTimer=0.18; shakeMag=0.5;
+    }
+    this.alive=false;
+    scene.remove(this.mesh);
+    scene.remove(this.orbitRing);
+    this.trail.remove();
+  }
+
+  dist(other){
+    const dx=this.x-other.x, dy=this.y-other.y;
+    return Math.sqrt(dx*dx+dy*dy);
+  }
+}
+
+// ── SHOCKWAVE ─────────────────────────────────────────
+class Shockwave{
+  constructor(x,y,col){
+    const g=new THREE.RingGeometry(0.1,0.4,48);
+    const m=new THREE.MeshBasicMaterial({color:col||0xffffff,transparent:true,opacity:0.9,side:THREE.DoubleSide});
+    this.mesh=new THREE.Mesh(g,m);
+    this.mesh.position.set(x,y,0);
+    scene.add(this.mesh);
+    this.alive=true;
+  }
+  update(dt){
+    this.mesh.scale.x+=18*dt;
+    this.mesh.scale.y+=18*dt;
+    this.mesh.material.opacity-=2.2*dt;
+    if(this.mesh.material.opacity<=0){
+      scene.remove(this.mesh);
+      this.alive=false;
+    }
+  }
+}
+
+// ── SPAWN LEVEL ───────────────────────────────────────
+function spawnLevel(lvl){
+  planets.forEach(p=>{ if(p.alive){ scene.remove(p.mesh); scene.remove(p.orbitRing); p.trail.remove(); } });
+  planets=[]; pPool=[];
+
+  const count=Math.min(3+lvl*2, 13);
+  const usedOrbits=new Set();
+
+  for(let i=0;i<count;i++){
+    let orbitR;
+    do {
+      orbitR=4.5+Math.floor(Math.random()*5)*2.8+Math.random()*1.2;
+    } while(usedOrbits.has(Math.round(orbitR)));
+    usedOrbits.add(Math.round(orbitR));
+
+    const spd=(0.35+Math.random()*0.55)*(Math.random()>0.5?1:-1);
+    const col=COLORS[i%COLORS.length];
+    const phase=Math.random()*Math.PI*2;
+    const sz=0.45+Math.random()*0.35;
+    planets.push(new Planet(orbitR,spd,col,phase,sz));
+  }
+
+  levelEl.textContent=`LVL ${lvl}`;
+  updatePlanetsLeft();
+  hintEl.style.opacity='1';
+}
+
+function updatePlanetsLeft(){
+  const n=planets.filter(p=>p.alive).length;
+  planetsLeftEl.textContent=n>0?`${n} LEFT`:'';
+}
+
+// ── CHAIN COLLISION CHECK ─────────────────────────────
+function checkChains(){
+  for(let i=0;i<planets.length;i++){
+    if(!planets[i].alive||!planets[i].collapsing) continue;
+    for(let j=0;j<planets.length;j++){
+      if(i===j||!planets[j].alive||planets[j].collapsing) continue;
+      const d=planets[i].dist(planets[j]);
+      if(d<planets[i].size+planets[j].size+1.2){
+        planets[j].startCollapse(Math.random()>0.3);
+        combo++;
+        score+=combo*150;
+        scoreEl.textContent=score;
+        showCombo(combo);
+        updatePlanetsLeft();
+      }
+    }
+  }
+}
+
+// ── UI ────────────────────────────────────────────────
+function showCombo(c){
+  if(c<2) return;
+  comboEl.textContent=`×${c} CHAIN!`;
+  comboEl.style.opacity='1';
+  clearTimeout(comboTimer);
+  comboTimer=setTimeout(()=>{ comboEl.style.opacity='0'; },1100);
+}
+
+function showMsg(text,cb){
+  msgEl.textContent=text;
+  msgEl.style.opacity='1';
+  setTimeout(()=>{
+    msgEl.style.opacity='0';
+    setTimeout(cb,500);
+  },1300);
+}
+
+// ── LEVEL CHECK ───────────────────────────────────────
+function checkLevelDone(){
+  if(planets.length===0) return;
+  const alive=planets.filter(p=>p.alive);
+  if(alive.length===0){
+    state='levelup';
+    const bonus=level*500;
+    score+=bonus;
+    scoreEl.textContent=score;
+    showMsg(`LEVEL ${level} CLEAR  +${bonus}`, ()=>{
+      level++;
+      combo=0;
+      state='play';
+      spawnLevel(level);
+    });
+  }
+}
+
+// ── TAP ───────────────────────────────────────────────
+const ray=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+const zPlane=new THREE.Plane(new THREE.Vector3(0,0,1),0);
+const wp=new THREE.Vector3();
+
+function onTap(cx,cy){
+  if(state!=='play') return;
+  mouse.x=(cx/W)*2-1;
+  mouse.y=-(cy/H)*2+1;
+  ray.setFromCamera(mouse,cam);
+  ray.ray.intersectPlane(zPlane,wp);
+
+  hintEl.style.opacity='0';
+  shockwaves.push(new Shockwave(wp.x,wp.y,0xffffff));
+
+  // Find nearest planet within tap radius
+  let best=null, bestD=Infinity;
+  for(const p of planets){
+    if(!p.alive||p.collapsing) continue;
+    const dx=wp.x-p.x, dy=wp.y-p.y;
+    const d=Math.sqrt(dx*dx+dy*dy);
+    if(d<p.size*5+1.5 && d<bestD){
+      bestD=d; best=p;
+    }
+  }
+  if(best){
+    best.startCollapse(true);
+    combo=1;
+    score+=100;
+    scoreEl.textContent=score;
+    updatePlanetsLeft();
+  }
+}
+
+renderer.domElement.addEventListener('click',e=>onTap(e.clientX,e.clientY));
+renderer.domElement.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  onTap(e.touches[0].clientX,e.touches[0].clientY);
+},{passive:false});
+
+// ── STARFIELD ─────────────────────────────────────────
+(()=>{
+  const pos=[];
+  for(let i=0;i<250;i++){
+    pos.push((Math.random()-0.5)*100,(Math.random()-0.5)*100,-15-Math.random()*40);
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3));
+  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0xffffff,size:0.12,transparent:true,opacity:0.5})));
+})();
+
+// ── ANIMATE ───────────────────────────────────────────
+let last=performance.now();
+let levelCheckT=0;
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  const dt=Math.min((now-last)/1000,0.05);
+  last=now;
+
+  if(state==='play'){
+    planets.forEach(p=>p.update(dt));
+    checkChains();
+    levelCheckT+=dt;
+    if(levelCheckT>0.25){ levelCheckT=0; checkLevelDone(); }
+  }
+
+  updateParticles(dt);
+  shockwaves=shockwaves.filter(s=>{ s.update(dt); return s.alive; });
+
+  // Screen shake
+  if(shakeTimer>0){
+    shakeTimer-=dt;
+    cam.position.set((Math.random()-0.5)*shakeMag,(Math.random()-0.5)*shakeMag,32);
+  } else {
+    cam.position.set(0,0,32);
+  }
+
+  // Star pulse
+  const p=1+0.07*Math.sin(now*0.0025);
+  starMesh.scale.setScalar(p);
+  starGlow.scale.setScalar(p*1.3);
+  starGlow2.scale.setScalar(p*1.6);
+
+  renderer.render(scene,cam);
+}
+
+spawnLevel(1);
+animate();
+
+window.addEventListener('resize',()=>{
+  cam.aspect=window.innerWidth/window.innerHeight;
+  cam.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+});
+</script>
+</body>
+</html>

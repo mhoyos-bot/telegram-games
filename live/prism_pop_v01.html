@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>PRISM POP</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;touch-action:none;background:#06000f;font-family:'Courier New',monospace}
+canvas{display:block}
+#hud{position:fixed;top:0;left:0;right:0;pointer-events:none;padding:14px 18px;
+  display:flex;justify-content:space-between;align-items:flex-start;z-index:10}
+#score{color:#14f195;font-size:34px;font-weight:bold;text-shadow:0 0 20px #14f195;letter-spacing:2px}
+#combo{color:#ff6b35;font-size:14px;font-weight:bold;text-shadow:0 0 12px #ff4400;
+  opacity:0;transition:opacity 0.1s;letter-spacing:3px;margin-top:4px}
+#lives{display:flex;gap:8px;align-items:center;padding-top:6px}
+.heart{width:14px;height:14px;background:#e74c3c;clip-path:polygon(50% 85%,5% 35%,20% 10%,50% 30%,80% 10%,95% 35%);
+  box-shadow:0 0 8px #e74c3c;transition:all 0.2s}
+.heart.dead{background:#2a1020;box-shadow:none}
+#flash{position:fixed;inset:0;pointer-events:none;opacity:0;z-index:20;transition:opacity 0.04s}
+#chainpop{position:fixed;top:35%;left:50%;transform:translate(-50%,-50%);
+  font-size:42px;font-weight:bold;pointer-events:none;opacity:0;white-space:nowrap;
+  text-shadow:0 0 28px currentColor;letter-spacing:6px;z-index:15}
+#hint{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+  color:#1a0a2e;font-size:11px;letter-spacing:3px;pointer-events:none;z-index:10;
+  transition:opacity 0.5s}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;background:rgba(6,0,15,0.94);z-index:30}
+#overlay h1{color:#14f195;font-size:46px;text-shadow:0 0 36px #14f195;
+  letter-spacing:10px;margin-bottom:6px;animation:glow 1.2s ease-in-out infinite alternate}
+#overlay .sub{color:#445566;font-size:12px;margin-bottom:28px;text-align:center;
+  line-height:2.2;max-width:260px;letter-spacing:1px}
+#overlay .fscore{color:#ffdd44;font-size:32px;text-shadow:0 0 18px #ffaa00;
+  display:none;margin-bottom:8px;letter-spacing:2px}
+#overlay .fbest{color:#ff6b35;font-size:13px;text-shadow:0 0 8px #ff4400;
+  display:none;margin-bottom:24px;letter-spacing:2px}
+#overlay button{background:#06000f;border:2px solid #14f195;color:#14f195;font-size:16px;
+  padding:14px 48px;cursor:pointer;letter-spacing:5px;font-family:'Courier New',monospace;
+  box-shadow:0 0 28px #14f19540;transition:all 0.15s;pointer-events:all}
+#overlay button:hover{background:#0a120f;box-shadow:0 0 44px #14f19566}
+#overlay button:active{transform:scale(0.95)}
+#overlay.gone{display:none}
+@keyframes glow{from{text-shadow:0 0 20px #14f195}to{text-shadow:0 0 50px #14f195,0 0 80px #14f19580}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div>
+<div id="hud">
+  <div>
+    <div id="score">0</div>
+    <div id="combo"></div>
+  </div>
+  <div id="lives"></div>
+</div>
+<div id="chainpop"></div>
+<div id="hint">TAP CRYSTALS</div>
+<div id="overlay" id="overlay">
+  <h1>PRISM POP</h1>
+  <div class="sub">TAP CRYSTALS BEFORE<br>THEY ESCAPE<br><br>CHAIN FOR COMBO BONUS</div>
+  <div class="fscore" id="fscore"></div>
+  <div class="fbest" id="fbest"></div>
+  <button id="startBtn">START</button>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Telegram ──────────────────────────────────────────────────────────────────
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+function haptic(type) { try { tg?.HapticFeedback?.impactOccurred(type); } catch(_e){} }
+function hapticNote(type) { try { tg?.HapticFeedback?.notificationOccurred(type); } catch(_e){} }
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = false;
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+// ── Scene ─────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06000f, 0.06);
+
+// ── Camera ────────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 80);
+camera.position.set(0, 0, 14);
+const CAM_BASE = camera.position.clone();
+
+// ── Lights ────────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x221133, 2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(4, 8, 6);
+scene.add(sun);
+
+// ── Background stars ──────────────────────────────────────────────────────────
+const starBuf = new THREE.BufferGeometry();
+const S = 300;
+const sv = new Float32Array(S * 3);
+for (let i = 0; i < S; i++) {
+  sv[i*3]   = (Math.random()-0.5)*50;
+  sv[i*3+1] = (Math.random()-0.5)*50;
+  sv[i*3+2] = (Math.random()-0.5)*8 - 8;
+}
+starBuf.setAttribute('position', new THREE.BufferAttribute(sv, 3));
+scene.add(new THREE.Points(starBuf, new THREE.PointsMaterial({color:0xffffff,size:0.07,transparent:true,opacity:0.5})));
+
+// ── Crystal palette + geometries ──────────────────────────────────────────────
+const PALETTE = [0x14f195, 0xff6b35, 0xb44fff, 0x44aaff, 0xffdd44, 0xff3366, 0x11ffee];
+const GEOS = [
+  new THREE.OctahedronGeometry(0.52, 0),
+  new THREE.IcosahedronGeometry(0.48, 0),
+  new THREE.TetrahedronGeometry(0.58, 0),
+];
+
+// ── Crystal pool ──────────────────────────────────────────────────────────────
+const POOL_SIZE = 24;
+const pool = [];
+
+for (let i = 0; i < POOL_SIZE; i++) {
+  const geo = GEOS[i % GEOS.length];
+  const mat = new THREE.MeshToonMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.25 });
+  const mesh = new THREE.Mesh(geo, mat);
+
+  // Orbit ring
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, wireframe: false });
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.04, 6, 20), ringMat);
+  mesh.add(ring);
+
+  mesh.visible = false;
+  scene.add(mesh);
+  pool.push({ mesh, ring, ringMat, active: false, vy: 0, vx: 0, rotX: 0, rotZ: 0, scalePct: 0, colorHex: 0 });
+}
+
+function getInactive() { return pool.find(c => !c.active) || null; }
+
+function activateCrystal(difficulty) {
+  const c = getInactive();
+  if (!c) return;
+  const hex = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+  c.mesh.material.color.setHex(hex);
+  c.mesh.material.emissive.setHex(hex);
+  c.ringMat.color.setHex(hex);
+  c.colorHex = hex;
+
+  const spread = 8 + difficulty * 0.4;
+  c.mesh.position.set(
+    (Math.random()-0.5) * spread,
+    -9,
+    (Math.random()-0.5) * 1.5
+  );
+  c.vy = 2.8 + Math.random() * 1.4 + difficulty * 0.25;
+  c.vx = (Math.random()-0.5) * 0.6;
+  c.rotX = (Math.random()-0.5) * 3.5;
+  c.rotZ = (Math.random()-0.5) * 2.5;
+  c.scalePct = 0;
+  c.mesh.scale.setScalar(0);
+  c.active = true;
+  c.mesh.visible = true;
+}
+
+function deactivate(c) {
+  c.active = false;
+  c.mesh.visible = false;
+}
+
+// ── Particle pool ─────────────────────────────────────────────────────────────
+const PMAX = 240;
+const ppool = [];
+const pGeo = new THREE.OctahedronGeometry(0.13, 0);
+
+for (let i = 0; i < PMAX; i++) {
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true });
+  const mesh = new THREE.Mesh(pGeo, mat);
+  mesh.visible = false;
+  scene.add(mesh);
+  ppool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0, active: false });
+}
+
+function burst(pos, hex, count) {
+  for (let i = 0; i < count; i++) {
+    const p = ppool.find(x => !x.active);
+    if (!p) break;
+    p.mesh.material.color.setHex(hex);
+    p.mesh.material.opacity = 1;
+    p.mesh.position.copy(pos);
+    const spd = 2.5 + Math.random() * 5;
+    const ang = (i / count) * Math.PI * 2 + Math.random() * 0.6;
+    const elv = (Math.random()-0.5) * Math.PI * 0.7;
+    p.vx = Math.cos(ang) * Math.cos(elv) * spd;
+    p.vy = Math.sin(elv) * spd + 1.5;
+    p.vz = Math.sin(ang) * Math.cos(elv) * spd * 0.25;
+    p.life = 0;
+    p.maxLife = 0.45 + Math.random() * 0.35;
+    p.active = true;
+    p.mesh.visible = true;
+    p.mesh.scale.setScalar(0.8 + Math.random() * 0.8);
+  }
+}
+
+// ── Game state ────────────────────────────────────────────────────────────────
+let score = 0;
+let bestScore = parseInt(localStorage.getItem('prism_best') || '0');
+let lives = 3;
+let combo = 0;
+let comboTimer = 0;
+let running = false;
+let spawnTimer = 0;
+let spawnInterval = 1.1;
+let difficulty = 0;
+let shakeTimer = 0;
+let shakeAmt = 0;
+
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const scoreEl   = document.getElementById('score');
+const comboEl   = document.getElementById('combo');
+const livesEl   = document.getElementById('lives');
+const flashEl   = document.getElementById('flash');
+const chainEl   = document.getElementById('chainpop');
+const hintEl    = document.getElementById('hint');
+const overlay   = document.getElementById('overlay');
+const fscoreEl  = document.getElementById('fscore');
+const fbestEl   = document.getElementById('fbest');
+const startBtn  = document.getElementById('startBtn');
+
+function buildHearts() {
+  livesEl.innerHTML = '';
+  for (let i = 0; i < 3; i++) {
+    const d = document.createElement('div');
+    d.className = 'heart' + (i >= lives ? ' dead' : '');
+    livesEl.appendChild(d);
+  }
+}
+
+function updateScore() { scoreEl.textContent = score.toLocaleString(); }
+
+function showCombo(n) {
+  if (n < 2) { comboEl.style.opacity = '0'; return; }
+  const labels = ['','','DOUBLE!','TRIPLE!','QUAD!','MEGA!','ULTRA!'];
+  comboEl.textContent = (labels[n] || `x${n} COMBO!`);
+  comboEl.style.opacity = '1';
+  if (n >= 4) {
+    chainEl.textContent = labels[n] || `x${n}!`;
+    chainEl.style.color = n >= 6 ? '#ffdd44' : '#ff6b35';
+    chainEl.style.opacity = '1';
+    clearTimeout(chainEl._t);
+    chainEl._t = setTimeout(() => { chainEl.style.opacity = '0'; }, 700);
+  }
+}
+
+// ── Flash ─────────────────────────────────────────────────────────────────────
+function flash(hex, alpha) {
+  const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+  flashEl.style.background = `rgba(${r},${g},${b},${alpha})`;
+  flashEl.style.opacity = '1';
+  setTimeout(() => { flashEl.style.opacity = '0'; }, 60);
+}
+
+// ── Raycaster ─────────────────────────────────────────────────────────────────
+const ray = new THREE.Raycaster();
+const mp  = new THREE.Vector2();
+ray.near = 0.1;
+ray.far  = 50;
+
+// ── Hit detection ─────────────────────────────────────────────────────────────
+canvas.addEventListener('pointerdown', (e) => {
+  if (!running) return;
+  const r = canvas.getBoundingClientRect();
+  mp.x =  ((e.clientX - r.left) / r.width)  * 2 - 1;
+  mp.y = -((e.clientY - r.top)  / r.height) * 2 + 1;
+  ray.setFromCamera(mp, camera);
+
+  const targets = pool.filter(c => c.active).map(c => c.mesh);
+  const hits = ray.intersectObjects(targets, false);
+  if (hits.length) {
+    const hit = hits[0].object;
+    const c = pool.find(x => x.mesh === hit);
+    if (c) popCrystal(c, e.clientX, e.clientY);
+  }
+});
+
+// ── Pop logic ─────────────────────────────────────────────────────────────────
+function popCrystal(c, cx, cy) {
+  burst(c.mesh.position, c.colorHex, 18);
+  flash(c.colorHex, 0.12);
+  deactivate(c);
+
+  combo++;
+  comboTimer = 1.1;
+  const pts = 10 * combo;
+  score += pts;
+
+  shakeTimer = 0.12 + Math.min(combo * 0.02, 0.12);
+  shakeAmt   = 0.06 + Math.min(combo * 0.015, 0.14);
+
+  haptic(combo > 4 ? 'heavy' : combo > 2 ? 'medium' : 'light');
+  showCombo(combo);
+  updateScore();
+  scorePop(cx, cy, pts, combo);
+}
+
+// ── Floating score DOM pop ────────────────────────────────────────────────────
+function scorePop(x, y, pts, c) {
+  const el = document.createElement('div');
+  el.textContent = c > 1 ? `+${pts} ×${c}` : `+${pts}`;
+  el.style.cssText = `position:fixed;left:${x-22}px;top:${y-10}px;font-size:${20+Math.min(c*3,18)}px;
+    font-weight:bold;color:${c>4?'#ffdd44':c>2?'#ff6b35':'#14f195'};
+    text-shadow:0 0 10px currentColor;pointer-events:none;z-index:40;
+    font-family:'Courier New',monospace;letter-spacing:1px;
+    animation:none;transition:transform 0.7s ease-out,opacity 0.7s ease-out`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => {
+    el.style.transform = `translateY(-70px) scale(${1 + Math.min(c * 0.08, 0.4)})`;
+    el.style.opacity = '0';
+  });
+  setTimeout(() => el.remove(), 720);
+}
+
+// ── Miss logic ────────────────────────────────────────────────────────────────
+function missCrystal(c) {
+  deactivate(c);
+  lives = Math.max(0, lives - 1);
+  combo = 0;
+  comboTimer = 0;
+  comboEl.style.opacity = '0';
+  shakeTimer = 0.3;
+  shakeAmt   = 0.22;
+  flash(0xff0000, 0.18);
+  hapticNote('warning');
+  buildHearts();
+  if (lives <= 0) endGame();
+}
+
+// ── Start / End ───────────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; lives = 3; combo = 0; comboTimer = 0;
+  difficulty = 0; spawnTimer = 0; spawnInterval = 1.1; running = true;
+  pool.forEach(c => deactivate(c));
+  ppool.forEach(p => { p.active = false; p.mesh.visible = false; });
+  updateScore();
+  buildHearts();
+  hintEl.style.opacity = '0';
+  overlay.classList.add('gone');
+}
+
+function endGame() {
+  running = false;
+  if (score > bestScore) {
+    bestScore = score;
+    localStorage.setItem('prism_best', bestScore);
+  }
+  hapticNote('error');
+  overlay.classList.remove('gone');
+  overlay.querySelector('h1').style.display = '';
+  fscoreEl.style.display = 'block';
+  fscoreEl.textContent = `SCORE  ${score.toLocaleString()}`;
+  fbestEl.style.display = 'block';
+  fbestEl.textContent = `BEST   ${bestScore.toLocaleString()}`;
+  startBtn.textContent = 'RETRY';
+}
+
+startBtn.addEventListener('click', startGame);
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Game loop ─────────────────────────────────────────────────────────────────
+let last = 0;
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) * 0.001, 0.05);
+  last = now;
+
+  if (!running) { renderer.render(scene, camera); return; }
+
+  // Difficulty ramp
+  difficulty += dt * 0.04;
+  spawnInterval = Math.max(0.35, 1.1 - difficulty * 0.07);
+
+  // Spawn
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    activateCrystal(difficulty);
+    spawnTimer = spawnInterval;
+    if (difficulty > 6 && Math.random() < 0.35) { activateCrystal(difficulty); spawnTimer += 0.15; }
+  }
+
+  // Combo decay
+  if (combo > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) { combo = 0; comboEl.style.opacity = '0'; }
+  }
+
+  // Update crystals
+  const escapeY = 9;
+  for (const c of pool) {
+    if (!c.active) continue;
+
+    // Scale-in pop
+    if (c.scalePct < 1) {
+      c.scalePct = Math.min(1, c.scalePct + dt * 5);
+      const s = c.scalePct < 0.5
+        ? 2 * c.scalePct * c.scalePct
+        : -1 + (4 - 2 * c.scalePct) * c.scalePct; // ease-in-out
+      c.mesh.scale.setScalar(s);
+    }
+
+    c.mesh.position.y += c.vy * dt;
+    c.mesh.position.x += c.vx * dt;
+    c.mesh.rotation.x += c.rotX * dt;
+    c.mesh.rotation.z += c.rotZ * dt;
+
+    // Ring animate
+    c.ring.rotation.y = now * 0.001;
+    c.ring.rotation.x = now * 0.0007;
+    c.ringMat.opacity = 0.25 + 0.2 * Math.sin(now * 0.004 + c.colorHex);
+
+    if (c.mesh.position.y > escapeY) missCrystal(c);
+  }
+
+  // Update particles
+  for (const p of ppool) {
+    if (!p.active) continue;
+    p.life += dt;
+    const t = p.life / p.maxLife;
+    if (t >= 1) { p.active = false; p.mesh.visible = false; continue; }
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    p.vy -= 7 * dt;
+    p.mesh.material.opacity = 1 - t;
+    p.mesh.scale.setScalar(1 - t * 0.55);
+  }
+
+  // Camera shake
+  if (shakeTimer > 0) {
+    shakeTimer -= dt;
+    const s = shakeAmt * Math.max(shakeTimer / 0.3, 0);
+    camera.position.x = CAM_BASE.x + (Math.random()-0.5) * s * 2;
+    camera.position.y = CAM_BASE.y + (Math.random()-0.5) * s * 2;
+  } else {
+    camera.position.x += (CAM_BASE.x - camera.position.x) * 0.18;
+    camera.position.y += (CAM_BASE.y - camera.position.y) * 0.18;
+  }
+
+  renderer.render(scene, camera);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

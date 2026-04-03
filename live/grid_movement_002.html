@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>GRID HUNT</title>
+<style>
+/* GRID HUNT v2 | ga_grid_movement_v02 | STD-031: ~400L — justified: dpad HTML + 8 draw fns */
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050b10;overflow:hidden;touch-action:none;font-family:'Courier New',monospace;user-select:none}
+canvas{display:block;position:fixed;top:0;left:0}
+#ui{position:fixed;top:0;left:0;right:0;padding:10px 16px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;z-index:10}
+#score{color:#00e5ff;font-size:30px;font-weight:bold;text-shadow:0 0 14px #00e5ff;line-height:1}
+#score-lbl{color:#072030;font-size:10px;letter-spacing:3px;margin-top:2px}
+#lives{color:#ff4040;font-size:20px;letter-spacing:3px;text-shadow:0 0 8px #ff4040;min-height:24px;text-align:right}
+#wave-el{color:#7af;font-size:10px;letter-spacing:3px;margin-top:4px;opacity:0.65;text-align:right}
+#msg{position:fixed;top:44%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:32px;font-weight:bold;text-align:center;pointer-events:none;z-index:20;text-shadow:0 0 20px #00e5ff,0 0 50px #007;opacity:0;transition:opacity 0.3s;letter-spacing:3px;line-height:1.6;white-space:pre}
+#dpad{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,56px);gap:5px;pointer-events:auto;z-index:15}
+.dp{background:rgba(0,229,255,0.06);border:1px solid rgba(0,229,255,0.18);border-radius:10px;color:#00e5ff;font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background 0.1s;-webkit-tap-highlight-color:transparent}
+.dp:active{background:rgba(0,229,255,0.24)}
+.dp.mid{background:transparent;border-color:transparent;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div><div id="score">0</div><div id="score-lbl">SCORE</div></div>
+  <div><div id="lives">&#x2665;&#x2665;&#x2665;</div><div id="wave-el">WAVE 1</div></div>
+</div>
+<div id="msg"></div>
+<div id="dpad">
+  <div class="dp mid"></div><div class="dp" id="dp-u">&#x25B2;</div><div class="dp mid"></div>
+  <div class="dp" id="dp-l">&#x25C4;</div><div class="dp mid"></div><div class="dp" id="dp-r">&#x25BA;</div>
+  <div class="dp mid"></div><div class="dp" id="dp-d">&#x25BC;</div><div class="dp mid"></div>
+</div>
+
+<script>
+// GRID HUNT v2 | ga_grid_movement_v02 | Mechanic: grid_movement | Design score: 71.31
+// Atoms: GRID_MOVE, TURN_CHASE, GEM_COLLECT, TRAIL_KILL, PARTICLE_BURST, SCREEN_SHAKE, WAVE_ESCALATION, FLOAT_TEXT
+// STD-030: All exceptions caught+logged. STD-031: ~400L, justified in header (dpad HTML + 8 draw fns).
+// Kernel: NO — standalone game build, no kernel wiring.
+// Bloodflow: input → move → checkGems → trailKill → moveEnemies → hitCheck → frame(render)
+
+const CV = document.getElementById('c');
+const X  = CV.getContext('2d');
+const COLS = 9, ROWS = 9, TRAIL_MAX = 4, PARTICLES_CAP = 120;
+let T, OX, OY, bgGrad, floatFont = '';
+let shX = 0, shY = 0, shF = 0;
+let P, gems, enems, trail, particles, floats;
+let score, lives, wave, dead, frozen, gemTotal, moveCount, touchSt;
+
+// Cached DOM refs — avoid repeated getElementById in hot paths
+const $score = document.getElementById('score');
+const $lives = document.getElementById('lives');
+const $wave  = document.getElementById('wave-el');
+const $msg   = document.getElementById('msg');
+
+// ── RESIZE ────────────────────────────────────────────────────────────────────
+function resize() {
+    CV.width = window.innerWidth; CV.height = window.innerHeight;
+    const dpadH = 208;
+    T  = Math.floor(Math.min(CV.width / COLS, (CV.height - 60 - dpadH) / ROWS));
+    OX = Math.floor((CV.width  - T * COLS) / 2);
+    OY = Math.floor((CV.height - dpadH - T * ROWS) / 2) + 54;
+    bgGrad = X.createRadialGradient(CV.width/2, CV.height/2, 0, CV.width/2, CV.height/2, CV.width * 0.7);
+    bgGrad.addColorStop(0, 'rgba(0,40,70,0.12)'); bgGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    floatFont = 'bold ' + Math.round(T * 0.38) + 'px Courier New';
+}
+window.addEventListener('resize', resize);
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+function init() {
+    score = 0; lives = 3; wave = 1; dead = false;
+    frozen = 0; gemTotal = 0; moveCount = 0;
+    particles = []; floats = [];
+    spawnWave(); updateUI();
+}
+
+function spawnWave() {
+    P = { x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) };
+    trail = [];
+    gems  = spawnItems(Math.min(3 + wave, 8));
+    enems = spawnEnemies(Math.min(1 + wave, 6));
+    $wave.textContent = 'WAVE ' + wave;
+}
+
+function spawnItems(n) {
+    const out = []; let tries = 0;
+    while (out.length < n && tries++ < 999) {
+        const x = rndI(COLS), y = rndI(ROWS);
+        if (!near(x, y, P.x, P.y, 2) && !out.some(g => g.x === x && g.y === y))
+            out.push({ x, y, ph: Math.random() * Math.PI * 2 });
+    }
+    return out;
+}
+
+function spawnEnemies(n) {
+    const out = []; let tries = 0;
+    while (out.length < n && tries++ < 999) {
+        const x = rndI(COLS), y = rndI(ROWS);
+        const clear = !near(x, y, P.x, P.y, 3)
+            && !out.some(e => e.x === x && e.y === y)
+            && !gems.some(g => g.x === x && g.y === y);
+        if (clear) out.push({ x, y, ph: Math.random() * Math.PI * 2, fast: wave >= 3 && Math.random() < 0.35 });
+    }
+    return out;
+}
+
+function rndI(max) { return Math.floor(Math.random() * max); }
+function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+function near(ax, ay, bx, by, d) { return Math.abs(ax - bx) <= d && Math.abs(ay - by) <= d; }
+
+// ── MOVE ──────────────────────────────────────────────────────────────────────
+function move(dx, dy) {
+    if (dead) { restart(); return; }
+    const nx = P.x + dx, ny = P.y + dy;
+    if (!inBounds(nx, ny)) { shake(3, 5); return; }
+    trail.unshift({ x: P.x, y: P.y, age: 0, lethal: frozen > 0 });
+    if (trail.length > TRAIL_MAX) trail.length = TRAIL_MAX;
+    P.x = nx; P.y = ny;
+    moveCount++;
+    checkGems();
+    if (!dead) trailKill();
+    if (!dead) moveEnemies();
+    if (!dead) hitCheck();
+}
+
+function checkGems() {
+    for (let i = gems.length - 1; i >= 0; i--) {
+        if (gems[i].x !== P.x || gems[i].y !== P.y) continue;
+        const pts = 10 + wave * 5;
+        score += pts; gemTotal++;
+        burst(OX + P.x * T + T / 2, OY + P.y * T + T / 2, '#00e5ff', 10);
+        floatText('+' + pts, P.x, P.y, '#00e5ff');
+        gems.splice(i, 1);
+        if (gemTotal % 5 === 0) { frozen = 7; shake(4, 8); }
+        updateUI();
+    }
+    if (gems.length === 0) {
+        wave++; score += 50 * wave;
+        shake(7, 14);
+        burst(OX + P.x * T + T / 2, OY + P.y * T + T / 2, '#ffd700', 18);
+        floatText('WAVE ' + wave + '!', Math.floor(COLS / 2), Math.floor(ROWS / 2), '#ffd700');
+        updateUI(); spawnWave();
+    }
+}
+
+function trailKill() {
+    for (let ti = trail.length - 1; ti >= 0; ti--) {
+        const t = trail[ti];
+        if (!t.lethal) continue; // lethal flag set at push time; don't re-check live frozen (it may have expired)
+        for (let ei = enems.length - 1; ei >= 0; ei--) {
+            if (enems[ei].x !== t.x || enems[ei].y !== t.y) continue;
+            burst(OX + t.x * T + T / 2, OY + t.y * T + T / 2, '#ff4040', 12);
+            floatText('+' + (20 + wave * 3), t.x, t.y, '#ff8040');
+            score += 20 + wave * 3;
+            enems.splice(ei, 1);
+            updateUI();
+        }
+    }
+}
+
+function moveEnemies() {
+    if (frozen > 0) { frozen--; return; }
+    for (const e of enems) {
+        if (!e.fast && moveCount % 2 !== 0) continue;
+        const ddx = P.x - e.x, ddy = P.y - e.y;
+        const steps = [];
+        if (Math.abs(ddx) >= Math.abs(ddy)) {
+            if (ddx !== 0) steps.push([Math.sign(ddx), 0]);
+            if (ddy !== 0) steps.push([0, Math.sign(ddy)]);
+        } else {
+            if (ddy !== 0) steps.push([0, Math.sign(ddy)]);
+            if (ddx !== 0) steps.push([Math.sign(ddx), 0]);
+        }
+        if (Math.random() < 0.16 && steps.length > 1) steps.reverse();
+        for (const [sx, sy] of steps) {
+            const nx = e.x + sx, ny = e.y + sy;
+            if (inBounds(nx, ny) && !enems.some(o => o !== e && o.x === nx && o.y === ny)) {
+                e.x = nx; e.y = ny; break;
+            }
+        }
+    }
+}
+
+function hitCheck() {
+    for (const e of enems) {
+        if (e.x !== P.x || e.y !== P.y) continue;
+        lives--; shake(11, 20); updateUI();
+        burst(OX + P.x * T + T / 2, OY + P.y * T + T / 2, '#ff2020', 18);
+        if (lives <= 0) {
+            dead = true;
+            showMsg('GAME OVER\n\n' + score + ' PTS\n\nTAP TO PLAY');
+        } else {
+            P.x = Math.floor(COLS / 2); P.y = Math.floor(ROWS / 2); trail = [];
+        }
+        return;
+    }
+}
+
+function restart() { hideMsg(); init(); }
+
+// ── SHAKE ─────────────────────────────────────────────────────────────────────
+function shake(str, frames) {
+    shX = (Math.random() - 0.5) * str * 2.4;
+    shY = (Math.random() - 0.5) * str * 2.4;
+    shF = frames || 8;
+}
+
+// ── PARTICLES + FLOAT TEXT ────────────────────────────────────────────────────
+function burst(cx, cy, color, count) {
+    const room = PARTICLES_CAP - particles.length;
+    if (room <= 0) return;
+    const n = Math.min(count, room);
+    for (let i = 0; i < n; i++) {
+        const a = (Math.PI * 2 * i / n) + Math.random() * 0.5;
+        const spd = 1.4 + Math.random() * 2.4;
+        particles.push({ x: cx, y: cy, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, life: 1, color });
+    }
+}
+
+function floatText(text, gx, gy, color) {
+    floats.push({ text, x: OX + gx * T + T / 2, y: OY + gy * T, vy: -1.3, life: 1, color });
+}
+
+// ── UI ────────────────────────────────────────────────────────────────────────
+function updateUI() {
+    $score.textContent = score;
+    $lives.textContent = '\u2665'.repeat(Math.max(0, lives));
+}
+function showMsg(t) { $msg.textContent = t; $msg.style.opacity = '1'; }
+function hideMsg()  { $msg.style.opacity = '0'; }
+
+// ── FRAME ─────────────────────────────────────────────────────────────────────
+function frame(ts) {
+    try {
+        if (shF > 0) { shF--; shX *= 0.54; shY *= 0.54; } else { shX = 0; shY = 0; }
+        // Update animated state before draw
+        for (const g of gems)      { g.ph += 0.042; }
+        for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vx *= 0.87; p.vy = p.vy * 0.87 + 0.07; p.life -= 0.048; }
+        for (const f of floats)    { f.y += f.vy; f.vy *= 0.94; f.life -= 0.028; }
+        for (const t of trail)     { t.age += 0.07; }
+        if (particles.length > 0) particles = particles.filter(p => p.life > 0);
+        if (floats.length > 0)    floats     = floats.filter(f => f.life > 0);
+        if (trail.length > 0)     trail      = trail.filter(t => t.age < 1.0);
+        X.fillStyle = '#050b10'; X.fillRect(0, 0, CV.width, CV.height);
+        X.fillStyle = bgGrad;    X.fillRect(0, 0, CV.width, CV.height);
+        X.save(); X.translate(shX, shY);
+        drawGrid(ts);
+        drawTrail();
+        drawGems(ts);
+        drawEnems(ts);
+        drawPlayer(ts);
+        drawParticles();
+        drawFloats();
+        X.restore();
+    } catch (err) {
+        console.warn('[WARN] frame render:', err);
+    }
+    requestAnimationFrame(frame);
+}
+
+// ── DRAW: GRID ────────────────────────────────────────────────────────────────
+function drawGrid(ts) {
+    X.strokeStyle = 'rgba(0,229,255,0.05)'; X.lineWidth = 0.5;
+    for (let i = 0; i <= COLS; i++) {
+        X.beginPath(); X.moveTo(OX + i * T, OY); X.lineTo(OX + i * T, OY + ROWS * T); X.stroke();
+    }
+    for (let j = 0; j <= ROWS; j++) {
+        X.beginPath(); X.moveTo(OX, OY + j * T); X.lineTo(OX + COLS * T, OY + j * T); X.stroke();
+    }
+    const fPulse = frozen > 0 ? 0.3 + 0.25 * Math.sin(ts * 0.01) : 0;
+    X.strokeStyle = frozen > 0 ? 'rgba(100,200,255,' + (0.4 + fPulse) + ')' : 'rgba(0,229,255,0.22)';
+    X.lineWidth = frozen > 0 ? 2.5 : 1;
+    X.strokeRect(OX, OY, COLS * T, ROWS * T);
+}
+
+// ── DRAW: TRAIL ───────────────────────────────────────────────────────────────
+function drawTrail() {
+    for (const t of trail) {
+        const a = (1 - t.age) * (t.lethal ? 0.5 : 0.17);
+        const col = t.lethal ? '100,220,255' : '0,229,255';
+        const cx = OX + t.x * T + T / 2, cy = OY + t.y * T + T / 2;
+        X.fillStyle = 'rgba(' + col + ',' + a + ')';
+        X.beginPath(); X.arc(cx, cy, T * 0.38 * (1 - t.age * 0.42), 0, Math.PI * 2); X.fill();
+    }
+}
+
+// ── DRAW: GEMS ────────────────────────────────────────────────────────────────
+function drawGems(ts) {
+    for (const g of gems) {
+        const glow = 0.7 + 0.3 * Math.sin(g.ph);
+        const cx = OX + g.x * T + T / 2, cy = OY + g.y * T + T / 2 + Math.sin(g.ph) * T * 0.05;
+        const r = T * 0.22;
+        const gr = X.createRadialGradient(cx, cy, 0, cx, cy, T * 0.52);
+        gr.addColorStop(0, 'rgba(0,229,255,' + (0.26 * glow) + ')');
+        gr.addColorStop(1, 'rgba(0,229,255,0)');
+        X.fillStyle = gr; X.fillRect(cx - T * 0.52, cy - T * 0.52, T * 1.04, T * 1.04);
+        X.save(); X.translate(cx, cy); X.rotate(ts * 0.00085);
+        X.fillStyle = 'rgba(0,229,255,' + (0.88 + 0.12 * glow) + ')';
+        X.beginPath(); X.moveTo(0, -r); X.lineTo(r * 0.5, 0); X.lineTo(0, r); X.lineTo(-r * 0.5, 0); X.closePath(); X.fill();
+        X.fillStyle = 'rgba(180,245,255,0.62)';
+        X.beginPath(); X.moveTo(0, -r * 0.44); X.lineTo(r * 0.22, 0); X.lineTo(0, r * 0.44); X.lineTo(-r * 0.22, 0); X.closePath(); X.fill();
+        X.restore();
+    }
+}
+
+// ── DRAW: ENEMIES ─────────────────────────────────────────────────────────────
+function drawEnems(ts) {
+    for (const e of enems) {
+        const fr = frozen > 0;
+        const p  = fr ? 0.4 : 0.78 + 0.22 * Math.sin(ts * 0.005 + e.ph);
+        const cx = OX + e.x * T + T / 2, cy = OY + e.y * T + T / 2;
+        const r  = T * (e.fast ? 0.25 : 0.3);
+        const ec = fr ? '60,120,255' : (e.fast ? '255,120,0' : '255,40,40');
+        const gr = X.createRadialGradient(cx, cy, 0, cx, cy, r * 2.6);
+        gr.addColorStop(0, 'rgba(' + ec + ',' + (0.2 * p) + ')');
+        gr.addColorStop(1, 'rgba(' + ec + ',0)');
+        X.fillStyle = gr; X.fillRect(cx - r * 2.6, cy - r * 2.6, r * 5.2, r * 5.2);
+        X.save(); X.translate(cx, cy); X.rotate(ts * (e.fast ? 0.0045 : 0.002) + e.ph);
+        X.fillStyle = 'rgba(' + ec + ',' + p + ')';
+        const s = r * 0.86; X.fillRect(-s, -s, s * 2, s * 2);
+        X.restore();
+        X.strokeStyle = 'rgba(' + ec + ',' + (0.48 * p) + ')'; X.lineWidth = 1;
+        X.strokeRect(cx - r * 0.54, cy - r * 0.54, r * 1.08, r * 1.08);
+    }
+}
+
+// ── DRAW: PLAYER ──────────────────────────────────────────────────────────────
+function drawPlayer(ts) {
+    const cx = OX + P.x * T + T / 2, cy = OY + P.y * T + T / 2;
+    const p = 0.9 + 0.1 * Math.sin(ts * 0.007);
+    const r = T * 0.34;
+    const col = frozen > 0 ? '100,210,255' : '0,229,255';
+    const gr = X.createRadialGradient(cx, cy, 0, cx, cy, r * 3.2);
+    gr.addColorStop(0, 'rgba(' + col + ',' + (0.22 * p) + ')');
+    gr.addColorStop(1, 'rgba(' + col + ',0)');
+    X.fillStyle = gr; X.fillRect(cx - r * 3.2, cy - r * 3.2, r * 6.4, r * 6.4);
+    X.fillStyle = 'rgba(' + col + ',' + p + ')';
+    X.beginPath(); X.arc(cx, cy, r, 0, Math.PI * 2); X.fill();
+    X.fillStyle = 'rgba(255,255,255,0.92)';
+    X.beginPath(); X.arc(cx, cy, r * 0.27, 0, Math.PI * 2); X.fill();
+    X.strokeStyle = 'rgba(180,240,255,' + (0.5 * p) + ')'; X.lineWidth = 1.5;
+    X.beginPath(); X.arc(cx, cy, r * 0.64, 0, Math.PI * 2); X.stroke();
+}
+
+// ── DRAW: PARTICLES ───────────────────────────────────────────────────────────
+function drawParticles() {
+    for (const p of particles) {
+        X.globalAlpha = p.life * p.life;
+        X.fillStyle = p.color;
+        X.beginPath(); X.arc(p.x, p.y, 2.6 * p.life, 0, Math.PI * 2); X.fill();
+    }
+    X.globalAlpha = 1;
+}
+
+// ── DRAW: FLOAT TEXT ──────────────────────────────────────────────────────────
+function drawFloats() {
+    X.textAlign = 'center';
+    X.font = floatFont;
+    for (const f of floats) {
+        X.globalAlpha = f.life * f.life;
+        X.fillStyle = f.color;
+        X.fillText(f.text, f.x, f.y);
+    }
+    X.globalAlpha = 1; X.textAlign = 'left';
+}
+
+// ── INPUT: KEYBOARD ───────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+    try {
+        const MAP = {
+            arrowup: [0,-1], arrowdown: [0,1], arrowleft: [-1,0], arrowright: [1,0],
+            w: [0,-1], s: [0,1], a: [-1,0], d: [1,0]
+        };
+        const dir = MAP[e.key.toLowerCase()];
+        if (dir) { e.preventDefault(); move(dir[0], dir[1]); }
+        if (e.key.toLowerCase() === 'r' && dead) restart();
+    } catch (err) {
+        console.warn('[WARN] keydown:', err);
+    }
+});
+
+// ── INPUT: SWIPE ──────────────────────────────────────────────────────────────
+CV.addEventListener('touchstart', e => {
+    try { e.preventDefault(); touchSt = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
+    catch (err) { console.warn('[WARN] touchstart:', err); }
+}, { passive: false });
+
+CV.addEventListener('touchend', e => {
+    try {
+        e.preventDefault();
+        if (!touchSt) return;
+        const dx = e.changedTouches[0].clientX - touchSt.x;
+        const dy = e.changedTouches[0].clientY - touchSt.y;
+        touchSt = null;
+        if (Math.abs(dx) < 12 && Math.abs(dy) < 12) { if (dead) restart(); return; }
+        if (Math.abs(dx) > Math.abs(dy)) move(dx > 0 ? 1 : -1, 0);
+        else move(0, dy > 0 ? 1 : -1);
+    } catch (err) {
+        console.warn('[WARN] touchend:', err);
+    }
+}, { passive: false });
+
+// ── INPUT: D-PAD ──────────────────────────────────────────────────────────────
+function bindDpad(id, dx, dy) {
+    try {
+        const el = document.getElementById(id);
+        el.addEventListener('touchstart', e => { e.preventDefault(); move(dx, dy); }, { passive: false });
+        el.addEventListener('mousedown',  () => move(dx, dy));
+    } catch (err) {
+        console.warn('[WARN] bindDpad ' + id + ':', err);
+    }
+}
+bindDpad('dp-u',  0, -1); bindDpad('dp-d',  0,  1);
+bindDpad('dp-l', -1,  0); bindDpad('dp-r',  1,  0);
+
+// ── TELEGRAM ──────────────────────────────────────────────────────────────────
+try {
+    if (window.Telegram && window.Telegram.WebApp) {
+        window.Telegram.WebApp.ready();
+        window.Telegram.WebApp.expand();
+    }
+} catch (err) {
+    console.warn('[WARN] Telegram WebApp init:', err);
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+resize();
+init();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

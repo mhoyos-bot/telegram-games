@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+<title>RUNE CATCH</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;right:0;bottom:0;pointer-events:none}
+#score{position:absolute;top:14px;left:50%;transform:translateX(-50%);
+  color:#f0e8ff;font-size:30px;font-weight:bold;
+  text-shadow:0 0 18px #aa66ff,0 0 2px #000;letter-spacing:2px}
+#surge-label{position:absolute;top:54px;left:50%;transform:translateX(-50%);
+  color:#ffe066;font-size:20px;font-weight:bold;
+  text-shadow:0 0 14px #ffcc00,0 0 2px #000;
+  opacity:0;transition:opacity .2s;letter-spacing:3px}
+#lives{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);
+  display:flex;gap:10px;align-items:center}
+.ldot{width:14px;height:14px;border-radius:50%;
+  background:#cc44ff;box-shadow:0 0 10px #ee88ff;transition:all .3s}
+.ldot.off{background:#221133;box-shadow:none}
+#flash{position:absolute;top:0;left:0;right:0;bottom:0;
+  pointer-events:none;opacity:0;transition:opacity .12s}
+#popup{position:absolute;top:42%;left:50%;transform:translate(-50%,-50%);
+  color:#fff;font-size:24px;font-weight:bold;
+  text-shadow:0 0 12px #cc88ff,0 0 2px #000;pointer-events:none;opacity:0;transition:opacity .25s}
+#overlay{position:absolute;top:0;left:0;right:0;bottom:0;
+  background:rgba(2,1,10,.92);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  pointer-events:all}
+#overlay.gone{display:none}
+#overlay h1{color:#f0e8ff;font-size:34px;text-shadow:0 0 28px #aa55ff,0 0 2px #000;
+  margin-bottom:6px;letter-spacing:4px}
+#overlay .sub{color:#ccaaee;font-size:13px;margin-bottom:22px;
+  text-align:center;line-height:1.9;max-width:260px}
+#overlay .fscore{color:#ffe066;font-size:24px;margin-bottom:18px;
+  text-shadow:0 0 10px #ffcc00;display:none}
+#overlay button{background:#180838;border:2px solid #aa55ff;
+  color:#f0e8ff;font-size:17px;padding:12px 34px;
+  cursor:pointer;letter-spacing:2px;font-family:'Courier New',monospace;
+  box-shadow:0 0 22px #8833ff55;pointer-events:all}
+#overlay button:hover{background:#2a1060}
+#multi{position:absolute;top:90px;left:50%;transform:translateX(-50%);
+  color:#ffe066;font-size:15px;text-shadow:0 0 8px #ffcc00,0 0 2px #000;opacity:0;
+  transition:opacity .3s;letter-spacing:2px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="surge-label">✦ SPIRIT SURGE ✦</div>
+  <div id="multi"></div>
+  <div id="lives"></div>
+  <div id="flash"></div>
+  <div id="popup"></div>
+</div>
+<div id="overlay">
+  <h1>RUNE CATCH</h1>
+  <div class="sub" id="sub-text">Ancient runes fall from the spirit veil<br>Tap to absorb their power<br>Chain 3+ for Spirit Surge<br>Miss 3 and the veil tears</div>
+  <div class="fscore" id="fscore"></div>
+  <button id="btn">ENTER THE VEIL</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// Telegram
+if(window.Telegram?.WebApp){Telegram.WebApp.ready();Telegram.WebApp.expand();}
+
+// ---------- SCENE ----------
+const canvas = document.getElementById('c');
+const W = ()=>window.innerWidth, H = ()=>window.innerHeight;
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setSize(W(),H());
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setClearColor(0x03010e);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x03010e, 0.055);
+
+const camera = new THREE.PerspectiveCamera(50, W()/H(), 0.1, 80);
+camera.position.set(0, 12, 10);
+camera.lookAt(0, 0, 0);
+
+window.addEventListener('resize', ()=>{
+  renderer.setSize(W(),H());
+  camera.aspect = W()/H();
+  camera.updateProjectionMatrix();
+});
+
+// ---------- LIGHTING ----------
+const ambient = new THREE.AmbientLight(0x180830, 1.2);
+scene.add(ambient);
+const ptLight = new THREE.PointLight(0xaa55ff, 2.5, 22);
+ptLight.position.set(0, 8, 0);
+scene.add(ptLight);
+const ptLight2 = new THREE.PointLight(0x3311aa, 1.5, 16);
+ptLight2.position.set(0, -2, 0);
+scene.add(ptLight2);
+// Color accent light for contrast variation
+const ptLight3 = new THREE.PointLight(0x00cc88, 1.0, 12);
+ptLight3.position.set(5, 3, -3);
+scene.add(ptLight3);
+
+// ---------- GROUND ----------
+const groundGeo = new THREE.CircleGeometry(9, 7);
+const groundMat = new THREE.MeshLambertMaterial({color:0x0c0325, side:THREE.DoubleSide});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI/2;
+ground.position.y = -2.5;
+scene.add(ground);
+
+// Ground glow ring — teal accent for contrast
+const ringGeo = new THREE.RingGeometry(7.5, 8.2, 32);
+const ringMat = new THREE.MeshBasicMaterial({color:0x00aa66, side:THREE.DoubleSide, transparent:true, opacity:0.3});
+const ring = new THREE.Mesh(ringGeo, ringMat);
+ring.rotation.x = -Math.PI/2;
+ring.position.y = -2.45;
+scene.add(ring);
+
+// Standing stones
+const stoneMat = new THREE.MeshLambertMaterial({color:0x1a0840});
+function addStone(x,z,h){
+  const g = new THREE.BoxGeometry(0.3+Math.random()*0.2, h, 0.3+Math.random()*0.2);
+  const m = new THREE.Mesh(g, stoneMat);
+  m.position.set(x, -2.5+h/2, z);
+  scene.add(m);
+}
+for(let i=0;i<8;i++){
+  const ang = (i/8)*Math.PI*2;
+  addStone(Math.cos(ang)*7, Math.sin(ang)*7, 0.8+Math.random()*1.2);
+}
+
+// ---------- RUNE SHAPES ----------
+function makeRuneGeo(type){
+  switch(type%5){
+    case 0: return new THREE.TetrahedronGeometry(0.35,0);
+    case 1: return new THREE.OctahedronGeometry(0.3,0);
+    case 2: return new THREE.IcosahedronGeometry(0.28,0);
+    case 3: return new THREE.BoxGeometry(0.4,0.4,0.4);
+    case 4: return new THREE.DodecahedronGeometry(0.3,0);
+  }
+}
+
+// V02: Expanded color palette — diverse hues fix visual gate (was monochromatic)
+const RUNE_COLORS = [
+  0xcc55ff, // violet
+  0x55aaff, // sky blue
+  0x00ee88, // mint green — high contrast vs dark bg
+  0xff5533, // orange-red — high contrast
+  0xffdd22, // bright yellow — high contrast
+  0xff44aa, // hot pink
+  0x33ddff, // cyan
+  0x88ff44, // lime green
+  0xff7722, // orange
+  0xaa44ff  // purple
+];
+
+// ---------- PARTICLES (V02: enhanced) ----------
+const MAX_PARTS = 450; // increased for trail particles
+const partGeo = new THREE.BufferGeometry();
+const partPos = new Float32Array(MAX_PARTS*3);
+const partVel = [];
+const partLife = new Float32Array(MAX_PARTS);
+const partCol = new Float32Array(MAX_PARTS*3); // per-particle color
+for(let i=0;i<MAX_PARTS;i++){
+  partPos[i*3]=partPos[i*3+1]=partPos[i*3+2]=999;
+  partLife[i]=0;
+  partVel.push([0,0,0]);
+  partCol[i*3]=1; partCol[i*3+1]=0.6; partCol[i*3+2]=1;
+}
+partGeo.setAttribute('position', new THREE.BufferAttribute(partPos,3));
+partGeo.setAttribute('color', new THREE.BufferAttribute(partCol,3));
+const partMat = new THREE.PointsMaterial({
+  size:0.15, transparent:true, opacity:0.9, depthWrite:false,
+  vertexColors:true // V02: per-particle color
+});
+const particles = new THREE.Points(partGeo, partMat);
+scene.add(particles);
+let partIdx = 0;
+
+function hexToRgb(hex){
+  return [(hex>>16&0xff)/255, (hex>>8&0xff)/255, (hex&0xff)/255];
+}
+
+function spawnBurst(x, y, z, color, count, speed=0.07){
+  const rgb = hexToRgb(color);
+  for(let i=0;i<count;i++){
+    const idx = partIdx % MAX_PARTS;
+    partIdx++;
+    partPos[idx*3]=x; partPos[idx*3+1]=y; partPos[idx*3+2]=z;
+    const spd = speed*0.7 + Math.random()*speed;
+    const ang = Math.random()*Math.PI*2;
+    const elev = (Math.random()-0.5)*Math.PI;
+    partVel[idx] = [
+      Math.cos(ang)*Math.cos(elev)*spd,
+      Math.sin(elev)*spd+0.04,
+      Math.sin(ang)*Math.cos(elev)*spd
+    ];
+    partLife[idx] = 1.0+Math.random()*0.5;
+    partCol[idx*3]=rgb[0]; partCol[idx*3+1]=rgb[1]; partCol[idx*3+2]=rgb[2];
+  }
+  partGeo.attributes.position.needsUpdate=true;
+  partGeo.attributes.color.needsUpdate=true;
+}
+
+// V02: trail particles — spawned each frame behind falling runes
+function spawnTrail(x, y, z, color){
+  const rgb = hexToRgb(color);
+  const idx = partIdx % MAX_PARTS;
+  partIdx++;
+  partPos[idx*3]=x+(Math.random()-0.5)*0.15;
+  partPos[idx*3+1]=y+(Math.random()-0.5)*0.1;
+  partPos[idx*3+2]=z+(Math.random()-0.5)*0.15;
+  partVel[idx] = [(Math.random()-0.5)*0.01, 0.005+Math.random()*0.01, (Math.random()-0.5)*0.01];
+  partLife[idx] = 0.35+Math.random()*0.25;
+  partCol[idx*3]=rgb[0]; partCol[idx*3+1]=rgb[1]; partCol[idx*3+2]=rgb[2];
+}
+
+// V02: ring burst — flat ring of particles for surge
+function spawnRing(x, y, z, color, count){
+  const rgb = hexToRgb(color);
+  for(let i=0;i<count;i++){
+    const idx = partIdx % MAX_PARTS;
+    partIdx++;
+    const ang = (i/count)*Math.PI*2;
+    partPos[idx*3]=x+Math.cos(ang)*0.3;
+    partPos[idx*3+1]=y;
+    partPos[idx*3+2]=z+Math.sin(ang)*0.3;
+    const spd = 0.08+Math.random()*0.06;
+    partVel[idx] = [Math.cos(ang)*spd, 0.01+Math.random()*0.02, Math.sin(ang)*spd];
+    partLife[idx] = 0.8+Math.random()*0.4;
+    partCol[idx*3]=rgb[0]; partCol[idx*3+1]=rgb[1]; partCol[idx*3+2]=rgb[2];
+  }
+  partGeo.attributes.position.needsUpdate=true;
+  partGeo.attributes.color.needsUpdate=true;
+}
+
+// Spiral ambient particles
+const spiralCount = 60;
+const spiralGeo = new THREE.BufferGeometry();
+const spiralPos = new Float32Array(spiralCount*3);
+const spiralPhase = new Float32Array(spiralCount);
+for(let i=0;i<spiralCount;i++){
+  spiralPhase[i] = (i/spiralCount)*Math.PI*2;
+  spiralPos[i*3]=0; spiralPos[i*3+1]=0; spiralPos[i*3+2]=0;
+}
+spiralGeo.setAttribute('position', new THREE.BufferAttribute(spiralPos,3));
+const spiralMat = new THREE.PointsMaterial({color:0x6633cc, size:0.08, transparent:true, opacity:0.5, depthWrite:false});
+const spiralPts = new THREE.Points(spiralGeo, spiralMat);
+scene.add(spiralPts);
+
+// ---------- GAME STATE ----------
+let score = 0;
+let lives = 3;
+let combo = 0;
+let comboTimer = 0;
+let running = false;
+let spawnTimer = 0;
+let spawnInterval = 2.0;
+let runes = [];
+let surgeActive = false;
+let surgeTimer = 0;
+// V02: separate x/y shake axes for more expressive shake
+let camShakeX = 0;
+let camShakeY = 0;
+
+const scoreEl  = document.getElementById('score');
+const surgeEl  = document.getElementById('surge-label');
+const multiEl  = document.getElementById('multi');
+const livesEl  = document.getElementById('lives');
+const flashEl  = document.getElementById('flash');
+const popupEl  = document.getElementById('popup');
+const overlay  = document.getElementById('overlay');
+const btn      = document.getElementById('btn');
+const fscoreEl = document.getElementById('fscore');
+const subEl    = document.getElementById('sub-text');
+
+function buildLives(){
+  livesEl.innerHTML='';
+  for(let i=0;i<3;i++){
+    const d=document.createElement('div');
+    d.className='ldot'+(i>=lives?' off':'');
+    livesEl.appendChild(d);
+  }
+}
+buildLives();
+
+function flash(col, dur){
+  flashEl.style.background=col;
+  flashEl.style.opacity='0.35';
+  setTimeout(()=>flashEl.style.opacity='0', dur*1000);
+}
+
+function showPopup(txt, dur){
+  popupEl.textContent=txt;
+  popupEl.style.opacity='1';
+  setTimeout(()=>popupEl.style.opacity='0', dur*1000);
+}
+
+function showSurge(){
+  surgeEl.style.opacity='1';
+  setTimeout(()=>surgeEl.style.opacity='0', 1000);
+}
+
+function showMulti(x){
+  multiEl.textContent=`x${x} COMBO`;
+  multiEl.style.opacity='1';
+  setTimeout(()=>multiEl.style.opacity='0', 800);
+}
+
+// ---------- RUNE MANAGEMENT ----------
+function spawnRune(){
+  const type = Math.floor(Math.random()*5);
+  const col = RUNE_COLORS[Math.floor(Math.random()*RUNE_COLORS.length)];
+  const geo = makeRuneGeo(type);
+  const mat = new THREE.MeshLambertMaterial({color:col, emissive:col, emissiveIntensity:0.45});
+  const mesh = new THREE.Mesh(geo, mat);
+
+  const ang = Math.random()*Math.PI*2;
+  const rad = Math.random()*4.5;
+  mesh.position.set(Math.cos(ang)*rad, 7+Math.random()*3, Math.sin(ang)*rad);
+
+  // Glow ring around rune
+  const glowGeo = new THREE.RingGeometry(0.5, 0.65, 8);
+  const glowMat = new THREE.MeshBasicMaterial({color:col, side:THREE.DoubleSide, transparent:true, opacity:0.5});
+  const glow = new THREE.Mesh(glowGeo, glowMat);
+  glow.rotation.x = -Math.PI/2;
+  mesh.add(glow);
+
+  scene.add(mesh);
+
+  runes.push({
+    mesh, vel: 0.8+Math.random()*0.5,
+    rot: (Math.random()-0.5)*0.06,
+    age: 0, maxAge: 5.0+Math.random()*2.0,
+    color: col, dead: false, caught: false
+  });
+}
+
+function killRune(rune, caught){
+  rune.dead = true;
+  const px = rune.mesh.position.x;
+  const py = rune.mesh.position.y;
+  const pz = rune.mesh.position.z;
+  if(caught){
+    // V02: spherical burst + ring burst
+    spawnBurst(px, py, pz, rune.color, 35, 0.08);
+    spawnRing(px, py, pz, rune.color, 20);
+  } else {
+    // Miss: white-red burst
+    spawnBurst(px, py, pz, 0xff2244, 12, 0.05);
+  }
+  scene.remove(rune.mesh);
+}
+
+// ---------- INPUT ----------
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function onTap(evt){
+  if(!running) return;
+  evt.preventDefault();
+
+  const cx = evt.touches ? evt.touches[0].clientX : evt.clientX;
+  const cy = evt.touches ? evt.touches[0].clientY : evt.clientY;
+  mouse.x = (cx/W())*2-1;
+  mouse.y = -(cy/H())*2+1;
+
+  raycaster.setFromCamera(mouse, camera);
+
+  let hit = null;
+  let bestDist = Infinity;
+  for(const rune of runes){
+    if(rune.dead||rune.caught) continue;
+    const intersects = raycaster.intersectObject(rune.mesh, true);
+    if(intersects.length>0 && intersects[0].distance < bestDist){
+      bestDist = intersects[0].distance;
+      hit = rune;
+    }
+  }
+
+  if(hit){
+    absorbRune(hit, cx, cy);
+  } else {
+    // Miss tap — small shake
+    camShakeX = Math.max(camShakeX, 0.04);
+    camShakeY = Math.max(camShakeY, 0.02);
+  }
+}
+
+function absorbRune(rune){
+  rune.caught = true;
+  killRune(rune, true);
+
+  combo++;
+  comboTimer = 2.5;
+  score += 10 * Math.min(combo, 8);
+  scoreEl.textContent = score;
+
+  flash('#7722ff', 0.15);
+  // V02: horizontal + vertical shake on catch
+  camShakeX = Math.max(camShakeX, 0.1);
+  camShakeY = Math.max(camShakeY, 0.05);
+
+  if(combo >= 3){
+    surgeActive = true;
+    surgeTimer = 1.2;
+    showSurge();
+    flash('#ffffff', 0.2);
+    // V02: surge = extra burst + secondary ring in accent color
+    spawnBurst(rune.mesh.position.x, rune.mesh.position.y, rune.mesh.position.z, rune.color, 55, 0.1);
+    spawnRing(rune.mesh.position.x, rune.mesh.position.y, rune.mesh.position.z, 0xffdd22, 32);
+    // V02: stronger vertical shake on surge
+    camShakeX = 0.22;
+    camShakeY = 0.18;
+    ptLight.intensity = 7;
+    setTimeout(()=>ptLight.intensity=2.5, 400);
+  }
+  if(combo > 1) showMulti(combo);
+
+  showPopup(combo>=3?'✦ SURGE ✦':'+'+(10*Math.min(combo,8)), 0.7);
+}
+
+function missRune(rune){
+  killRune(rune, false);
+  lives--;
+  combo = 0;
+  comboTimer = 0;
+  buildLives();
+  flash('#ff2244', 0.3);
+  // V02: strong downward-biased shake on miss
+  camShakeX = Math.max(camShakeX, 0.18);
+  camShakeY = Math.max(camShakeY, 0.22);
+  showPopup('✗', 0.5);
+  if(lives<=0) endGame();
+}
+
+function endGame(){
+  running = false;
+  for(const r of runes) if(!r.dead){ scene.remove(r.mesh); }
+  runes = [];
+  subEl.style.display='none';
+  fscoreEl.style.display='block';
+  fscoreEl.textContent='SCORE: '+score;
+  btn.textContent='PLAY AGAIN';
+  overlay.classList.remove('gone');
+}
+
+btn.addEventListener('click', startGame);
+
+function startGame(){
+  score=0; lives=3; combo=0; comboTimer=0;
+  spawnTimer=0; spawnInterval=2.0; running=true;
+  runes=[]; partIdx=0;
+  camShakeX=0; camShakeY=0;
+  scoreEl.textContent='0';
+  buildLives();
+  subEl.style.display='block';
+  fscoreEl.style.display='none';
+  overlay.classList.add('gone');
+}
+
+canvas.addEventListener('touchstart', onTap, {passive:false});
+canvas.addEventListener('mousedown', onTap);
+
+// ---------- CLOCK ----------
+const clock = new THREE.Clock();
+let t = 0;
+
+// ---------- LOOP ----------
+function loop(){
+  requestAnimationFrame(loop);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  t += dt;
+
+  // Spiral ambient
+  for(let i=0;i<spiralCount;i++){
+    const ph = spiralPhase[i]+t*0.4;
+    const r = 5+Math.sin(t*0.2+ph)*2;
+    const h = Math.sin(t*0.3+ph*1.3)*3;
+    spiralPos[i*3]   = Math.cos(ph)*r;
+    spiralPos[i*3+1] = h;
+    spiralPos[i*3+2] = Math.sin(ph)*r;
+  }
+  spiralGeo.attributes.position.needsUpdate=true;
+
+  // Particle update
+  let particleDirty = false;
+  for(let i=0;i<MAX_PARTS;i++){
+    if(partLife[i]<=0) continue;
+    partLife[i] -= dt*1.5;
+    if(partLife[i]<=0){
+      partPos[i*3]=partPos[i*3+1]=partPos[i*3+2]=999;
+      particleDirty=true;
+      continue;
+    }
+    partPos[i*3]   += partVel[i][0];
+    partPos[i*3+1] += partVel[i][1];
+    partPos[i*3+2] += partVel[i][2];
+    partVel[i][1]  -= 0.003;
+    particleDirty=true;
+  }
+  if(particleDirty){
+    partGeo.attributes.position.needsUpdate=true;
+    partGeo.attributes.color.needsUpdate=true;
+  }
+
+  // Ground ring pulse — teal for contrast
+  ring.material.opacity = 0.18+Math.sin(t*1.5)*0.12;
+  ring.rotation.z += dt*0.08;
+  ptLight.position.y = 6+Math.sin(t*0.7)*1.5;
+  // Accent light slowly orbit
+  ptLight3.position.x = Math.cos(t*0.4)*5;
+  ptLight3.position.z = Math.sin(t*0.4)*-3;
+
+  if(running){
+    spawnTimer -= dt;
+    if(spawnTimer<=0){
+      spawnRune();
+      spawnInterval = Math.max(0.7, 2.0 - score*0.008);
+      spawnTimer = spawnInterval;
+    }
+
+    if(comboTimer>0){
+      comboTimer -= dt;
+      if(comboTimer<=0){ combo=0; }
+    }
+
+    for(const rune of runes){
+      if(rune.dead||rune.caught) continue;
+      rune.age += dt;
+      rune.mesh.position.y -= rune.vel * dt;
+      rune.mesh.rotation.x += rune.rot;
+      rune.mesh.rotation.y += rune.rot*0.7;
+
+      // V02: trail particles per rune (every other frame, coarse rate)
+      if(Math.random() < 0.4){
+        spawnTrail(
+          rune.mesh.position.x,
+          rune.mesh.position.y,
+          rune.mesh.position.z,
+          rune.color
+        );
+      }
+
+      // Pulse glow ring
+      const glow = rune.mesh.children[0];
+      if(glow){
+        const pulse = 0.4+Math.sin(t*3+rune.age*2)*0.2;
+        glow.material.opacity = pulse;
+        const sc = 1+Math.sin(t*4+rune.age)*0.1;
+        glow.scale.set(sc,sc,sc);
+      }
+
+      // Age warning
+      const lifeRatio = rune.age/rune.maxAge;
+      if(lifeRatio>0.7){
+        rune.mesh.material.emissiveIntensity = 0.45+lifeRatio*0.65;
+      }
+
+      if(rune.mesh.position.y < -2.5){
+        missRune(rune);
+      }
+    }
+
+    runes = runes.filter(r=>!r.dead);
+  }
+
+  // Surge visual
+  if(surgeTimer>0){
+    surgeTimer -= dt;
+    scene.fog.density = 0.03;
+  } else {
+    scene.fog.density += (0.055 - scene.fog.density)*0.05;
+  }
+
+  // V02: two-axis camera shake — horizontal + vertical
+  if(camShakeX > 0.001){
+    camera.position.x = Math.sin(t*31)*camShakeX;
+    camShakeX *= 0.83;
+  } else {
+    camera.position.x = 0;
+    camShakeX = 0;
+  }
+  if(camShakeY > 0.001){
+    camera.position.y = 12 + Math.sin(t*27)*camShakeY;
+    camShakeY *= 0.80;
+  } else {
+    camera.position.y = 12;
+    camShakeY = 0;
+  }
+  // Z shake coupled to X (legacy feel preserved)
+  const camShakeAvg = (camShakeX + camShakeY) * 0.5;
+  camera.position.z = 10 + Math.cos(t*29)*camShakeAvg;
+
+  renderer.render(scene, camera);
+}
+loop();
+</script>
+</body>
+</html>

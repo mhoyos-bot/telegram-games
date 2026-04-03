@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Tap Survivor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0e14;
+  overflow: hidden;
+  touch-action: none;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  color: #e0e0e0;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#game-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  z-index: 1;
+}
+
+/* --- HUD Overlay --- */
+#hud {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 10;
+  pointer-events: none;
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+#hud-left, #hud-right {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#hud-right { align-items: flex-end; }
+
+.hud-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: #556;
+  line-height: 1;
+}
+.hud-value {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  color: #00ffcc;
+  text-shadow: 0 0 12px rgba(0,255,204,0.4);
+}
+#wave-display .hud-value { color: #ff3366; text-shadow: 0 0 12px rgba(255,51,102,0.4); }
+#combo-display .hud-value { color: #ffcc00; text-shadow: 0 0 12px rgba(255,204,0,0.4); }
+#combo-display { opacity: 0; transition: opacity 0.3s; }
+#combo-display.active { opacity: 1; }
+
+/* HP Bar */
+#hp-bar-container {
+  position: fixed;
+  bottom: 16px; left: 16px; right: 16px;
+  z-index: 10;
+  pointer-events: none;
+  height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+#hp-bar {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #ff3366, #00ffcc);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+#hp-bar.damaged {
+  animation: hp-flash 0.15s ease;
+}
+@keyframes hp-flash {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(3); background: #fff; }
+}
+
+/* FPS Counter */
+#fps {
+  position: fixed;
+  bottom: 28px; right: 16px;
+  z-index: 10;
+  font-size: 10px;
+  color: #334;
+  pointer-events: none;
+  font-family: monospace;
+}
+
+/* Wave Announcement */
+#wave-announce {
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  pointer-events: none;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+#wave-announce.visible { opacity: 1; }
+#wave-announce .big {
+  font-size: 48px;
+  font-weight: 700;
+  color: #ff3366;
+  text-shadow: 0 0 30px rgba(255,51,102,0.5);
+  letter-spacing: 4px;
+}
+#wave-announce .sub {
+  font-size: 14px;
+  color: #556;
+  margin-top: 8px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+
+/* Game Over Screen */
+#game-over {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 50;
+  background: rgba(10,14,20,0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.6s ease;
+}
+#game-over.visible { opacity: 1; pointer-events: auto; }
+#game-over .title {
+  font-size: 42px;
+  font-weight: 700;
+  color: #ff3366;
+  text-shadow: 0 0 30px rgba(255,51,102,0.5);
+  margin-bottom: 32px;
+}
+#game-over .stat {
+  font-size: 14px;
+  color: #667;
+  margin: 4px 0;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+#game-over .stat span {
+  color: #00ffcc;
+  font-size: 20px;
+  font-weight: 700;
+  margin-left: 8px;
+}
+#game-over .restart {
+  margin-top: 40px;
+  font-size: 14px;
+  color: #556;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  animation: pulse-restart 2s ease infinite;
+}
+@keyframes pulse-restart {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* Start Screen */
+#start-screen {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 60;
+  background: rgba(10,14,20,0.95);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.5s ease;
+}
+#start-screen.hidden { opacity: 0; pointer-events: none; }
+#start-screen .title {
+  font-size: 48px;
+  font-weight: 700;
+  color: #00ffcc;
+  text-shadow: 0 0 40px rgba(0,255,204,0.4);
+  letter-spacing: 6px;
+  margin-bottom: 12px;
+}
+#start-screen .subtitle {
+  font-size: 13px;
+  color: #445;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  margin-bottom: 60px;
+}
+#start-screen .tap-prompt {
+  font-size: 14px;
+  color: #556;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  animation: pulse-restart 2s ease infinite;
+}
+
+/* Damage vignette */
+#damage-vignette {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 5;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(255,30,60,0.4) 100%);
+  transition: opacity 0.1s ease;
+}
+#damage-vignette.flash { opacity: 1; }
+</style>
+</head>
+<body>
+
+<canvas id="game-canvas"></canvas>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="hud-left">
+    <div id="score-display">
+      <div class="hud-label">Score</div>
+      <div class="hud-value" id="score-val">0</div>
+    </div>
+    <div id="combo-display">
+      <div class="hud-label">Combo</div>
+      <div class="hud-value" id="combo-val">x2</div>
+    </div>
+  </div>
+  <div id="hud-right">
+    <div id="wave-display">
+      <div class="hud-label">Wave</div>
+      <div class="hud-value" id="wave-val">1</div>
+    </div>
+  </div>
+</div>
+
+<div id="hp-bar-container"><div id="hp-bar"></div></div>
+<div id="fps">-- fps</div>
+<div id="damage-vignette"></div>
+
+<div id="wave-announce">
+  <div class="big" id="wave-announce-text">WAVE 1</div>
+  <div class="sub">incoming</div>
+</div>
+
+<div id="game-over">
+  <div class="title">FALLEN</div>
+  <div class="stat">Score <span id="go-score">0</span></div>
+  <div class="stat">Wave <span id="go-wave">1</span></div>
+  <div class="stat">Kills <span id="go-kills">0</span></div>
+  <div class="restart">Tap to restart</div>
+</div>
+
+<div id="start-screen">
+  <div class="title">TAP SURVIVOR</div>
+  <div class="subtitle">Survive the swarm</div>
+  <div class="tap-prompt">Tap to begin</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  // --- Telegram WebApp ---
+  if (window.Telegram && window.Telegram.WebApp) {
+    window.Telegram.WebApp.ready();
+    window.Telegram.WebApp.expand();
+  }
+
+  // --- Constants ---
+  const ARENA_RADIUS = 18;
+  const ENEMY_POOL_SIZE = 120;
+  const PARTICLE_POOL_SIZE = 300;
+  const MAX_HP = 100;
+  const COMBO_WINDOW = 2000;
+  const SPAWN_EDGE_MIN = ARENA_RADIUS + 2;
+  const SPAWN_EDGE_MAX = ARENA_RADIUS + 5;
+  const DAMAGE_PER_ENEMY = 8;
+  const CENTER_KILL_RADIUS = 1.5;
+
+  // Enemy type configs
+  const ENEMY_TYPES = {
+    RUNNER:  { id: 0, hp: 2, speed: 4.5, scale: 0.5, score: 10, color: 0x00ff88 },
+    TANK:   { id: 1, hp: 8, speed: 1.5, scale: 1.2, score: 30, color: 0xff3344 },
+    SWARM:  { id: 2, hp: 1, speed: 3.0, scale: 0.3, score: 5,  color: 0xffcc00 }
+  };
+
+  // --- State ---
+  let gameState = 'start'; // start, playing, wavePause, gameover
+  let score = 0;
+  let wave = 0;
+  let hp = MAX_HP;
+  let kills = 0;
+  let combo = 0;
+  let comboTimer = 0;
+  let lastKillTime = 0;
+  let enemiesAlive = 0;
+  let enemiesLeftToSpawn = 0;
+  let spawnTimer = 0;
+  let waveAnnounceTimer = 0;
+  let shakeIntensity = 0;
+  let shakeDecay = 0;
+
+  // --- DOM refs ---
+  const canvas = document.getElementById('game-canvas');
+  const scoreVal = document.getElementById('score-val');
+  const waveVal = document.getElementById('wave-val');
+  const comboVal = document.getElementById('combo-val');
+  const comboDisplay = document.getElementById('combo-display');
+  const hpBar = document.getElementById('hp-bar');
+  const fpsEl = document.getElementById('fps');
+  const waveAnnounce = document.getElementById('wave-announce');
+  const waveAnnounceText = document.getElementById('wave-announce-text');
+  const gameOverScreen = document.getElementById('game-over');
+  const startScreen = document.getElementById('start-screen');
+  const damageVignette = document.getElementById('damage-vignette');
+  const goScore = document.getElementById('go-score');
+  const goWave = document.getElementById('go-wave');
+  const goKills = document.getElementById('go-kills');
+
+  // --- Three.js Setup ---
+  const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: false, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x0a0e14, 1);
+  renderer.sortObjects = false;
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x0a0e14, 0.025);
+
+  const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.5, 100);
+  const cameraBasePos = new THREE.Vector3(0, 22, 16);
+  camera.position.copy(cameraBasePos);
+  camera.lookAt(0, 0, 0);
+
+  // Lights (minimal: 1 ambient + 1 directional)
+  const ambientLight = new THREE.AmbientLight(0x334466, 0.6);
+  scene.add(ambientLight);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+  dirLight.position.set(5, 15, 8);
+  scene.add(dirLight);
+
+  // --- Ground Plane ---
+  const groundGeo = new THREE.CircleBufferGeometry(ARENA_RADIUS, 48);
+  const groundMat = new THREE.MeshBasicMaterial({ color: 0x0d1218 });
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.01;
+  scene.add(ground);
+
+  // Grid rings on ground
+  for (let r = 3; r <= ARENA_RADIUS; r += 3) {
+    const ringGeo = new THREE.RingBufferGeometry(r - 0.03, r + 0.03, 48);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x141e2a, side: THREE.DoubleSide });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0;
+    scene.add(ring);
+  }
+
+  // Arena border glow ring
+  const borderGeo = new THREE.RingBufferGeometry(ARENA_RADIUS - 0.08, ARENA_RADIUS + 0.08, 64);
+  const borderMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.2, side: THREE.DoubleSide });
+  const borderRing = new THREE.Mesh(borderGeo, borderMat);
+  borderRing.rotation.x = -Math.PI / 2;
+  borderRing.position.y = 0.01;
+  scene.add(borderRing);
+
+  // Center marker
+  const centerGeo = new THREE.RingBufferGeometry(CENTER_KILL_RADIUS - 0.05, CENTER_KILL_RADIUS + 0.05, 32);
+  const centerMat = new THREE.MeshBasicMaterial({ color: 0xff3366, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+  const centerRing = new THREE.Mesh(centerGeo, centerMat);
+  centerRing.rotation.x = -Math.PI / 2;
+  centerRing.position.y = 0.02;
+  scene.add(centerRing);
+
+  // Player marker at center
+  const playerGeo = new THREE.CylinderBufferGeometry(0.4, 0.5, 0.3, 8);
+  const playerMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.6 });
+  const playerMesh = new THREE.Mesh(playerGeo, playerMat);
+  playerMesh.position.y = 0.15;
+  scene.add(playerMesh);
+
+  // --- Enemy Instanced Meshes ---
+  // Geometries for each type
+  const enemyGeos = [
+    new THREE.OctahedronBufferGeometry(1, 0),    // Runner
+    new THREE.BoxBufferGeometry(1, 1, 1),          // Tank
+    new THREE.IcosahedronBufferGeometry(1, 0)      // Swarm
+  ];
+
+  // Materials: base + hit flash
+  const enemyBaseMats = [
+    new THREE.MeshLambertMaterial({ color: ENEMY_TYPES.RUNNER.color }),
+    new THREE.MeshLambertMaterial({ color: ENEMY_TYPES.TANK.color }),
+    new THREE.MeshLambertMaterial({ color: ENEMY_TYPES.SWARM.color })
+  ];
+  const enemyHitMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+  // InstancedMesh for each type
+  const POOL_PER_TYPE = Math.floor(ENEMY_POOL_SIZE / 3);
+  const instancedMeshes = [];
+  const dummyMatrix = new THREE.Matrix4();
+  const hiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+
+  for (let t = 0; t < 3; t++) {
+    const im = new THREE.InstancedMesh(enemyGeos[t], enemyBaseMats[t], POOL_PER_TYPE);
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // Hide all instances initially
+    for (let i = 0; i < POOL_PER_TYPE; i++) {
+      im.setMatrixAt(i, hiddenMatrix);
+    }
+    im.instanceMatrix.needsUpdate = true;
+    im.frustumCulled = false; // we manage visibility ourselves
+    scene.add(im);
+    instancedMeshes.push(im);
+  }
+
+  // Enemy pool data structure (flat arrays for perf)
+  const enemyPool = {
+    active: new Uint8Array(ENEMY_POOL_SIZE),
+    type: new Uint8Array(ENEMY_POOL_SIZE),
+    hp: new Float32Array(ENEMY_POOL_SIZE),
+    maxHp: new Float32Array(ENEMY_POOL_SIZE),
+    speed: new Float32Array(ENEMY_POOL_SIZE),
+    score: new Uint16Array(ENEMY_POOL_SIZE),
+    px: new Float32Array(ENEMY_POOL_SIZE),
+    py: new Float32Array(ENEMY_POOL_SIZE),
+    pz: new Float32Array(ENEMY_POOL_SIZE),
+    scale: new Float32Array(ENEMY_POOL_SIZE),
+    hitFlash: new Float32Array(ENEMY_POOL_SIZE), // countdown
+    instanceIndex: new Int16Array(ENEMY_POOL_SIZE), // which instance slot in its type's InstancedMesh
+  };
+
+  // Track which instance slots are free per type
+  const freeInstanceSlots = [[], [], []];
+  for (let t = 0; t < 3; t++) {
+    for (let i = POOL_PER_TYPE - 1; i >= 0; i--) {
+      freeInstanceSlots[t].push(i);
+    }
+  }
+
+  // --- Particle Pool (sprite-based) ---
+  const particleTexture = generateParticleTexture();
+  const particleSharedMat = new THREE.SpriteMaterial({
+    map: particleTexture,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+
+  const particlePool = {
+    active: new Uint8Array(PARTICLE_POOL_SIZE),
+    life: new Float32Array(PARTICLE_POOL_SIZE),
+    maxLife: new Float32Array(PARTICLE_POOL_SIZE),
+    vx: new Float32Array(PARTICLE_POOL_SIZE),
+    vy: new Float32Array(PARTICLE_POOL_SIZE),
+    vz: new Float32Array(PARTICLE_POOL_SIZE),
+    sprites: []
+  };
+
+  const particleGroup = new THREE.Group();
+  scene.add(particleGroup);
+  for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+    const s = new THREE.Sprite(particleSharedMat.clone());
+    s.visible = false;
+    s.scale.set(0.3, 0.3, 0.3);
+    particleGroup.add(s);
+    particlePool.sprites.push(s);
+  }
+
+  function generateParticleTexture() {
+    const size = 32;
+    const c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    const ctx = c.getContext('2d');
+    const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.3, 'rgba(255,255,255,0.6)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(c);
+    return tex;
+  }
+
+  // --- Raycaster ---
+  const raycaster = new THREE.Raycaster();
+  const tapNDC = new THREE.Vector2();
+
+  // Raycasting helpers - we'll use invisible proxy meshes for hit detection
+  // since InstancedMesh raycasting is complex in r128
+  const proxyMeshes = [];
+  const proxyGeo = new THREE.SphereBufferGeometry(1, 6, 4);
+  const proxyMat = new THREE.MeshBasicMaterial({ visible: false });
+  for (let i = 0; i < ENEMY_POOL_SIZE; i++) {
+    const m = new THREE.Mesh(proxyGeo, proxyMat);
+    m.visible = false;
+    m.userData.poolIndex = i;
+    scene.add(m);
+    proxyMeshes.push(m);
+  }
+
+  // --- FPS tracking ---
+  let frameCount = 0;
+  let fpsTime = 0;
+
+  // --- Clock ---
+  const clock = new THREE.Clock();
+  let dt = 0;
+
+  // --- Wave Definitions ---
+  function getWaveConfig(w) {
+    const base = 4 + w * 3;
+    const runners = Math.floor(base * 0.5);
+    const tanks = Math.floor(Math.min(w * 0.5, base * 0.25));
+    const swarms = Math.max(0, base - runners - tanks);
+    const spawnInterval = Math.max(0.25, 1.2 - w * 0.06);
+    return { runners, tanks, swarms, total: runners + tanks + swarms, spawnInterval };
+  }
+
+  // --- Spawn Queue ---
+  let spawnQueue = [];
+
+  function buildSpawnQueue(config) {
+    const q = [];
+    for (let i = 0; i < config.runners; i++) q.push(0);
+    for (let i = 0; i < config.tanks; i++) q.push(1);
+    for (let i = 0; i < config.swarms; i++) q.push(2);
+    // Shuffle
+    for (let i = q.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [q[i], q[j]] = [q[j], q[i]];
+    }
+    return q;
+  }
+
+  // --- Core Functions ---
+
+  function spawnEnemy(typeId) {
+    // Find free slot in pool
+    let idx = -1;
+    for (let i = 0; i < ENEMY_POOL_SIZE; i++) {
+      if (!enemyPool.active[i]) { idx = i; break; }
+    }
+    if (idx === -1) return; // pool exhausted
+
+    const typeKey = ['RUNNER', 'TANK', 'SWARM'][typeId];
+    const cfg = ENEMY_TYPES[typeKey];
+
+    // Get instance slot
+    if (freeInstanceSlots[typeId].length === 0) return;
+    const instIdx = freeInstanceSlots[typeId].pop();
+
+    // Random position on arena edge
+    const angle = Math.random() * Math.PI * 2;
+    const dist = SPAWN_EDGE_MIN + Math.random() * (SPAWN_EDGE_MAX - SPAWN_EDGE_MIN);
+
+    enemyPool.active[idx] = 1;
+    enemyPool.type[idx] = typeId;
+    enemyPool.hp[idx] = cfg.hp;
+    enemyPool.maxHp[idx] = cfg.hp;
+    enemyPool.speed[idx] = cfg.speed * (0.85 + Math.random() * 0.3);
+    enemyPool.score[idx] = cfg.score;
+    enemyPool.px[idx] = Math.cos(angle) * dist;
+    enemyPool.py[idx] = cfg.scale * 0.5 + 0.1;
+    enemyPool.pz[idx] = Math.sin(angle) * dist;
+    enemyPool.scale[idx] = cfg.scale;
+    enemyPool.hitFlash[idx] = 0;
+    enemyPool.instanceIndex[idx] = instIdx;
+
+    // Update proxy
+    proxyMeshes[idx].visible = true;
+    proxyMeshes[idx].position.set(enemyPool.px[idx], enemyPool.py[idx], enemyPool.pz[idx]);
+    proxyMeshes[idx].scale.setScalar(cfg.scale * 1.3);
+
+    // Update instanced mesh matrix
+    updateEnemyMatrix(idx);
+
+    enemiesAlive++;
+  }
+
+  function updateEnemyMatrix(idx) {
+    const typeId = enemyPool.type[idx];
+    const im = instancedMeshes[typeId];
+    const instIdx = enemyPool.instanceIndex[idx];
+    const s = enemyPool.scale[idx];
+
+    dummyMatrix.makeScale(s, s, s);
+    dummyMatrix.setPosition(enemyPool.px[idx], enemyPool.py[idx], enemyPool.pz[idx]);
+    im.setMatrixAt(instIdx, dummyMatrix);
+    im.instanceMatrix.needsUpdate = true;
+  }
+
+  function hideEnemy(idx) {
+    const typeId = enemyPool.type[idx];
+    const im = instancedMeshes[typeId];
+    const instIdx = enemyPool.instanceIndex[idx];
+
+    im.setMatrixAt(instIdx, hiddenMatrix);
+    im.instanceMatrix.needsUpdate = true;
+
+    proxyMeshes[idx].visible = false;
+    enemyPool.active[idx] = 0;
+    freeInstanceSlots[typeId].push(instIdx);
+    enemiesAlive--;
+  }
+
+  function damageEnemy(idx, dmg) {
+    enemyPool.hp[idx] -= dmg;
+    enemyPool.hitFlash[idx] = 0.12;
+
+    if (enemyPool.hp[idx] <= 0) {
+      killEnemy(idx);
+    }
+  }
+
+  function killEnemy(idx) {
+    const px = enemyPool.px[idx];
+    const py = enemyPool.py[idx];
+    const pz = enemyPool.pz[idx];
+    const typeId = enemyPool.type[idx];
+    const typeKey = ['RUNNER', 'TANK', 'SWARM'][typeId];
+    const cfg = ENEMY_TYPES[typeKey];
+
+    // Combo
+    const now = performance.now();
+    if (now - lastKillTime < COMBO_WINDOW) {
+      combo++;
+    } else {
+      combo = 1;
+    }
+    lastKillTime = now;
+    comboTimer = COMBO_WINDOW;
+
+    const multiplier = Math.min(combo, 10);
+    score += enemyPool.score[idx] * multiplier;
+    kills++;
+
+    // Particles
+    const particleCount = typeId === 1 ? 12 : (typeId === 2 ? 4 : 8);
+    const color = cfg.color;
+    spawnParticles(px, py, pz, color, particleCount);
+
+    hideEnemy(idx);
+    updateHUD();
+  }
+
+  function spawnParticles(x, y, z, color, count) {
+    const c = new THREE.Color(color);
+    for (let n = 0; n < count; n++) {
+      let idx = -1;
+      for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+        if (!particlePool.active[i]) { idx = i; break; }
+      }
+      if (idx === -1) break;
+
+      particlePool.active[idx] = 1;
+      const life = 0.3 + Math.random() * 0.5;
+      particlePool.life[idx] = life;
+      particlePool.maxLife[idx] = life;
+      particlePool.vx[idx] = (Math.random() - 0.5) * 8;
+      particlePool.vy[idx] = Math.random() * 6 + 2;
+      particlePool.vz[idx] = (Math.random() - 0.5) * 8;
+
+      const s = particlePool.sprites[idx];
+      s.position.set(x, y, z);
+      s.material.color.copy(c);
+      s.material.opacity = 1;
+      s.visible = true;
+      s.scale.set(0.4, 0.4, 0.4);
+    }
+  }
+
+  function dealDamageToPlayer(amount) {
+    hp -= amount;
+    if (hp < 0) hp = 0;
+
+    shakeIntensity = 0.6;
+    shakeDecay = 3;
+
+    // Vignette flash
+    damageVignette.classList.add('flash');
+    setTimeout(() => damageVignette.classList.remove('flash'), 150);
+
+    // HP bar flash
+    hpBar.classList.add('damaged');
+    setTimeout(() => hpBar.classList.remove('damaged'), 200);
+
+    updateHUD();
+
+    if (hp <= 0) {
+      triggerGameOver();
+    }
+  }
+
+  function updateHUD() {
+    scoreVal.textContent = score;
+    waveVal.textContent = wave;
+    hpBar.style.width = (hp / MAX_HP * 100) + '%';
+
+    if (combo > 1) {
+      comboDisplay.classList.add('active');
+      comboVal.textContent = 'x' + Math.min(combo, 10);
+    } else {
+      comboDisplay.classList.remove('active');
+    }
+  }
+
+  function announceWave(w) {
+    waveAnnounceText.textContent = 'WAVE ' + w;
+    waveAnnounce.classList.add('visible');
+    waveAnnounceTimer = 2.0;
+  }
+
+  function startWave() {
+    wave++;
+    const config = getWaveConfig(wave);
+    spawnQueue = buildSpawnQueue(config);
+    enemiesLeftToSpawn = spawnQueue.length;
+    spawnTimer = 0.8; // short delay before first spawn
+    announceWave(wave);
+    updateHUD();
+    gameState = 'playing';
+  }
+
+  function triggerGameOver() {
+    gameState = 'gameover';
+    goScore.textContent = score;
+    goWave.textContent = wave;
+    goKills.textContent = kills;
+    gameOverScreen.classList.add('visible');
+  }
+
+  function resetGame() {
+    score = 0;
+    wave = 0;
+    hp = MAX_HP;
+    kills = 0;
+    combo = 0;
+    comboTimer = 0;
+    lastKillTime = 0;
+    enemiesAlive = 0;
+    enemiesLeftToSpawn = 0;
+    spawnTimer = 0;
+    shakeIntensity = 0;
+
+    // Clear all enemies
+    for (let i = 0; i < ENEMY_POOL_SIZE; i++) {
+      if (enemyPool.active[i]) {
+        hideEnemy(i);
+      }
+    }
+
+    // Clear particles
+    for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+      particlePool.active[i] = 0;
+      particlePool.sprites[i].visible = false;
+    }
+
+    gameOverScreen.classList.remove('visible');
+    updateHUD();
+    startWave();
+  }
+
+  // --- Hit Flash Management ---
+  // To flash enemies white, we swap instanced mesh material temporarily
+  // Instead, we track per-enemy flash and adjust via a secondary approach:
+  // We'll use individual small meshes that appear on top during flash.
+  // Actually, for simplicity and perf, let's overlay a white flash proxy mesh.
+  const flashGeos = [
+    new THREE.OctahedronBufferGeometry(1.05, 0),
+    new THREE.BoxBufferGeometry(1.08, 1.08, 1.08),
+    new THREE.IcosahedronBufferGeometry(1.05, 0)
+  ];
+  const flashMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+  const flashMeshes = [];
+  const FLASH_POOL = 10;
+  for (let i = 0; i < FLASH_POOL; i++) {
+    // We'll reuse by cycling through geos
+    const m = new THREE.Mesh(flashGeos[0], flashMat.clone());
+    m.visible = false;
+    scene.add(m);
+    flashMeshes.push(m);
+  }
+  let flashMeshIdx = 0;
+
+  function showFlash(x, y, z, typeId, scale) {
+    const m = flashMeshes[flashMeshIdx % FLASH_POOL];
+    flashMeshIdx++;
+    m.geometry = flashGeos[typeId];
+    m.position.set(x, y, z);
+    m.scale.setScalar(scale);
+    m.visible = true;
+    m.material.opacity = 0.9;
+    m.userData.flashLife = 0.1;
+  }
+
+  // --- Input ---
+  function handleTap(clientX, clientY) {
+    if (gameState === 'start') {
+      startScreen.classList.add('hidden');
+      gameState = 'playing';
+      resetGame();
+      return;
+    }
+
+    if (gameState === 'gameover') {
+      resetGame();
+      return;
+    }
+
+    if (gameState !== 'playing') return;
+
+    tapNDC.x = (clientX / window.innerWidth) * 2 - 1;
+    tapNDC.y = -(clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(tapNDC, camera);
+
+    // Collect visible proxies
+    const visibleProxies = [];
+    for (let i = 0; i < ENEMY_POOL_SIZE; i++) {
+      if (enemyPool.active[i] && proxyMeshes[i].visible) {
+        visibleProxies.push(proxyMeshes[i]);
+      }
+    }
+
+    const intersects = raycaster.intersectObjects(visibleProxies, false);
+
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const idx = hit.object.userData.poolIndex;
+      if (enemyPool.active[idx]) {
+        damageEnemy(idx, 1);
+
+        if (enemyPool.active[idx]) {
+          // Still alive, show flash
+          showFlash(enemyPool.px[idx], enemyPool.py[idx], enemyPool.pz[idx],
+                    enemyPool.type[idx], enemyPool.scale[idx]);
+        }
+      }
+    }
+  }
+
+  canvas.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    handleTap(e.clientX, e.clientY);
+  });
+
+  canvas.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    if (e.touches.length > 0) {
+      handleTap(e.touches[0].clientX, e.touches[0].clientY);
+    }
+  }, { passive: false });
+
+  // --- Resize ---
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+  window.addEventListener('resize', onResize);
+
+  // --- Game Loop ---
+  let elapsedTime = 0;
+
+  function update() {
+    dt = Math.min(clock.getDelta(), 0.05); // cap dt
+    elapsedTime += dt;
+
+    if (gameState === 'start') return;
+
+    // Wave announce timer
+    if (waveAnnounceTimer > 0) {
+      waveAnnounceTimer -= dt;
+      if (waveAnnounceTimer <= 0) {
+        waveAnnounce.classList.remove('visible');
+      }
+    }
+
+    // Combo timeout
+    if (comboTimer > 0) {
+      comboTimer -= dt * 1000;
+      if (comboTimer <= 0) {
+        combo = 0;
+        comboDisplay.classList.remove('active');
+      }
+    }
+
+    if (gameState === 'playing') {
+      // Spawn enemies
+      if (spawnQueue.length > 0) {
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) {
+          const typeId = spawnQueue.pop();
+          // Swarm spawns in burst of 3-5
+          if (typeId === 2) {
+            const burstCount = Math.min(3 + Math.floor(Math.random() * 3), spawnQueue.filter(t => t === 2).length + 1);
+            spawnEnemy(typeId);
+            for (let b = 1; b < burstCount; b++) {
+              const si = spawnQueue.indexOf(2);
+              if (si !== -1) {
+                spawnQueue.splice(si, 1);
+                spawnEnemy(2);
+              }
+            }
+          } else {
+            spawnEnemy(typeId);
+          }
+          const config = getWaveConfig(wave);
+          spawnTimer = config.spawnInterval;
+        }
+      }
+
+      // Move enemies toward center
+      for (let i = 0; i < ENEMY_POOL_SIZE; i++) {
+        if (!enemyPool.active[i]) continue;
+
+        const dx = -enemyPool.px[i];
+        const dz = -enemyPool.pz[i];
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        if (dist < CENTER_KILL_RADIUS) {
+          // Enemy reached center - damage player
+          dealDamageToPlayer(DAMAGE_PER_ENEMY);
+          spawnParticles(enemyPool.px[i], enemyPool.py[i], enemyPool.pz[i], 0xff3366, 4);
+          hideEnemy(i);
+          continue;
+        }
+
+        const nx = dx / dist;
+        const nz = dz / dist;
+        const moveSpeed = enemyPool.speed[i] * dt;
+
+        enemyPool.px[i] += nx * moveSpeed;
+        enemyPool.pz[i] += nz * moveSpeed;
+
+        // Slight bob
+        const typeId = enemyPool.type[i];
+        const bobAmount = typeId === 0 ? 0.15 : (typeId === 1 ? 0.05 : 0.2);
+        const baseY = enemyPool.scale[i] * 0.5 + 0.1;
+        enemyPool.py[i] = baseY + Math.sin(elapsedTime * 4 + i * 1.7) * bobAmount;
+
+        // Update proxy position
+        proxyMeshes[i].position.set(enemyPool.px[i], enemyPool.py[i], enemyPool.pz[i]);
+
+        // Update instanced mesh
+        updateEnemyMatrix(i);
+
+        // Hit flash decay
+        if (enemyPool.hitFlash[i] > 0) {
+          enemyPool.hitFlash[i] -= dt;
+        }
+      }
+
+      // Check wave complete
+      if (spawnQueue.length === 0 && enemiesAlive === 0 && gameState === 'playing') {
+        gameState = 'wavePause';
+        setTimeout(() => {
+          if (gameState === 'wavePause') startWave();
+        }, 1500);
+      }
+    }
+
+    // Update particles
+    for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+      if (!particlePool.active[i]) continue;
+
+      particlePool.life[i] -= dt;
+      if (particlePool.life[i] <= 0) {
+        particlePool.active[i] = 0;
+        particlePool.sprites[i].visible = false;
+        continue;
+      }
+
+      const s = particlePool.sprites[i];
+      s.position.x += particlePool.vx[i] * dt;
+      s.position.y += particlePool.vy[i] * dt;
+      s.position.z += particlePool.vz[i] * dt;
+
+      // Gravity
+      particlePool.vy[i] -= 12 * dt;
+
+      // Fade
+      const lifeRatio = particlePool.life[i] / particlePool.maxLife[i];
+      s.material.opacity = lifeRatio;
+      const sc = 0.2 + lifeRatio * 0.3;
+      s.scale.set(sc, sc, sc);
+    }
+
+    // Update flash meshes
+    for (let i = 0; i < FLASH_POOL; i++) {
+      const m = flashMeshes[i];
+      if (m.visible) {
+        m.userData.flashLife -= dt;
+        m.material.opacity = Math.max(0, m.userData.flashLife / 0.1);
+        if (m.userData.flashLife <= 0) {
+          m.visible = false;
+        }
+      }
+    }
+
+    // Camera shake
+    if (shakeIntensity > 0) {
+      shakeIntensity -= shakeDecay * dt;
+      if (shakeIntensity < 0) shakeIntensity = 0;
+      camera.position.x = cameraBasePos.x + (Math.random() - 0.5) * shakeIntensity;
+      camera.position.y = cameraBasePos.y + (Math.random() - 0.5) * shakeIntensity * 0.5;
+      camera.position.z = cameraBasePos.z + (Math.random() - 0.5) * shakeIntensity;
+      camera.lookAt(0, 0, 0);
+    } else {
+      camera.position.copy(cameraBasePos);
+      camera.lookAt(0, 0, 0);
+    }
+
+    // Player marker pulse
+    const pulse = 0.5 + Math.sin(elapsedTime * 2) * 0.1;
+    playerMat.opacity = pulse;
+
+    // Border ring pulse
+    borderMat.opacity = 0.15 + Math.sin(elapsedTime * 1.5) * 0.05;
+  }
+
+  function render() {
+    requestAnimationFrame(render);
+    update();
+    renderer.render(scene, camera);
+
+    // FPS counter (update every 500ms)
+    frameCount++;
+    fpsTime += dt;
+    if (fpsTime >= 0.5) {
+      const fps = Math.round(frameCount / fpsTime);
+      fpsEl.textContent = fps + ' fps';
+      frameCount = 0;
+      fpsTime = 0;
+    }
+  }
+
+  // --- Boot ---
+  clock.start();
+  render();
+
+})();
+</script>
+</body>
+</html>

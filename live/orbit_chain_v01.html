@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>ORBIT CHAIN</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #02040f; overflow: hidden; touch-action: none; font-family: 'Courier New', monospace; }
+    canvas { display: block; position: fixed; inset: 0; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 16px 20px; pointer-events: none;
+    }
+    #score { color: #cce8ff; font: bold 30px/1 monospace; text-shadow: 0 0 20px rgba(100,200,255,0.9); }
+    #chain { color: #ffd740; font: bold 17px/1 monospace; margin-top: 5px; min-height: 17px;
+             text-shadow: 0 0 14px rgba(255,215,60,0.7); }
+    #lives { color: rgba(255,120,120,0.9); font: 20px/1 monospace; letter-spacing: 5px; }
+    #wave-lbl { color: rgba(180,130,255,0.6); font: 11px/1 monospace; margin-top: 4px; letter-spacing: 0.15em; text-align: right; }
+    #pop {
+      position: fixed; z-index: 20; top: 36%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 38px/1 monospace; pointer-events: none; opacity: 0;
+      text-shadow: 0 0 24px currentColor; white-space: nowrap; transition: opacity 0.1s;
+    }
+    #flash { position: fixed; inset: 0; z-index: 5; pointer-events: none; opacity: 0; }
+    #hint {
+      position: fixed; z-index: 10; bottom: 30px; left: 50%; transform: translateX(-50%);
+      color: rgba(200,220,255,0.35); font: 12px/1 monospace; letter-spacing: 0.15em;
+      pointer-events: none; transition: opacity 2.5s;
+    }
+    #hint.gone { opacity: 0; }
+    #go {
+      position: fixed; inset: 0; z-index: 30; display: none; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(2,4,15,0.92);
+    }
+    #go h1 { color: #cce8ff; font: bold 46px/1.2 monospace; margin-bottom: 10px;
+              text-shadow: 0 0 30px rgba(100,200,255,0.8); }
+    #go .sub { color: rgba(200,220,255,0.3); font: 11px/1 monospace; letter-spacing: 0.22em; margin-bottom: 28px; }
+    #go-score { color: #ffd740; font: bold 20px/1.8 monospace; margin-bottom: 32px; text-align: center; }
+    #play {
+      background: rgba(100,200,255,0.07); border: 1px solid rgba(100,200,255,0.45);
+      color: rgba(140,210,255,0.9); font: bold 16px/1 monospace; padding: 15px 48px;
+      cursor: pointer; letter-spacing: 0.16em;
+    }
+    #play:active { background: rgba(100,200,255,0.2); }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <div>
+    <div id="score">00000</div>
+    <div id="chain"></div>
+  </div>
+  <div style="text-align:right">
+    <div id="lives">♦♦♦</div>
+    <div id="wave-lbl">WAVE 1</div>
+  </div>
+</div>
+<div id="pop"></div>
+<div id="flash"></div>
+<div id="hint">TAP GLOWING PLANETS TO ABSORB</div>
+<div id="go">
+  <h1>ORBIT CHAIN</h1>
+  <div class="sub">ABSORB GLOWING PLANETS · CHAIN FOR POWER</div>
+  <div id="go-score"></div>
+  <button id="play">PLAY AGAIN</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+'use strict';
+
+// ── STATE ────────────────────────────────────────────────────
+const S = {
+  score:0, combo:0, maxCombo:0, lives:3, wave:1,
+  running:true, speedMult:1.0, sunFlash:0
+};
+
+// ── THREE SETUP ──────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x02040f);
+document.body.insertBefore(renderer.domElement, document.getElementById('hud'));
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x02040f, 24, 72);
+
+const cam = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 100);
+cam.position.set(0, 10, 17);
+cam.lookAt(0, 0, 0);
+
+// ── LIGHTS ───────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x0a1428, 3.5));
+const sunLight = new THREE.PointLight(0x4499ff, 8, 42);
+scene.add(sunLight);
+
+// ── STARS ────────────────────────────────────────────────────
+{
+  const n = 900;
+  const g = new THREE.BufferGeometry();
+  const v = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    v[i*3]   = (Math.random() - 0.5) * 140;
+    v[i*3+1] = (Math.random() - 0.5) * 140;
+    v[i*3+2] = (Math.random() - 0.5) * 140;
+  }
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0xffffff, size: 0.11, transparent: true, opacity: 0.55
+  })));
+}
+
+// ── SUN ──────────────────────────────────────────────────────
+const sunMat = new THREE.MeshPhongMaterial({
+  color: 0x99ccff, emissive: 0x1a4488, emissiveIntensity: 2.5, shininess: 120
+});
+const sunMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1.15, 2), sunMat);
+scene.add(sunMesh);
+
+// ── ORBIT RINGS ──────────────────────────────────────────────
+const ORBITS = [3.5, 5.2, 7.0, 8.8];
+ORBITS.forEach(r => {
+  const m = new THREE.Mesh(
+    new THREE.TorusGeometry(r, 0.022, 6, 80),
+    new THREE.MeshBasicMaterial({ color: 0x142238, transparent: true, opacity: 0.5 })
+  );
+  m.rotation.x = Math.PI * 0.5;
+  scene.add(m);
+});
+
+// Zone arc — front semicircle highlight
+const zoneArcMat = new THREE.MeshBasicMaterial({
+  color: 0x2266aa, transparent: true, opacity: 0.1, side: THREE.DoubleSide
+});
+const zoneArc = new THREE.Mesh(
+  new THREE.RingGeometry(3.2, 9.1, 48, 1, -Math.PI * 0.25, Math.PI * 0.5),
+  zoneArcMat
+);
+zoneArc.rotation.x = Math.PI * 0.5;
+scene.add(zoneArc);
+
+// ── PLANET CLASS ─────────────────────────────────────────────
+const PCOLS = [0xff5533, 0x44ee88, 0xffcc22, 0xcc44ff, 0xff3388, 0x11ddff];
+
+class Planet {
+  constructor() {
+    this.orbitR  = ORBITS[Math.floor(Math.random() * ORBITS.length)];
+    this.angle   = Math.random() * Math.PI * 2;
+    this.speed   = (0.32 + Math.random() * 0.28) * (Math.random() < 0.25 ? -1 : 1);
+    this.col     = PCOLS[Math.floor(Math.random() * PCOLS.length)];
+    this.alive   = true;
+    this.inZone  = false;
+    this.escaped = false;
+
+    this.mat  = new THREE.MeshPhongMaterial({
+      color: this.col, emissive: this.col, emissiveIntensity: 0.4, shininess: 90
+    });
+    this.mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 1), this.mat);
+    this.glow = new THREE.PointLight(this.col, 1.5, 7);
+    scene.add(this.mesh);
+    scene.add(this.glow);
+  }
+
+  tick(dt, t) {
+    if (!this.alive) return;
+    this.angle += this.speed * S.speedMult * dt;
+    const a = this.angle;
+    const x = Math.cos(a) * this.orbitR;
+    const z = Math.sin(a) * this.orbitR;
+    const y = Math.sin(a * 1.7 + t * 0.5) * 0.5;
+    this.mesh.position.set(x, y, z);
+    this.glow.position.set(x, y, z);
+    this.mesh.rotation.y += dt * 2.2;
+    this.mesh.rotation.z += dt * 1.1;
+
+    // Zone = front arc (z > 40% of orbitR)
+    const prev = this.inZone;
+    this.inZone = z > this.orbitR * 0.4;
+
+    // Zone exit without absorb → escaped
+    if (prev && !this.inZone && !this.escaped) {
+      this.escaped = true;
+      onMissedPlanet(this);
+    }
+
+    // Visual feedback
+    if (this.inZone) {
+      const pulse = 0.5 + Math.sin(t * 7) * 0.35;
+      this.mat.emissiveIntensity = 1.4 + pulse * 0.5;
+      this.glow.intensity = 3.5 + pulse * 1.5;
+      const sc = 1.0 + Math.sin(t * 7) * 0.08;
+      this.mesh.scale.setScalar(sc);
+    } else {
+      this.mat.emissiveIntensity += (0.35 - this.mat.emissiveIntensity) * dt * 5;
+      this.glow.intensity += (1.2 - this.glow.intensity) * dt * 5;
+      this.mesh.scale.setScalar(1.0);
+    }
+  }
+
+  destroy() {
+    this.alive = false;
+    scene.remove(this.mesh);
+    scene.remove(this.glow);
+    this.mesh.geometry.dispose();
+    this.mat.dispose();
+  }
+}
+
+// ── BURST PARTICLES ──────────────────────────────────────────
+class Burst {
+  constructor(pos, col, n) {
+    this.n   = n;
+    this.geo = new THREE.BufferGeometry();
+    const a  = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      a[i*3] = pos.x; a[i*3+1] = pos.y; a[i*3+2] = pos.z;
+    }
+    this.geo.setAttribute('position', new THREE.Float32BufferAttribute(a, 3));
+    this.mat  = new THREE.PointsMaterial({ color: col, size: 0.22, transparent: true, opacity: 1 });
+    this.pts  = new THREE.Points(this.geo, this.mat);
+    this.vels = Array.from({ length: n }, () => ({
+      x: (Math.random() - 0.5) * 14,
+      y: (Math.random() - 0.5) * 14,
+      z: (Math.random() - 0.5) * 14
+    }));
+    scene.add(this.pts);
+    this.life = 1.0;
+  }
+  tick(dt) {
+    this.life -= dt * 1.7;
+    this.mat.opacity = Math.max(0, this.life);
+    const p = this.geo.attributes.position.array;
+    for (let i = 0; i < this.n; i++) {
+      p[i*3]   += this.vels[i].x * dt;
+      p[i*3+1] += this.vels[i].y * dt;
+      p[i*3+2] += this.vels[i].z * dt;
+      this.vels[i].y -= 4 * dt;
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    return this.life > 0;
+  }
+  dispose() {
+    scene.remove(this.pts);
+    this.geo.dispose();
+    this.mat.dispose();
+  }
+}
+
+// ── PLANET POOL ───────────────────────────────────────────────
+let planets = [];
+const bursts = [];
+
+function addPlanet() {
+  if (planets.length >= 5) return;
+  planets.push(new Planet());
+}
+
+function resetPlanets(count) {
+  planets.forEach(p => p.destroy());
+  planets.length = 0;
+  for (let i = 0; i < count; i++) planets.push(new Planet());
+}
+resetPlanets(2);
+
+// ── HUD ──────────────────────────────────────────────────────
+const $score   = document.getElementById('score');
+const $chain   = document.getElementById('chain');
+const $lives   = document.getElementById('lives');
+const $waveLbl = document.getElementById('wave-lbl');
+const $pop     = document.getElementById('pop');
+const $flash   = document.getElementById('flash');
+const $go      = document.getElementById('go');
+const $goScore = document.getElementById('go-score');
+const $hint    = document.getElementById('hint');
+
+function hud() {
+  $score.textContent   = String(S.score).padStart(5, '0');
+  $chain.textContent   = S.combo >= 2 ? `×${S.combo} CHAIN` : '';
+  $lives.textContent   = '♦'.repeat(Math.max(0, S.lives));
+  $waveLbl.textContent = `WAVE ${S.wave}`;
+}
+
+let popTimer;
+function pop(txt, col) {
+  $pop.textContent = txt;
+  $pop.style.color = col;
+  $pop.style.opacity = '1';
+  clearTimeout(popTimer);
+  popTimer = setTimeout(() => { $pop.style.opacity = '0'; }, 800);
+}
+
+function flash(col, dur) {
+  $flash.style.background  = col;
+  $flash.style.transition  = 'opacity 0s';
+  $flash.style.opacity     = '0.7';
+  requestAnimationFrame(() => {
+    $flash.style.transition = `opacity ${dur}s`;
+    $flash.style.opacity    = '0';
+  });
+}
+
+let shakeAmt = 0, shakeT = 0;
+function shake(a) { shakeAmt = a; shakeT = 0.28; }
+
+// ── GAME LOGIC ────────────────────────────────────────────────
+function absorb(planet) {
+  const pos = planet.mesh.position.clone();
+  const col = planet.col;
+  planet.destroy();
+  planets = planets.filter(p => p !== planet);
+
+  S.combo++;
+  S.maxCombo = Math.max(S.maxCombo, S.combo);
+  const pts = 100 * S.combo;
+  S.score += pts;
+  S.sunFlash = 0.6;
+
+  const n = S.combo >= 4 ? 52 : S.combo >= 2 ? 34 : 22;
+  bursts.push(new Burst(pos, col, n));
+
+  if (S.combo >= 5) {
+    pop(`⚡ ×${S.combo} NOVA!`, '#ffd740');
+    flash('rgba(255,215,0,0.45)', 0.35);
+    shake(0.28);
+  } else if (S.combo >= 3) {
+    pop(`×${S.combo} CHAIN!`, '#88ffcc');
+    flash('rgba(80,255,180,0.28)', 0.25);
+    shake(0.15);
+  } else {
+    pop(`+${pts}`, '#aaddff');
+    flash('rgba(80,160,255,0.18)', 0.18);
+  }
+  hud();
+
+  // Respawn after delay (shorter at higher waves)
+  const delay = Math.max(300, 950 - S.wave * 100);
+  setTimeout(() => { if (S.running) addPlanet(); }, delay);
+
+  // Wave progression
+  const waveThresh = S.wave * 600;
+  if (S.score >= waveThresh && S.wave < 6) {
+    S.wave++;
+    S.speedMult = 1 + (S.wave - 1) * 0.2;
+    if (planets.length < Math.min(S.wave + 1, 5)) addPlanet();
+    pop(`WAVE ${S.wave}`, '#dd88ff');
+    flash('rgba(180,80,255,0.38)', 0.5);
+  }
+}
+
+function onMissedPlanet(planet) {
+  S.combo = 0;
+  S.lives--;
+  shake(0.5);
+  flash('rgba(255,50,50,0.4)', 0.22);
+  pop('ESCAPED!', '#ff5533');
+  hud();
+
+  // Dim the escaped planet, reset it behind sun after 2s
+  planet.mat.color.set(0x442222);
+  planet.mat.emissive.set(0x220000);
+  setTimeout(() => {
+    if (!planet.alive) return;
+    planet.angle   = -Math.PI * 0.5 + (Math.random() - 0.5) * 0.6;
+    planet.escaped = false;
+    planet.mat.color.set(planet.col);
+    planet.mat.emissive.set(planet.col);
+  }, 2000);
+
+  if (S.lives <= 0) setTimeout(gameOver, 350);
+}
+
+function gameOver() {
+  S.running = false;
+  $go.style.display = 'flex';
+  $goScore.innerHTML = `SCORE &nbsp;&nbsp;&nbsp; ${String(S.score).padStart(5,'0')}<br>BEST CHAIN &nbsp; ×${S.maxCombo}`;
+}
+
+function restart() {
+  Object.assign(S, {
+    score:0, combo:0, maxCombo:0, lives:3, wave:1,
+    running:true, speedMult:1.0, sunFlash:0
+  });
+  resetPlanets(2);
+  bursts.forEach(b => b.dispose());
+  bursts.length = 0;
+  $go.style.display = 'none';
+  hud();
+}
+document.getElementById('play').addEventListener('click', restart);
+
+// ── INPUT (screen-space hit detection, 80px radius) ──────────
+function onTap(cx, cy) {
+  if (!S.running) return;
+  let best = null, bestD = 80;
+  for (const p of planets) {
+    if (!p.alive) continue;
+    const v  = p.mesh.position.clone().project(cam);
+    const sx = (v.x * 0.5 + 0.5) * innerWidth;
+    const sy = (-(v.y) * 0.5 + 0.5) * innerHeight;
+    const d  = Math.hypot(cx - sx, cy - sy);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (best) {
+    if (best.inZone) absorb(best);
+    else pop('NOT YET!', '#ff8833');
+  }
+}
+
+document.addEventListener('click', e => onTap(e.clientX, e.clientY));
+document.addEventListener('touchstart', e => {
+  e.preventDefault();
+  onTap(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
+
+// ── RENDER LOOP ───────────────────────────────────────────────
+let prev = 0, hintDone = false;
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((ts - prev) * 0.001, 0.05);
+  prev = ts;
+  const t = ts * 0.001;
+
+  if (!hintDone && t > 4) { $hint.classList.add('gone'); hintDone = true; }
+
+  if (S.running) {
+    planets.forEach(p => p.tick(dt, t));
+
+    for (let i = bursts.length - 1; i >= 0; i--) {
+      if (!bursts[i].tick(dt)) { bursts[i].dispose(); bursts.splice(i, 1); }
+    }
+
+    // Sun animation
+    sunMesh.rotation.y += dt * 0.5;
+    sunMesh.rotation.x += dt * 0.12;
+    S.sunFlash = Math.max(0, S.sunFlash - dt * 3);
+    sunLight.intensity = 5 + Math.sin(t * 2.1) * 2 + S.sunFlash * 22;
+    sunMat.emissiveIntensity = 1.8 + Math.sin(t * 3) * 0.5 + S.sunFlash * 2.5;
+
+    // Zone arc pulse
+    zoneArcMat.opacity = 0.07 + Math.sin(t * 2.5) * 0.04;
+
+    // Camera shake
+    if (shakeT > 0) {
+      shakeT -= dt;
+      const s = shakeT > 0 ? shakeAmt * (shakeT / 0.28) : 0;
+      cam.position.x = (Math.random() - 0.5) * s * 2;
+      cam.position.y = 10 + (Math.random() - 0.5) * s;
+    } else {
+      cam.position.x += (0 - cam.position.x) * dt * 10;
+      cam.position.y += (10 - cam.position.y) * dt * 10;
+    }
+  }
+
+  renderer.render(scene, cam);
+}
+requestAnimationFrame(loop);
+
+// ── RESIZE ───────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  cam.aspect = innerWidth / innerHeight;
+  cam.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── TELEGRAM ─────────────────────────────────────────────────
+if (window.Telegram && window.Telegram.WebApp) {
+  Telegram.WebApp.ready();
+  Telegram.WebApp.expand();
+}
+
+hud();
+</script>
+</body>
+</html>

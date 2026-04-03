@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>STONE SURGE</title>
+  <!--
+    STD-031 NOTE: Single-file HTML game build per STD-025 (Telegram Mini App constraint).
+    Kernel wiring (STD-033): None — standalone game build, no kernel integration.
+    Bloodflow (STD-039): User input → onTap → hitStone/stoneSunk → score/lives/particles → HUD.
+    v02 changes over v01: (1) vertex-colored particles with fade, (2) CSS ring shockwave on hit,
+    (3) trail particles on rising stones, (4) higher-contrast stone/HUD colors,
+    (5) wave-transition screen flash + shake, (6) combo burst with gold sparkle.
+  -->
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a1508; overflow: hidden; touch-action: none; font-family: monospace; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none;
+    }
+    #score { color: #c8ff44; font: bold 30px/1 monospace; text-shadow: 0 0 20px rgba(200,255,68,0.95); }
+    #wave-lbl { color: rgba(220,255,160,0.70); font: 12px/1 monospace; margin-top: 5px; letter-spacing: 0.1em; }
+    #combo-disp { color: #ffe000; font: bold 24px/1 monospace; text-shadow: 0 0 20px rgba(255,224,0,1.0); }
+    #lives { color: #ff6622; font: 22px/1 monospace; letter-spacing: 4px; margin-top: 3px; text-shadow: 0 0 12px rgba(255,102,34,0.7); }
+    #popup {
+      position: fixed; top: 36%; left: 50%; transform: translate(-50%,-50%);
+      font: bold 40px/1 monospace; pointer-events: none; opacity: 0;
+      text-shadow: 0 0 28px currentColor; white-space: nowrap;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    #flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: rgba(200,255,80,0.20); }
+    #miss-flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: rgba(255,30,30,0.30); }
+    #wave-flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: rgba(168,255,96,0.14); transition: opacity 0.4s; }
+    #ring {
+      position: fixed; pointer-events: none; opacity: 0; border-radius: 50%;
+      border: 3px solid white; width: 60px; height: 60px;
+      transform: translate(-50%, -50%) scale(0);
+    }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(10,21,8,0.93);
+    }
+    #overlay h1 { color: #c8ff44; font: bold 46px/1.2 monospace; margin-bottom: 4px; text-shadow: 0 0 36px rgba(200,255,68,0.7); }
+    #overlay .sub { color: rgba(200,255,150,0.50); font: 11px/1 monospace; letter-spacing: 0.2em; margin-bottom: 30px; }
+    #ov-score { color: rgba(255,224,0,0.95); font: bold 18px/1.6 monospace; margin-bottom: 24px; display: none; text-align: center; }
+    #btn {
+      background: rgba(200,255,68,0.10); border: 1px solid rgba(200,255,68,0.5);
+      color: rgba(200,255,68,0.95); font: bold 17px/1 monospace; padding: 14px 44px;
+      cursor: pointer; letter-spacing: 0.16em;
+    }
+    #btn:active { background: rgba(200,255,68,0.25); }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <div><div id="score">0</div><div id="wave-lbl">WAVE 1</div></div>
+  <div style="text-align:right"><div id="combo-disp"></div><div id="lives">♦♦♦</div></div>
+</div>
+<div id="popup"></div>
+<div id="flash"></div>
+<div id="miss-flash"></div>
+<div id="wave-flash"></div>
+<div id="ring"></div>
+<div id="overlay">
+  <h1>STONE SURGE</h1>
+  <div class="sub">WILD LANDS · TAP TO SHATTER</div>
+  <div id="ov-score"></div>
+  <button id="btn">PLAY</button>
+</div>
+
+<script type="importmap">
+{"imports": {"three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── RENDERER ──────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = false;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a1508);
+scene.fog = new THREE.Fog(0x0a1508, 14, 32);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 60);
+camera.position.set(0, 9, 12);
+camera.lookAt(0, 0, 0);
+
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ── LIGHTS ────────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x2a4020, 2.2));
+const sun = new THREE.DirectionalLight(0xffe8a0, 2.8);
+sun.position.set(5, 10, 6);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x204060, 0.9);
+fill.position.set(-4, 4, -6);
+scene.add(fill);
+
+// ── TERRAIN ───────────────────────────────────────────────────────────────────
+const GRID = 14, CELL = 1.2;
+const terrainVerts = [], terrainColors = [];
+const brownPalette = [
+  [0.22, 0.34, 0.15], [0.27, 0.40, 0.17], [0.17, 0.27, 0.12],
+  [0.25, 0.37, 0.16], [0.19, 0.30, 0.13], [0.29, 0.43, 0.18]
+];
+for (let z = -GRID / 2; z < GRID / 2; z++) {
+  for (let x = -GRID / 2; x < GRID / 2; x++) {
+    const hBL = (Math.random()-0.5)*0.3, hBR = (Math.random()-0.5)*0.3;
+    const hTL = (Math.random()-0.5)*0.3, hTR = (Math.random()-0.5)*0.3;
+    const cx = x*CELL, cz = z*CELL;
+    terrainVerts.push(cx,hBL,cz, cx+CELL,hBR,cz, cx,hTL,cz+CELL);
+    terrainVerts.push(cx+CELL,hBR,cz, cx+CELL,hTR,cz+CELL, cx,hTL,cz+CELL);
+    const c = brownPalette[Math.floor(Math.random() * brownPalette.length)];
+    for (let i = 0; i < 6; i++) terrainColors.push(...c);
+  }
+}
+const terrGeo = new THREE.BufferGeometry();
+terrGeo.setAttribute('position', new THREE.Float32BufferAttribute(terrainVerts, 3));
+terrGeo.setAttribute('color', new THREE.Float32BufferAttribute(terrainColors, 3));
+terrGeo.computeVertexNormals();
+scene.add(new THREE.Mesh(terrGeo, new THREE.MeshLambertMaterial({ vertexColors: true })));
+
+// ── SPAWN GRID ─────────────────────────────────────────────────────────────────
+const SPAWN_POSITIONS = [];
+for (let z = -5; z <= 5; z += 1.4)
+  for (let x = -5; x <= 5; x += 1.4)
+    SPAWN_POSITIONS.push({ x, z });
+
+// ── STONE TYPES — higher-contrast colors vs v01 ───────────────────────────────
+const STONE_TYPES = [
+  { color: 0x44ddff, emissive: 0x0055cc, pts: 10, name: 'ICE' },
+  { color: 0xff6600, emissive: 0xdd1100, pts: 10, name: 'FIRE' },
+  { color: 0x44ff22, emissive: 0x119900, pts: 10, name: 'LIFE' },
+  { color: 0xffee00, emissive: 0xcc7700, pts: 50, name: 'GOLD' },
+  { color: 0xff0055, emissive: 0xcc0033, pts: -1, name: 'BOMB' },
+];
+
+// ── PARTICLE SYSTEM — vertex-colored with fade ────────────────────────────────
+const PART_COUNT = 240;
+const partGeo = new THREE.BufferGeometry();
+const partPos = new Float32Array(PART_COUNT * 3);
+const partCol = new Float32Array(PART_COUNT * 3);
+partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
+partGeo.setAttribute('color', new THREE.BufferAttribute(partCol, 3));
+const partMat = new THREE.PointsMaterial({
+  size: 0.22, vertexColors: true, transparent: true, opacity: 1.0,
+  depthWrite: false, sizeAttenuation: true
+});
+scene.add(new THREE.Points(partGeo, partMat));
+
+const partData = Array.from({ length: PART_COUNT }, () => ({
+  active: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+  life: 0, maxLife: 0.5, r: 1, g: 1, b: 1
+}));
+
+function hexToRgb(hex) {
+  return { r: ((hex >> 16) & 0xff) / 255, g: ((hex >> 8) & 0xff) / 255, b: (hex & 0xff) / 255 };
+}
+
+function spawnParticles(x, y, z, colorHex, count, speed, maxLife) {
+  const { r, g, b } = hexToRgb(colorHex);
+  let n = 0;
+  for (let i = 0; i < PART_COUNT && n < count; i++) {
+    if (partData[i].active) continue;
+    const ang = Math.random() * Math.PI * 2;
+    const sp = speed * (0.5 + Math.random() * 0.7);
+    Object.assign(partData[i], {
+      active: true, x, y, z,
+      vx: Math.cos(ang) * sp, vy: Math.random() * speed * 0.8 + speed * 0.3, vz: Math.sin(ang) * sp,
+      life: 0, maxLife: maxLife + Math.random() * 0.2, r, g, b
+    });
+    n++;
+  }
+}
+
+function spawnTrail(x, y, z, colorHex) {
+  const { r, g, b } = hexToRgb(colorHex);
+  for (let i = 0; i < PART_COUNT; i++) {
+    if (partData[i].active) continue;
+    Object.assign(partData[i], {
+      active: true, x: x + (Math.random()-0.5)*0.2, y, z: z + (Math.random()-0.5)*0.2,
+      vx: (Math.random()-0.5)*0.4, vy: -0.4, vz: (Math.random()-0.5)*0.4,
+      life: 0, maxLife: 0.15 + Math.random() * 0.1, r: r*0.6, g: g*0.6, b: b*0.6
+    });
+    break;
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = 0; i < PART_COUNT; i++) {
+    const p = partData[i];
+    const b3 = i * 3;
+    if (!p.active) { partPos[b3+1] = -999; partCol[b3] = partCol[b3+1] = partCol[b3+2] = 0; continue; }
+    p.life += dt;
+    if (p.life >= p.maxLife) { p.active = false; partPos[b3+1] = -999; continue; }
+    p.vy -= 9 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+    partPos[b3] = p.x; partPos[b3+1] = p.y; partPos[b3+2] = p.z;
+    const fade = 1 - p.life / p.maxLife;
+    partCol[b3] = p.r * fade; partCol[b3+1] = p.g * fade; partCol[b3+2] = p.b * fade;
+  }
+  partGeo.attributes.position.needsUpdate = true;
+  partGeo.attributes.color.needsUpdate = true;
+}
+
+// ── STONE MESH ────────────────────────────────────────────────────────────────
+function makeStoneMesh(type) {
+  const mat = new THREE.MeshLambertMaterial({ color: type.color, emissive: type.emissive, emissiveIntensity: 0.6, flatShading: true });
+  const mesh = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.7, 5, 1), mat);
+  const shard = new THREE.Mesh(
+    new THREE.ConeGeometry(0.18, 0.5, 5, 1),
+    new THREE.MeshLambertMaterial({ color: type.color, emissive: type.emissive, emissiveIntensity: 0.45, flatShading: true })
+  );
+  shard.position.set(0.22, -0.05, 0.1);
+  shard.rotation.z = 0.5;
+  mesh.add(shard);
+  return mesh;
+}
+
+// ── GAME STATE ────────────────────────────────────────────────────────────────
+let score = 0, combo = 0, maxCombo = 0, lives = 3, wave = 1;
+let gameActive = false;
+let shakeTime = 0, shakeMag = 0, shakeDecayRef = 0.35;
+const camBaseY = 9, camBaseZ = 12;
+let popupAnim = null;
+let waveTimer = 0, waveDuration = 20;
+let spawnInterval = 1.8, spawnTimer = 0;
+let stoneSpeed = 0.9;
+let stones = [], usedPositions = new Set();
+
+function getSpawnPos() {
+  const avail = SPAWN_POSITIONS.filter(p => !usedPositions.has(`${p.x},${p.z}`));
+  if (!avail.length) return null;
+  const pos = avail[Math.floor(Math.random() * avail.length)];
+  usedPositions.add(`${pos.x},${pos.z}`);
+  return pos;
+}
+
+function spawnStone() {
+  const pos = getSpawnPos();
+  if (!pos) return;
+  const bombChance = Math.min(0.08 + wave * 0.02, 0.22);
+  const r = Math.random();
+  const typeIdx = r < bombChance ? 4 : r < bombChance + 0.12 ? 3 : Math.floor(Math.random() * 3);
+  const type = STONE_TYPES[typeIdx];
+  const mesh = makeStoneMesh(type);
+  mesh.position.set(pos.x, -0.8, pos.z);
+  mesh.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(mesh);
+  stones.push({
+    mesh, type, typeIdx, x: pos.x, z: pos.z,
+    posKey: `${pos.x},${pos.z}`,
+    phase: 'rising', y: -0.8, peakY: 0.55,
+    peakTimer: 0, peakDuration: Math.max(0.6, 1.2 - wave * 0.05),
+    pulseT: 0, alive: true, trailTimer: 0
+  });
+}
+
+function removeStone(stone) {
+  scene.remove(stone.mesh);
+  stone.mesh.geometry.dispose();
+  stone.alive = false;
+  usedPositions.delete(stone.posKey);
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function onTap(clientX, clientY) {
+  if (!gameActive) return;
+  mouse.x = (clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  for (const stone of stones) {
+    if (!stone.alive || stone.phase === 'sinking') continue;
+    if (raycaster.intersectObject(stone.mesh, true).length > 0) {
+      hitStone(stone, clientX, clientY);
+      return;
+    }
+  }
+  combo = 0;
+  updateComboDisplay();
+}
+
+function hitStone(stone, clientX, clientY) {
+  const colorHex = `#${stone.type.color.toString(16).padStart(6, '0')}`;
+  if (stone.typeIdx === 4) {
+    takeDamage();
+    spawnParticles(stone.x, stone.y, stone.z, 0xff0055, 30, 7, 0.55);
+    showPopup('BOMB!', '#ff0055');
+    shakeCam(0.35, 0.45);
+    flashMiss();
+    triggerRing(clientX, clientY, '#ff0055', 5);
+  } else {
+    combo++;
+    if (combo > maxCombo) maxCombo = combo;
+    const mult = Math.min(combo, 8);
+    score += stone.type.pts * mult;
+    const isBigCombo = combo >= 5;
+    spawnParticles(stone.x, stone.y, stone.z, stone.type.color, isBigCombo ? 30 : 18, isBigCombo ? 7 : 5, 0.5);
+    if (isBigCombo) {
+      spawnParticles(stone.x, stone.y + 0.2, stone.z, 0xffee00, 14, 4, 0.35);
+      shakeCam(0.13, 0.22);
+    } else {
+      shakeCam(0.07, 0.14);
+    }
+    flashHit();
+    triggerRing(clientX, clientY, colorHex, isBigCombo ? 6 : 4);
+    if (isBigCombo) showPopup(`x${mult} COMBO!`, '#ffe000');
+    else if (stone.typeIdx === 3) showPopup('+50 GOLD', '#ffee00');
+    updateScore();
+  }
+  updateComboDisplay();
+  removeStone(stone);
+}
+
+function stoneSunk(stone) {
+  if (stone.typeIdx === 4) return;
+  combo = 0;
+  spawnParticles(stone.x, 0, stone.z, 0x886655, 8, 2, 0.3);
+  takeDamage();
+  updateComboDisplay();
+  flashMiss();
+}
+
+function takeDamage() {
+  lives = Math.max(0, lives - 1);
+  updateLives();
+  shakeCam(0.22, 0.32);
+  if (lives <= 0) endGame();
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function updateScore() { document.getElementById('score').textContent = score; }
+function updateLives() {
+  document.getElementById('lives').textContent = '♦'.repeat(lives) + '◇'.repeat(Math.max(0, 3 - lives));
+}
+function updateComboDisplay() {
+  const el = document.getElementById('combo-disp');
+  el.textContent = combo >= 2 ? `x${Math.min(combo, 8)}` : '';
+  el.style.opacity = combo >= 2 ? '1' : '0';
+}
+function updateWave() { document.getElementById('wave-lbl').textContent = `WAVE ${wave}`; }
+
+function showPopup(text, color = '#c8ff44') {
+  const el = document.getElementById('popup');
+  el.textContent = text; el.style.color = color;
+  el.style.opacity = '1'; el.style.transform = 'translate(-50%, -50%) scale(1.15)';
+  if (popupAnim) clearTimeout(popupAnim);
+  popupAnim = setTimeout(() => {
+    el.style.opacity = '0'; el.style.transform = 'translate(-50%, -50%) scale(1)';
+  }, 700);
+}
+
+function flashHit() {
+  const el = document.getElementById('flash');
+  el.style.opacity = '0.75';
+  setTimeout(() => { el.style.opacity = '0'; }, 90);
+}
+function flashMiss() {
+  const el = document.getElementById('miss-flash');
+  el.style.opacity = '0.88';
+  setTimeout(() => { el.style.opacity = '0'; }, 140);
+}
+function flashWave() {
+  const el = document.getElementById('wave-flash');
+  el.style.opacity = '0.75';
+  setTimeout(() => { el.style.opacity = '0'; }, 350);
+}
+
+function triggerRing(cx, cy, colorStr, expandScale) {
+  const el = document.getElementById('ring');
+  el.style.left = cx + 'px';
+  el.style.top = cy + 'px';
+  el.style.borderColor = colorStr;
+  el.style.opacity = '0.9';
+  el.style.transition = 'none';
+  el.style.transform = 'translate(-50%, -50%) scale(0)';
+  el.getBoundingClientRect(); // force reflow
+  el.style.transition = 'transform 0.35s ease-out, opacity 0.35s ease-out';
+  el.style.transform = `translate(-50%, -50%) scale(${expandScale})`;
+  el.style.opacity = '0';
+}
+
+// ── CAMERA SHAKE ──────────────────────────────────────────────────────────────
+function shakeCam(mag, duration) {
+  if (mag > shakeMag) { shakeMag = mag; shakeTime = duration; shakeDecayRef = duration; }
+}
+
+// ── TREES ─────────────────────────────────────────────────────────────────────
+function addTree(x, z, scale) {
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.09, 0.5, 5),
+    new THREE.MeshLambertMaterial({ color: 0x3d2a14, flatShading: true })
+  );
+  trunk.position.set(x, 0.25, z);
+  scene.add(trunk);
+  const canopy = new THREE.Mesh(
+    new THREE.ConeGeometry(0.4 * scale, 0.9 * scale, 6, 1),
+    new THREE.MeshLambertMaterial({ color: 0x1a4014, emissive: 0x0a1e08, emissiveIntensity: 0.3, flatShading: true })
+  );
+  canopy.position.set(x, 0.7 + 0.4 * scale, z);
+  scene.add(canopy);
+}
+for (let i = 0; i < 16; i++) {
+  const a = (i / 16) * Math.PI * 2;
+  addTree(Math.cos(a) * 7.5, Math.sin(a) * 7.5, 0.8 + Math.random() * 0.5);
+}
+
+// ── GAME FLOW ─────────────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; combo = 0; maxCombo = 0; lives = 3; wave = 1;
+  gameActive = true;
+  spawnInterval = 1.8; spawnTimer = 0; stoneSpeed = 0.9;
+  waveTimer = 0; waveDuration = 20;
+  for (const s of stones) { if (s.alive) removeStone(s); }
+  stones = []; usedPositions.clear();
+  updateScore(); updateLives(); updateComboDisplay(); updateWave();
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('combo-disp').style.opacity = '0';
+}
+
+function endGame() {
+  gameActive = false;
+  for (const s of stones) { if (s.alive) removeStone(s); }
+  stones = []; usedPositions.clear();
+  const ovScore = document.getElementById('ov-score');
+  ovScore.style.display = 'block';
+  ovScore.innerHTML = `SCORE: ${score}<br>BEST COMBO: x${Math.min(maxCombo, 8)}<br>WAVE: ${wave}`;
+  document.getElementById('btn').textContent = 'PLAY AGAIN';
+  document.getElementById('overlay').style.display = 'flex';
+}
+
+function advanceWave() {
+  wave++;
+  spawnInterval = Math.max(0.6, 1.8 - wave * 0.12);
+  stoneSpeed = Math.min(2.0, 0.9 + wave * 0.1);
+  waveDuration = Math.max(14, 22 - wave);
+  waveTimer = 0;
+  showPopup(`WAVE ${wave}`, '#c8ff44');
+  updateWave();
+  flashWave();
+  shakeCam(0.09, 0.2);
+}
+
+document.getElementById('btn').addEventListener('click', startGame);
+renderer.domElement.addEventListener('click', e => onTap(e.clientX, e.clientY));
+renderer.domElement.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onTap(t.clientX, t.clientY);
+}, { passive: false });
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (gameActive) {
+    waveTimer += dt;
+    if (waveTimer >= waveDuration) advanceWave();
+
+    spawnTimer += dt;
+    if (spawnTimer >= spawnInterval) {
+      spawnTimer = 0;
+      spawnStone();
+      if (wave >= 3 && Math.random() < 0.35) spawnStone();
+      if (wave >= 6 && Math.random() < 0.25) spawnStone();
+    }
+
+    for (const stone of stones) {
+      if (!stone.alive) continue;
+      stone.pulseT += dt * 3;
+      if (stone.mesh.children[0]) stone.mesh.children[0].scale.setScalar(1 + Math.sin(stone.pulseT) * 0.04);
+
+      if (stone.phase === 'rising') {
+        stone.y += stoneSpeed * dt * 1.5;
+        stone.mesh.position.y = stone.y;
+        stone.trailTimer += dt;
+        if (stone.trailTimer >= 0.06) {
+          stone.trailTimer = 0;
+          spawnTrail(stone.x, stone.y, stone.z, stone.type.color);
+        }
+        if (stone.y >= stone.peakY) { stone.y = stone.peakY; stone.phase = 'peak'; stone.peakTimer = 0; }
+      } else if (stone.phase === 'peak') {
+        stone.peakTimer += dt;
+        if (stone.typeIdx === 4)
+          stone.mesh.material.emissiveIntensity = 0.5 + Math.sin(stone.pulseT * 2) * 0.38;
+        if (stone.peakTimer >= stone.peakDuration) stone.phase = 'sinking';
+      } else if (stone.phase === 'sinking') {
+        stone.y -= stoneSpeed * dt * 1.2;
+        stone.mesh.position.y = stone.y;
+        if (stone.y <= -0.9) { stoneSunk(stone); removeStone(stone); }
+      }
+    }
+    stones = stones.filter(s => s.alive);
+  }
+
+  updateParticles(dt);
+
+  if (shakeTime > 0) {
+    shakeTime -= dt;
+    const s = shakeTime > 0 ? shakeMag * (shakeTime / shakeDecayRef) : 0;
+    camera.position.set((Math.random()-0.5)*s, camBaseY + (Math.random()-0.5)*s*0.5, camBaseZ);
+    camera.lookAt((Math.random()-0.5)*s*0.3, 0, 0);
+    if (shakeTime <= 0) { shakeMag = 0; camera.position.set(0, camBaseY, camBaseZ); camera.lookAt(0, 0, 0); }
+  } else {
+    camera.position.set(0, camBaseY, camBaseZ);
+    camera.lookAt(0, 0, 0);
+  }
+
+  renderer.render(scene, camera);
+}
+
+if (window.Telegram?.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
+
+tick();
+</script>
+</body>
+</html>

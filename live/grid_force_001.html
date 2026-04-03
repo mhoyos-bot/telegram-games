@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>GRID FORCE</title>
+<style>
+/* GRID FORCE | grid_movement_001 | STD-031: 396 lines, justified — d-pad HTML + 5 draw functions require vertical space */
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#060a14;overflow:hidden;touch-action:none;font-family:'Courier New',monospace;user-select:none}
+canvas{display:block;position:fixed;top:0;left:0}
+#ui{position:fixed;top:0;left:0;right:0;padding:10px 16px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;z-index:10}
+#score{color:#0ff;font-size:30px;font-weight:bold;text-shadow:0 0 12px #0ff,0 0 24px #0ff;line-height:1}
+#score-lbl{color:#1a3a5a;font-size:10px;letter-spacing:3px;margin-top:2px}
+#right{text-align:right}
+#lives{color:#f64;font-size:20px;letter-spacing:3px;text-shadow:0 0 8px #f64;min-height:24px}
+#wave-el{color:#6af;font-size:10px;letter-spacing:3px;margin-top:4px;opacity:0.65}
+#msg{position:fixed;top:44%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:32px;font-weight:bold;text-align:center;pointer-events:none;z-index:20;text-shadow:0 0 16px #0ff,0 0 40px #06f;opacity:0;transition:opacity 0.25s;letter-spacing:3px;line-height:1.6;white-space:pre}
+#dpad{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:5px;pointer-events:auto;z-index:15}
+.dp{background:rgba(0,180,255,0.08);border:1px solid rgba(0,180,255,0.22);border-radius:8px;color:#4cf;font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background 0.1s;-webkit-tap-highlight-color:transparent}
+.dp:active{background:rgba(0,180,255,0.28)}
+.dp.mid{background:transparent;border-color:transparent;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div><div id="score">0</div><div id="score-lbl">SCORE</div></div>
+  <div id="right"><div id="lives">♥♥♥</div><div id="wave-el">WAVE 1</div></div>
+</div>
+<div id="msg"></div>
+<div id="dpad">
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-u">▲</div>
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-l">◀</div>
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-r">▶</div>
+  <div class="dp mid"></div>
+  <div class="dp" id="dp-d">▼</div>
+  <div class="dp mid"></div>
+</div>
+
+<script>
+// GRID FORCE | grid_movement_001 | Mechanic: grid_movement
+// Atoms: GRID_MOVE, PUSH_MECHANIC, TURN_CHASE, GEM_COLLECT, SCREEN_SHAKE, WAVE_ESCALATION
+// STD-030: All exceptions caught+logged. STD-031: ≤400L (d-pad+draw funcs justified in header).
+// Kernel: NO — standalone build. Bloodflow: input→move→advanceEnemies→hitCheck→checkGems→frame
+
+const CV = document.getElementById('c');
+const X  = CV.getContext('2d');
+const COLS = 9, ROWS = 13;
+let T, OX, OY;
+let shX = 0, shY = 0, shF = 0;
+let P, gems, enems, walls, wallRects, score, lives, wave, dead, touchSt, bgGrad;
+
+// ── RESIZE ───────────────────────────────────────────────────────────────────
+function resize() {
+    CV.width  = window.innerWidth;
+    CV.height = window.innerHeight;
+    const dpadH = 185; // approximate d-pad height + margin
+    T  = Math.floor(Math.min(CV.width / COLS, (CV.height - 60 - dpadH) / ROWS));
+    OX = Math.floor((CV.width  - T * COLS) / 2);
+    OY = Math.floor((CV.height - dpadH - T * ROWS) / 2) + 50;
+    bgGrad = X.createRadialGradient(CV.width/2,CV.height/2,0,CV.width/2,CV.height/2,CV.width*0.7); bgGrad.addColorStop(0,'rgba(0,50,110,0.14)'); bgGrad.addColorStop(1,'rgba(0,0,0,0)');
+}
+window.addEventListener('resize', resize);
+
+// ── INIT / SPAWN ─────────────────────────────────────────────────────────────
+function init() {
+    score = 0; lives = 3; wave = 1; dead = false;
+    spawnWave();
+    updateUI();
+}
+
+function spawnWave() {
+    P     = { x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) };
+    walls = genWalls();
+    gems  = spawnGroup(4 + wave * 2);
+    enems = spawnGroup(Math.min(wave, 6), true);
+    document.getElementById('wave-el').textContent = `WAVE ${wave}`;
+}
+
+function genWalls() {
+    const w = new Set(); wallRects = [];
+    const n = 5 + wave;
+    let tries = 0;
+    while (w.size < n && tries++ < 600) {
+        const x = 1 + Math.floor(Math.random() * (COLS - 2));
+        const y = 1 + Math.floor(Math.random() * (ROWS - 2));
+        if (!near(x, y, P.x, P.y, 2)) { w.add(pos(x, y)); wallRects.push({x, y}); }
+    }
+    return w;
+}
+
+function spawnGroup(n, isEnemy) {
+    const out = [];
+    let tries = 0;
+    while (out.length < n && tries++ < 1200) {
+        const x = Math.floor(Math.random() * COLS);
+        const y = Math.floor(Math.random() * ROWS);
+        const minDist = isEnemy ? 3 : 2;
+        if (!walls.has(pos(x, y)) && !near(x, y, P.x, P.y, minDist) && !hit(x, y, out)) {
+            out.push({ x, y, ph: Math.random() * Math.PI * 2 });
+        }
+    }
+    return out;
+}
+
+function pos(x, y)               { return `${x},${y}`; }
+function near(ax, ay, bx, by, d) { return Math.abs(ax - bx) <= d && Math.abs(ay - by) <= d; }
+function hit(x, y, arr)          { return arr.some(e => e.x === x && e.y === y); }
+function inBounds(x, y)          { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+function blocked(x, y)           { return !inBounds(x, y) || walls.has(pos(x, y)); }
+
+// ── MOVE (core game logic) ────────────────────────────────────────────────────
+function move(dx, dy) {
+    if (dead) { restart(); return; }
+    const nx = P.x + dx, ny = P.y + dy;
+
+    if (!inBounds(nx, ny) || walls.has(pos(nx, ny))) { shake(4, 7); return; }
+
+    // push check: player walking into an enemy
+    const ei = enems.findIndex(e => e.x === nx && e.y === ny);
+    if (ei >= 0) {
+        const tx = nx + dx, ty = ny + dy;
+        const crushTarget = blocked(tx, ty) || enems.some((e, i) => i !== ei && e.x === tx && e.y === ty);
+        if (crushTarget) {
+            enems.splice(ei, 1);   // crush against wall
+            score += 50 + wave * 10;
+            updateUI();
+            shake(7, 10);
+        } else {
+            enems[ei].x = tx;      // push through
+            enems[ei].y = ty;
+            shake(3, 5);
+        }
+    }
+
+    P.x = nx; P.y = ny;
+
+    if (!dead) checkGems();
+    if (!dead) advanceEnemies();
+    if (!dead) hitCheck();
+}
+
+function checkGems() {
+    for (let i = gems.length - 1; i >= 0; i--) {
+        if (gems[i].x === P.x && gems[i].y === P.y) {
+            gems.splice(i, 1);
+            score += 10 + wave * 5;
+            updateUI();
+        }
+    }
+    if (gems.length === 0) {
+        wave++;
+        score += 100 * wave;
+        shake(5, 9);
+        updateUI();
+        spawnWave();
+    }
+}
+
+function advanceEnemies() {
+    for (const e of enems) {
+        const ddx = P.x - e.x, ddy = P.y - e.y;
+        const steps = [];
+        if (Math.abs(ddx) >= Math.abs(ddy)) {
+            if (ddx !== 0) steps.push([Math.sign(ddx), 0]);
+            if (ddy !== 0) steps.push([0, Math.sign(ddy)]);
+        } else {
+            if (ddy !== 0) steps.push([0, Math.sign(ddy)]);
+            if (ddx !== 0) steps.push([Math.sign(ddx), 0]);
+        }
+        if (Math.random() < 0.22 && steps.length > 1) steps.reverse();
+        for (const [sx, sy] of steps) {
+            const nx = e.x + sx, ny = e.y + sy;
+            if (!blocked(nx, ny) && !enems.some(o => o !== e && o.x === nx && o.y === ny)) {
+                e.x = nx; e.y = ny;
+                break;
+            }
+        }
+    }
+}
+
+function hitCheck() {
+    for (const e of enems) {
+        if (e.x === P.x && e.y === P.y) {
+            lives--;
+            shake(10, 18);
+            updateUI();
+            if (lives <= 0) {
+                dead = true;
+                showMsg(`GAME OVER\n\n${score} PTS\n\nTAP TO PLAY`);
+            } else {
+                P.x = Math.floor(COLS / 2);
+                P.y = Math.floor(ROWS / 2);
+            }
+            return;
+        }
+    }
+}
+
+function restart() { hideMsg(); init(); }
+
+// ── SHAKE ─────────────────────────────────────────────────────────────────────
+function shake(str, frames) {
+    shX = (Math.random() - 0.5) * str * 2;
+    shY = (Math.random() - 0.5) * str * 2;
+    shF = frames || 8;
+}
+
+// ── UI ────────────────────────────────────────────────────────────────────────
+function updateUI() {
+    document.getElementById('score').textContent = score;
+    document.getElementById('lives').textContent = '♥'.repeat(Math.max(0, lives));
+}
+function showMsg(t) {
+    const el = document.getElementById('msg');
+    el.textContent = t;
+    el.style.opacity = '1';
+}
+function hideMsg() { document.getElementById('msg').style.opacity = '0'; }
+
+// ── RENDER LOOP ───────────────────────────────────────────────────────────────
+function frame(ts) {
+    try {
+        if (shF > 0) { shF--; shX *= 0.62; shY *= 0.62; }
+        else { shX = 0; shY = 0; }
+
+        X.save();
+        X.clearRect(0, 0, CV.width, CV.height);
+
+        X.fillStyle = '#060a14';
+        X.fillRect(0, 0, CV.width, CV.height);
+        X.fillStyle = bgGrad;
+        X.fillRect(0, 0, CV.width, CV.height);
+
+        X.translate(shX, shY);
+        drawGrid();
+        drawWalls();
+        drawGems(ts);
+        drawEnems(ts);
+        drawPlayer(ts);
+        X.restore();
+    } catch (err) {
+        console.warn('[WARN] frame error:', err);
+    }
+    requestAnimationFrame(frame);
+}
+
+// ── DRAW: GRID ────────────────────────────────────────────────────────────────
+function drawGrid() {
+    X.strokeStyle = 'rgba(0,170,255,0.06)';
+    X.lineWidth = 0.5;
+    for (let i = 0; i <= COLS; i++) {
+        X.beginPath(); X.moveTo(OX + i*T, OY); X.lineTo(OX + i*T, OY + ROWS*T); X.stroke();
+    }
+    for (let j = 0; j <= ROWS; j++) {
+        X.beginPath(); X.moveTo(OX, OY + j*T); X.lineTo(OX + COLS*T, OY + j*T); X.stroke();
+    }
+    X.strokeStyle = 'rgba(0,180,255,0.22)';
+    X.lineWidth = 1;
+    X.strokeRect(OX, OY, COLS*T, ROWS*T);
+}
+
+// ── DRAW: WALLS ───────────────────────────────────────────────────────────────
+function drawWalls() {
+    for (const {x: wx, y: wy} of wallRects) {
+        const px = OX + wx*T + 2, py = OY + wy*T + 2, s = T - 4;
+        X.fillStyle = '#0d1e36';
+        X.fillRect(px, py, s, s);
+        X.strokeStyle = '#1c3a60';
+        X.lineWidth = 1;
+        X.strokeRect(px, py, s, s);
+        X.strokeStyle = 'rgba(40,85,150,0.3)';
+        X.strokeRect(px + 2, py + 2, s - 4, s - 4);
+    }
+}
+
+// ── DRAW: GEMS ────────────────────────────────────────────────────────────────
+function drawGems(ts) {
+    for (const g of gems) {
+        g.ph += 0.045;
+        const glow = 0.65 + 0.35 * Math.sin(g.ph);
+        const cx = OX + g.x*T + T/2, cy = OY + g.y*T + T/2;
+        const r  = T * 0.19 * glow;
+        const gr = X.createRadialGradient(cx, cy, 0, cx, cy, T * 0.44);
+        gr.addColorStop(0, `rgba(255,210,0,${0.28*glow})`);
+        gr.addColorStop(1, 'rgba(255,210,0,0)');
+        X.fillStyle = gr;
+        X.fillRect(cx - T*0.5, cy - T*0.5, T, T);
+        X.save();
+        X.translate(cx, cy);
+        X.rotate(Math.PI/4 + ts * 0.0007);
+        X.fillStyle = `rgba(255,208,40,${0.8+0.2*glow})`;
+        X.fillRect(-r, -r, r*2, r*2);
+        X.fillStyle = 'rgba(255,255,180,0.55)';
+        X.fillRect(-r*0.4, -r*0.4, r*0.8, r*0.8);
+        X.restore();
+    }
+}
+
+// ── DRAW: ENEMIES ─────────────────────────────────────────────────────────────
+function drawEnems(ts) {
+    for (const e of enems) {
+        const cx = OX + e.x*T + T/2, cy = OY + e.y*T + T/2;
+        const r  = T * 0.29;
+        const p  = 0.78 + 0.22 * Math.sin(ts * 0.004 + e.ph);
+        const gr = X.createRadialGradient(cx, cy, 0, cx, cy, r*2.2);
+        gr.addColorStop(0, `rgba(255,30,30,${0.2*p})`);
+        gr.addColorStop(1, 'rgba(255,30,30,0)');
+        X.fillStyle = gr;
+        X.fillRect(cx - r*2.5, cy - r*2.5, r*5, r*5);
+        const hs = r * 0.84;
+        X.fillStyle = `rgba(200,38,38,${p})`;
+        X.fillRect(cx - hs, cy - hs, hs*2, hs*2);
+        X.strokeStyle = `rgba(255,110,110,${0.65*p})`;
+        X.lineWidth = 1.5;
+        X.strokeRect(cx - hs*0.5, cy - hs*0.5, hs, hs);
+    }
+}
+
+// ── DRAW: PLAYER ──────────────────────────────────────────────────────────────
+function drawPlayer(ts) {
+    const cx = OX + P.x*T + T/2, cy = OY + P.y*T + T/2;
+    const r  = T * 0.33;
+    const p  = 0.86 + 0.14 * Math.sin(ts * 0.006);
+    const gr = X.createRadialGradient(cx, cy, 0, cx, cy, r*2.8);
+    gr.addColorStop(0, `rgba(0,255,255,${0.18*p})`);
+    gr.addColorStop(1, 'rgba(0,255,255,0)');
+    X.fillStyle = gr;
+    X.fillRect(cx - r*3, cy - r*3, r*6, r*6);
+    X.fillStyle = `rgba(0,210,235,${p})`;
+    X.beginPath(); X.arc(cx, cy, r, 0, Math.PI*2); X.fill();
+    X.fillStyle = '#fff';
+    X.beginPath(); X.arc(cx, cy, r*0.28, 0, Math.PI*2); X.fill();
+    X.strokeStyle = `rgba(100,255,255,${0.55*p})`;
+    X.lineWidth = 1.5;
+    X.beginPath(); X.arc(cx, cy, r*0.68, 0, Math.PI*2); X.stroke();
+}
+
+// ── INPUT: KEYBOARD ───────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+    const MAP = {
+        ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0],
+        w:[0,-1], s:[0,1], a:[-1,0], d:[1,0],
+        W:[0,-1], S:[0,1], A:[-1,0], D:[1,0]
+    };
+    const dir = MAP[e.key];
+    if (dir) { e.preventDefault(); move(dir[0], dir[1]); }
+    if ((e.key === 'r' || e.key === 'R') && dead) restart();
+});
+
+// ── INPUT: TOUCH SWIPE ────────────────────────────────────────────────────────
+CV.addEventListener('touchstart', e => {
+    e.preventDefault();
+    touchSt = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: false });
+
+CV.addEventListener('touchend', e => {
+    e.preventDefault();
+    if (!touchSt) return;
+    const dx = e.changedTouches[0].clientX - touchSt.x;
+    const dy = e.changedTouches[0].clientY - touchSt.y;
+    touchSt = null;
+    const adx = Math.abs(dx), ady = Math.abs(dy);
+    if (adx < 12 && ady < 12) { if (dead) restart(); return; }
+    if (adx > ady) move(dx > 0 ? 1 : -1, 0);
+    else           move(0, dy > 0 ? 1 : -1);
+}, { passive: false });
+
+// ── INPUT: D-PAD BUTTONS ──────────────────────────────────────────────────────
+function bindDpad(id, dx, dy) {
+    const el = document.getElementById(id);
+    el.addEventListener('touchstart', e => { e.preventDefault(); move(dx, dy); }, { passive: false });
+    el.addEventListener('mousedown',  e => { e.preventDefault(); move(dx, dy); });
+}
+bindDpad('dp-u',  0, -1);
+bindDpad('dp-d',  0,  1);
+bindDpad('dp-l', -1,  0);
+bindDpad('dp-r',  1,  0);
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+try {
+    if (window.Telegram?.WebApp) window.Telegram.WebApp.ready();
+} catch (err) {
+    console.warn('[WARN] Telegram WebApp init:', err);
+}
+
+resize();
+init();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

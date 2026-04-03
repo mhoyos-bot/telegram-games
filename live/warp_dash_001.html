@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>WARP DASH</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; touch-action:none; font-family:'Arial',sans-serif; }
+canvas { display:block; }
+#ui {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  pointer-events:none;
+  display:flex; flex-direction:column; align-items:center;
+}
+#score {
+  margin-top:28px;
+  font-size:52px; font-weight:900;
+  color:#fff;
+  text-shadow: 0 0 20px #00ffff, 0 0 50px #00ffff;
+  letter-spacing:4px;
+  line-height:1;
+}
+#combo {
+  font-size:18px; font-weight:700;
+  color:#ff00aa;
+  text-shadow: 0 0 10px #ff00aa;
+  min-height:24px;
+  margin-top:4px;
+  letter-spacing:3px;
+  transition: transform 0.08s;
+}
+#overlay {
+  position:absolute;
+  top:50%; left:50%;
+  transform:translate(-50%,-55%);
+  text-align:center;
+  color:#fff;
+  display:flex; flex-direction:column; align-items:center; gap:10px;
+}
+#overlay .title {
+  font-size:42px; font-weight:900;
+  letter-spacing:8px;
+  text-shadow: 0 0 30px #00ffff, 0 0 60px #00ffff;
+}
+#overlay .subtitle {
+  font-size:14px; font-weight:400;
+  color:#00ffff; letter-spacing:5px;
+  text-shadow: 0 0 10px #00ffff;
+  animation: blink 1.4s ease-in-out infinite;
+}
+#overlay .detail {
+  font-size:13px; color:#888; letter-spacing:2px; margin-top:2px;
+}
+@keyframes blink {
+  0%,100% { opacity:0.3; }
+  50% { opacity:1; }
+}
+#lanes {
+  position:absolute; bottom:48px; left:0; right:0;
+  display:flex; justify-content:center; gap:18px;
+  pointer-events:none;
+}
+.lbox {
+  width:44px; height:44px; border:2px solid #1a1a2e;
+  display:flex; align-items:center; justify-content:center;
+  font-size:18px; color:#1a1a2e;
+  transition: border-color 0.1s, color 0.1s, box-shadow 0.1s;
+}
+.lbox.on {
+  border-color:#00ffff; color:#00ffff;
+  box-shadow: 0 0 10px #00ffff, inset 0 0 10px rgba(0,255,255,0.1);
+}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="combo"></div>
+  <div id="overlay">
+    <div class="title">WARP DASH</div>
+    <div class="subtitle">TAP TO START</div>
+    <div class="detail">TAP LEFT / RIGHT TO DODGE</div>
+  </div>
+  <div id="lanes">
+    <div class="lbox" id="L0">◄</div>
+    <div class="lbox on" id="L1">●</div>
+    <div class="lbox" id="L2">►</div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ======== WARP DASH — single-file Three.js tunnel runner ========
+// Mechanic: dodge obstacle walls by tapping left/right to change lane
+// 3 lanes, 1 safe gap per obstacle, combo multiplier, speed escalation
+// Atoms: LANE_SWITCH, OBSTACLE_WAVE, COMBO_CHAIN, WARP_TRAIL, TUNNEL_DEPTH
+
+const W = window.innerWidth, H = window.innerHeight;
+
+// --- Renderer ---
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+// --- Scene ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x00000e);
+scene.fog = new THREE.FogExp2(0x00000e, 0.018);
+
+// --- Camera ---
+const camera = new THREE.PerspectiveCamera(65, W / H, 0.1, 200);
+camera.position.set(0, 1.2, 16);
+camera.lookAt(0, 0, 0);
+
+// --- Lights ---
+scene.add(new THREE.AmbientLight(0x112244, 2));
+const pLight = new THREE.PointLight(0x00ffff, 3, 12);
+scene.add(pLight);
+
+// ======== CONSTANTS ========
+const LANES = [-2.6, 0, 2.6];
+const PW = 1.7, PH = 4.2, PD = 0.18;   // panel width/height/depth
+const SPAWN_Z = -70;
+const KILL_Z = 20;
+const TRIGGER_Z = 13.2;                  // obstacle z when checking collision
+const PLAYER_Z = 13.0;
+
+// ======== STATE ========
+let lane = 1, targetX = LANES[1], curX = LANES[1];
+let score = 0, combo = 1, maxCombo = 1;
+let state = 'start';                     // start / play / dead
+let speed = 0.38;
+let spawnTick = 0, spawnEvery = 82;
+let frame = 0;
+let shakeAmt = 0;
+let lastGap = -1;
+
+// ======== DOM ========
+const scoreEl  = document.getElementById('score');
+const comboEl  = document.getElementById('combo');
+const overlayEl = document.getElementById('overlay');
+const lboxes   = [0,1,2].map(i => document.getElementById('L' + i));
+
+function setOverlay(title, sub, detail) {
+  overlayEl.innerHTML =
+    (title  ? `<div class="title">${title}</div>` : '') +
+    (sub    ? `<div class="subtitle">${sub}</div>` : '') +
+    (detail ? `<div class="detail">${detail}</div>` : '');
+  overlayEl.style.display = title ? 'flex' : 'none';
+}
+
+function updateLanes() {
+  lboxes.forEach((b, i) => {
+    b.className = 'lbox' + (i === lane ? ' on' : '');
+    b.textContent = i === 1 ? (i === lane ? '●' : '○') : (i === 0 ? '◄' : '►');
+  });
+}
+updateLanes();
+
+// ======== STARS ========
+(function buildStars() {
+  const geo = new THREE.BufferGeometry();
+  const pos = [];
+  for (let i = 0; i < 500; i++) {
+    pos.push(
+      (Math.random() - 0.5) * 120,
+      (Math.random() - 0.5) * 60,
+      Math.random() * -180
+    );
+  }
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x334455, size: 0.12 })));
+})();
+
+// ======== TUNNEL RINGS ========
+const rings = [];
+for (let i = 0; i < 22; i++) {
+  const g = new THREE.TorusGeometry(5.5, 0.045, 6, 36);
+  const m = new THREE.MeshBasicMaterial({ color: 0x001133, transparent: true, opacity: 0.35 });
+  const r = new THREE.Mesh(g, m);
+  r.rotation.x = Math.PI / 2;
+  r.position.z = -i * 3.5;
+  scene.add(r);
+  rings.push(r);
+}
+
+// ======== FLOOR GRID ========
+const floor = new THREE.GridHelper(14, 14, 0x000d22, 0x000d22);
+floor.position.y = -2.2;
+scene.add(floor);
+
+// ======== PLAYER ========
+const playerGeo = new THREE.SphereGeometry(0.32, 16, 16);
+const playerMat = new THREE.MeshStandardMaterial({
+  color: 0x00ffff, emissive: 0x00aaff, emissiveIntensity: 1.8,
+  roughness: 0.15, metalness: 0.9
+});
+const player = new THREE.Mesh(playerGeo, playerMat);
+player.position.set(LANES[1], 0, PLAYER_Z);
+scene.add(player);
+
+// ======== TRAIL ========
+const trail = [];
+function tickTrail() {
+  if (state !== 'play') return;
+  if (frame % 2 !== 0) return;
+  const g = new THREE.SphereGeometry(0.1, 4, 4);
+  const m = new THREE.MeshBasicMaterial({ color: 0x0088cc, transparent: true, opacity: 0.9 });
+  const t = new THREE.Mesh(g, m);
+  t.position.copy(player.position);
+  t.position.x += (Math.random() - 0.5) * 0.15;
+  t.position.y += (Math.random() - 0.5) * 0.15;
+  scene.add(t);
+  trail.push({ mesh: t, life: 1 });
+}
+function updateTrail() {
+  for (let i = trail.length - 1; i >= 0; i--) {
+    const t = trail[i];
+    t.life -= 0.07;
+    t.mesh.material.opacity = Math.max(0, t.life);
+    t.mesh.scale.setScalar(Math.max(0, t.life) * 0.7);
+    if (t.life <= 0) { scene.remove(t.mesh); trail.splice(i, 1); }
+  }
+}
+
+// ======== OBSTACLES ========
+const obs = [];
+
+function makeObstacle() {
+  let gap = Math.floor(Math.random() * 3);
+  if (gap === lastGap && Math.random() < 0.45) gap = (gap + 1 + Math.floor(Math.random() * 2)) % 3;
+  lastGap = gap;
+
+  const panels = [];
+  const COLORS = [0xff0077, 0xee0055, 0xcc0044];
+
+  for (let i = 0; i < 3; i++) {
+    if (i === gap) continue;
+    const g = new THREE.BoxGeometry(PW, PH, PD);
+    const m = new THREE.MeshStandardMaterial({
+      color: COLORS[i], emissive: COLORS[i], emissiveIntensity: 0.7,
+      roughness: 0.2, metalness: 0.6
+    });
+    const p = new THREE.Mesh(g, m);
+    p.position.set(LANES[i], 0, SPAWN_Z);
+    scene.add(p);
+    panels.push(p);
+  }
+
+  // Gap edge outline (cyan neon box)
+  const eg = new THREE.EdgesGeometry(new THREE.BoxGeometry(PW, PH, PD));
+  const em = new THREE.LineBasicMaterial({ color: 0x00ffff });
+  const edge = new THREE.LineSegments(eg, em);
+  edge.position.set(LANES[gap], 0, SPAWN_Z);
+  scene.add(edge);
+
+  // Connecting bars (top + bottom)
+  const bars = [];
+  for (const yy of [PH / 2, -PH / 2]) {
+    const bg = new THREE.BoxGeometry(9, 0.12, 0.12);
+    const bm = new THREE.MeshBasicMaterial({ color: 0xff0044, transparent: true, opacity: 0.55 });
+    const b = new THREE.Mesh(bg, bm);
+    b.position.set(0, yy, SPAWN_Z);
+    scene.add(b);
+    bars.push(b);
+  }
+
+  obs.push({ panels, edge, bars, gap, triggered: false });
+}
+
+function updateObs() {
+  for (let i = obs.length - 1; i >= 0; i--) {
+    const o = obs[i];
+    const dz = speed;
+    o.panels.forEach(p => p.position.z += dz);
+    o.edge.position.z += dz;
+    o.bars.forEach(b => b.position.z += dz);
+    const z = o.edge.position.z;
+
+    if (!o.triggered && z >= TRIGGER_Z - 0.5 && z <= TRIGGER_Z + speed + 0.5) {
+      o.triggered = true;
+      if (lane === o.gap) onPass(o); else onDie(o);
+    }
+
+    if (z > KILL_Z) { disposeObs(o); obs.splice(i, 1); }
+  }
+}
+
+function disposeObs(o) {
+  o.panels.forEach(p => { scene.remove(p); p.geometry.dispose(); });
+  scene.remove(o.edge);
+  o.bars.forEach(b => { scene.remove(b); b.geometry.dispose(); });
+}
+
+// ======== BURST PARTICLES ========
+const bursts = [];
+function burst(x, y, z, col, n) {
+  for (let i = 0; i < n; i++) {
+    const g = new THREE.SphereGeometry(0.07 + Math.random() * 0.06, 4, 4);
+    const m = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 1 });
+    const p = new THREE.Mesh(g, m);
+    p.position.set(x, y + (Math.random() - 0.5) * 1.6, z);
+    const v = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.18,
+      (Math.random() - 0.5) * 0.18,
+      (Math.random() - 0.5) * 0.12
+    );
+    scene.add(p);
+    bursts.push({ mesh: p, v, life: 1, decay: 0.025 + Math.random() * 0.025 });
+  }
+}
+function updateBursts() {
+  for (let i = bursts.length - 1; i >= 0; i--) {
+    const b = bursts[i];
+    b.mesh.position.add(b.v);
+    b.life -= b.decay;
+    b.mesh.material.opacity = Math.max(0, b.life);
+    b.mesh.scale.setScalar(Math.max(0, b.life));
+    if (b.life <= 0) { scene.remove(b.mesh); b.mesh.geometry.dispose(); bursts.splice(i, 1); }
+  }
+}
+
+// ======== EVENTS ========
+function onPass(o) {
+  score++;
+  combo = Math.min(combo + 1, 10);
+  if (combo > maxCombo) maxCombo = combo;
+
+  scoreEl.textContent = score;
+  if (combo > 1) {
+    comboEl.textContent = `×${combo} COMBO`;
+    comboEl.style.transform = 'scale(1.4)';
+    setTimeout(() => { comboEl.style.transform = 'scale(1)'; }, 90);
+  }
+
+  burst(LANES[o.gap], 0, o.edge.position.z, 0x00ffff, 10 + combo * 2);
+  playerMat.emissiveIntensity = 3.5;
+  setTimeout(() => { playerMat.emissiveIntensity = 1.8; }, 120);
+
+  speed = Math.min(0.38 + score * 0.004, 0.95);
+  spawnEvery = Math.max(48, 82 - score * 0.6);
+}
+
+function onDie(o) {
+  if (state !== 'play') return;
+  state = 'dead';
+  burst(player.position.x, 0, player.position.z, 0xff0066, 35);
+  shakeAmt = 0.7;
+  player.visible = false;
+
+  const lines = [
+    `<div class="title" style="color:#ff0066;text-shadow:0 0 20px #ff0066">GAME OVER</div>`,
+    score > 0 ? `<div class="detail" style="font-size:22px;color:#fff;letter-spacing:4px">SCORE: ${score}</div>` : '',
+    maxCombo > 2 ? `<div class="detail">BEST COMBO ×${maxCombo}</div>` : '',
+    `<div class="subtitle">TAP TO RETRY</div>`
+  ].join('');
+  overlayEl.innerHTML = lines;
+  overlayEl.style.display = 'flex';
+}
+
+function startGame() {
+  obs.forEach(o => disposeObs(o));
+  obs.length = 0;
+  bursts.forEach(b => { scene.remove(b.mesh); });
+  bursts.length = 0;
+  trail.forEach(t => { scene.remove(t.mesh); });
+  trail.length = 0;
+
+  score = 0; combo = 1; maxCombo = 1;
+  speed = 0.38; spawnEvery = 82; spawnTick = 0;
+  shakeAmt = 0; lastGap = -1;
+  lane = 1; targetX = LANES[1]; curX = LANES[1];
+
+  scoreEl.textContent = '0';
+  comboEl.textContent = '';
+  overlayEl.style.display = 'none';
+  player.visible = true;
+  player.position.set(LANES[1], 0, PLAYER_Z);
+  pLight.position.set(LANES[1], 0, PLAYER_Z);
+  playerMat.emissiveIntensity = 1.8;
+
+  updateLanes();
+  state = 'play';
+}
+
+// ======== INPUT ========
+function handleTap(cx) {
+  if (state === 'start' || state === 'dead') { startGame(); return; }
+  if (state !== 'play') return;
+
+  const half = window.innerWidth / 2;
+  if (cx < half) {
+    if (lane > 0) { lane--; targetX = LANES[lane]; burst(targetX, 0, PLAYER_Z - 0.5, 0x00ffff, 5); updateLanes(); }
+  } else {
+    if (lane < 2) { lane++; targetX = LANES[lane]; burst(targetX, 0, PLAYER_Z - 0.5, 0x00ffff, 5); updateLanes(); }
+  }
+}
+
+window.addEventListener('click', e => handleTap(e.clientX));
+window.addEventListener('touchstart', e => { e.preventDefault(); handleTap(e.touches[0].clientX); }, { passive: false });
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft')  handleTap(0);
+  if (e.key === 'ArrowRight') handleTap(window.innerWidth);
+  if (e.key === ' ' || e.key === 'Enter') handleTap(window.innerWidth / 2);
+});
+
+// ======== MAIN LOOP ========
+function tick() {
+  requestAnimationFrame(tick);
+  frame++;
+
+  // Player lerp
+  curX += (targetX - curX) * 0.22;
+  player.position.x = curX;
+  player.position.y = Math.sin(frame * 0.06) * 0.09;
+  pLight.position.set(curX, 0.5, PLAYER_Z);
+
+  tickTrail();
+  updateTrail();
+  updateBursts();
+
+  if (state === 'play') {
+    // Spawn
+    spawnTick++;
+    if (spawnTick >= spawnEvery) { spawnTick = 0; makeObstacle(); }
+    updateObs();
+  } else {
+    // Let obs drift through on dead/start
+    if (obs.length > 0) updateObs();
+  }
+
+  // Tunnel rings loop
+  rings.forEach(r => {
+    r.position.z += speed * (state === 'play' ? 1 : 0.4);
+    if (r.position.z > 20) r.position.z -= rings.length * 3.5;
+    r.rotation.z += 0.0015;
+  });
+
+  // Floor grid scroll
+  if (state === 'play') floor.position.z = (floor.position.z + speed * 0.5) % 1;
+
+  // Screen shake
+  if (shakeAmt > 0.01) {
+    camera.position.x = (Math.random() - 0.5) * shakeAmt;
+    camera.position.y = 1.2 + (Math.random() - 0.5) * shakeAmt;
+    shakeAmt *= 0.82;
+  } else {
+    camera.position.x = 0;
+    camera.position.y = 1.2;
+    shakeAmt = 0;
+  }
+
+  renderer.render(scene, camera);
+}
+tick();
+
+// ======== RESIZE ========
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+</script>
+</body>
+</html>

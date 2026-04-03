@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Merge Rush</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a1a;overflow:hidden;touch-action:none;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;align-items:center;height:100vh;height:100dvh;color:#eee}
+canvas{display:block;width:100%;height:100%}
+#ui{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;z-index:10;pointer-events:none}
+#title{font-size:1.4rem;font-weight:900;letter-spacing:3px;color:#e94560;text-shadow:0 0 20px rgba(233,69,96,0.4)}
+#score-wrap{display:flex;gap:12px;align-items:center}
+.score-box{background:rgba(22,33,62,0.85);border-radius:8px;padding:6px 14px;text-align:center;backdrop-filter:blur(4px)}
+.score-label{font-size:0.6rem;letter-spacing:1px;color:#667;text-transform:uppercase}
+.score-val{font-size:1.1rem;font-weight:700;color:#e94560;transition:transform 0.15s}
+.score-val.pulse{transform:scale(1.3)}
+#btn-wrap{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:10;pointer-events:auto}
+#btn-new{background:rgba(233,69,96,0.15);color:#e94560;border:1px solid rgba(233,69,96,0.3);border-radius:8px;padding:8px 28px;font-size:0.85rem;font-weight:600;letter-spacing:1px;cursor:pointer;backdrop-filter:blur(4px);transition:all 0.2s}
+#btn-new:active{background:rgba(233,69,96,0.4);transform:scale(0.95)}
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;flex-direction:column;gap:16px;z-index:20;backdrop-filter:blur(6px)}
+#overlay.show{display:flex}
+#overlay h2{font-size:2.5rem;color:#e94560;text-shadow:0 0 30px rgba(233,69,96,0.5);letter-spacing:4px}
+#overlay p{color:#889;font-size:1rem}
+#overlay button{background:#e94560;color:#fff;border:none;border-radius:8px;padding:12px 32px;font-size:1rem;font-weight:600;cursor:pointer;letter-spacing:1px}
+#overlay button:active{opacity:0.8}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="title">MERGE RUSH</div>
+  <div id="score-wrap">
+    <div class="score-box"><div class="score-label">Score</div><div class="score-val" id="score">0</div></div>
+    <div class="score-box"><div class="score-label">Best</div><div class="score-val" id="best">0</div></div>
+  </div>
+</div>
+<div id="btn-wrap"><button id="btn-new">NEW GAME</button></div>
+<div id="overlay"><h2 id="ov-title">GAME OVER</h2><p id="ov-msg"></p><button id="ov-btn">PLAY AGAIN</button></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+// === TELEGRAM ===
+try { window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.ready(); } catch(e){}
+
+// === CONFIG ===
+const GRID = 4;
+const CELL = 1.1;
+const GAP = 0.12;
+const STEP = CELL + GAP;
+const HALF = (GRID - 1) * STEP / 2;
+const ANIM_DUR = 120;
+const SPAWN_DUR = 180;
+const POP_DUR = 200;
+
+const COLORS = {
+  0:    0x16213e,
+  2:    0x2d6a9f,
+  4:    0x3498db,
+  8:    0xe67e22,
+  16:   0xe74c3c,
+  32:   0xc0392b,
+  64:   0xe94560,
+  128:  0x9b59b6,
+  256:  0x8e44ad,
+  512:  0x1abc9c,
+  1024: 0x16a085,
+  2048: 0xf1c40f,
+  4096: 0xff6b6b,
+  8192: 0xee5a24,
+};
+
+// === THREE.JS SETUP ===
+const W = window.innerWidth, H = window.innerHeight;
+const aspect = W / H;
+const viewSize = 7;
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x0a0a1a);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+
+// Orthographic camera — isometric-ish tilt
+const cam = new THREE.OrthographicCamera(
+  -viewSize * aspect / 2, viewSize * aspect / 2,
+  viewSize / 2, -viewSize / 2,
+  0.1, 100
+);
+cam.position.set(0, 8, 6);
+cam.lookAt(0, 0, 0);
+
+const camOrigin = cam.position.clone();
+let shakeT = 0, shakeIntensity = 0;
+
+// === LIGHTING (ambient only — MeshBasicMaterial doesn't need it but keeps scene clean) ===
+scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+// === GRID BASE ===
+function buildGrid() {
+  // Base plate
+  const baseGeo = new THREE.BoxGeometry(GRID * STEP + 0.3, 0.15, GRID * STEP + 0.3);
+  const baseMat = new THREE.MeshBasicMaterial({ color: 0x0f1a2e });
+  const base = new THREE.Mesh(baseGeo, baseMat);
+  base.position.y = -0.15;
+  scene.add(base);
+
+  // Cell recesses
+  const recessGeo = new THREE.BoxGeometry(CELL, 0.08, CELL);
+  const recessMat = new THREE.MeshBasicMaterial({ color: 0x0a1225 });
+  for (let r = 0; r < GRID; r++) {
+    for (let c = 0; c < GRID; c++) {
+      const m = new THREE.Mesh(recessGeo, recessMat);
+      m.position.set(c * STEP - HALF, -0.04, r * STEP - HALF);
+      scene.add(m);
+    }
+  }
+}
+buildGrid();
+
+// === TILE SYSTEM ===
+let board = [];
+let tiles3D = [];    // { mesh, textSprite, row, col, value, animating }
+let animQueue = [];  // animations in progress
+let particles = [];
+let score = 0;
+let bestScore = parseInt(localStorage.getItem('mr_best') || '0');
+let gameActive = true;
+let animating = false;
+
+function gridPos(r, c) {
+  return new THREE.Vector3(c * STEP - HALF, 0.35, r * STEP - HALF);
+}
+
+function getColor(v) {
+  return COLORS[v] || 0xff6b6b;
+}
+
+function makeTextCanvas(text, color) {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, size, size);
+  const fontSize = text.length > 3 ? 36 : text.length > 2 ? 44 : 52;
+  ctx.font = `bold ${fontSize}px 'Segoe UI', Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillText(text, size/2 + 1, size/2 + 2);
+  // Text
+  ctx.fillStyle = color || '#ffffff';
+  ctx.fillText(text, size/2, size/2);
+  return canvas;
+}
+
+function createTile(r, c, value, spawning) {
+  const geo = new THREE.BoxGeometry(CELL * 0.88, 0.55, CELL * 0.88);
+  const mat = new THREE.MeshBasicMaterial({ color: getColor(value) });
+  const mesh = new THREE.Mesh(geo, mat);
+  const pos = gridPos(r, c);
+  mesh.position.copy(pos);
+
+  // Text sprite
+  const canvas = makeTextCanvas(String(value), value >= 8 ? '#ffffff' : '#c8ddf0');
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.scale.set(0.7, 0.7, 1);
+  sprite.position.y = 0.32;
+  mesh.add(sprite);
+
+  scene.add(mesh);
+
+  const tile = { mesh, sprite, row: r, col: c, value, mergedFrom: false };
+
+  if (spawning) {
+    mesh.scale.set(0.01, 0.01, 0.01);
+    animQueue.push({
+      type: 'spawn',
+      tile,
+      start: performance.now(),
+      dur: SPAWN_DUR
+    });
+  }
+
+  return tile;
+}
+
+function removeTile(tile) {
+  scene.remove(tile.mesh);
+  if (tile.mesh.children[0]) {
+    tile.mesh.children[0].material.map.dispose();
+    tile.mesh.children[0].material.dispose();
+  }
+  tile.mesh.geometry.dispose();
+  tile.mesh.material.dispose();
+}
+
+function updateTileVisual(tile) {
+  tile.mesh.material.color.setHex(getColor(tile.value));
+  // Rebuild text
+  if (tile.mesh.children.length) {
+    const oldSprite = tile.mesh.children[0];
+    oldSprite.material.map.dispose();
+    oldSprite.material.dispose();
+    tile.mesh.remove(oldSprite);
+  }
+  const canvas = makeTextCanvas(String(tile.value), tile.value >= 8 ? '#ffffff' : '#c8ddf0');
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.scale.set(0.7, 0.7, 1);
+  sprite.position.y = 0.32;
+  tile.mesh.add(sprite);
+  tile.sprite = sprite;
+}
+
+// === PARTICLES ===
+function spawnParticles(pos, color, count) {
+  for (let i = 0; i < count; i++) {
+    const geo = new THREE.SphereGeometry(0.06, 4, 4);
+    const mat = new THREE.MeshBasicMaterial({ color });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.copy(pos);
+    m.position.y += 0.4;
+    scene.add(m);
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.5 + Math.random() * 2;
+    particles.push({
+      mesh: m,
+      vx: Math.cos(angle) * speed,
+      vy: 2 + Math.random() * 3,
+      vz: Math.sin(angle) * speed,
+      life: 1,
+      decay: 1.5 + Math.random() * 1.5
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= p.decay * dt;
+    if (p.life <= 0) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mesh.material.dispose();
+      particles.splice(i, 1);
+      continue;
+    }
+    p.vy -= 9 * dt;
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    const s = p.life * 0.8;
+    p.mesh.scale.set(s, s, s);
+    p.mesh.material.opacity = p.life;
+    p.mesh.material.transparent = true;
+  }
+}
+
+// === GAME LOGIC (2048 core) ===
+function initBoard() {
+  board = Array.from({length: GRID}, () => Array(GRID).fill(null));
+  // Clean up old tiles
+  tiles3D.forEach(t => removeTile(t));
+  tiles3D = [];
+  animQueue = [];
+  particles.forEach(p => { scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); });
+  particles = [];
+  score = 0;
+  gameActive = true;
+  animating = false;
+  updateScore();
+  addRandomTile();
+  addRandomTile();
+}
+
+function addRandomTile() {
+  const empty = [];
+  for (let r = 0; r < GRID; r++)
+    for (let c = 0; c < GRID; c++)
+      if (!board[r][c]) empty.push([r, c]);
+  if (!empty.length) return;
+  const [r, c] = empty[Math.floor(Math.random() * empty.length)];
+  const val = Math.random() < 0.9 ? 2 : 4;
+  const tile = createTile(r, c, val, true);
+  board[r][c] = tile;
+  tiles3D.push(tile);
+}
+
+function slideRow(cells) {
+  // cells is array of tile refs or null, length = GRID
+  // Returns: { result, merges: [{from, to, value}], moves: [{tile, toIdx}] }
+  const filtered = cells.filter(t => t !== null);
+  const result = Array(GRID).fill(null);
+  const merges = [];
+  const moves = [];
+
+  let writeIdx = 0;
+  for (let i = 0; i < filtered.length; i++) {
+    if (i < filtered.length - 1 && filtered[i].value === filtered[i + 1].value) {
+      // Merge
+      const newVal = filtered[i].value * 2;
+      result[writeIdx] = { tile: filtered[i], mergeWith: filtered[i + 1], newVal };
+      merges.push({ survivor: filtered[i], consumed: filtered[i + 1], newVal, toIdx: writeIdx });
+      i++; // skip next
+    } else {
+      result[writeIdx] = { tile: filtered[i], mergeWith: null, newVal: filtered[i].value };
+    }
+    moves.push({ tile: result[writeIdx].tile, toIdx: writeIdx });
+    if (result[writeIdx].mergeWith) moves.push({ tile: result[writeIdx].mergeWith, toIdx: writeIdx });
+    writeIdx++;
+  }
+
+  return { result, merges, moves };
+}
+
+function doMove(dir) {
+  if (animating || !gameActive) return;
+
+  let moved = false;
+  const allMerges = [];
+  let pointsGained = 0;
+
+  // Build row/col arrays based on direction
+  for (let line = 0; line < GRID; line++) {
+    let cells = [];
+
+    if (dir === 'left') {
+      for (let c = 0; c < GRID; c++) cells.push(board[line][c]);
+    } else if (dir === 'right') {
+      for (let c = GRID - 1; c >= 0; c--) cells.push(board[line][c]);
+    } else if (dir === 'up') {
+      for (let r = 0; r < GRID; r++) cells.push(board[r][line]);
+    } else if (dir === 'down') {
+      for (let r = GRID - 1; r >= 0; r--) cells.push(board[r][line]);
+    }
+
+    const { result, merges } = slideRow(cells);
+
+    // Apply results back to board
+    for (let i = 0; i < GRID; i++) {
+      let r, c;
+      if (dir === 'left')  { r = line; c = i; }
+      else if (dir === 'right') { r = line; c = GRID - 1 - i; }
+      else if (dir === 'up')    { r = i; c = line; }
+      else if (dir === 'down')  { r = GRID - 1 - i; c = line; }
+
+      const entry = result[i];
+      if (entry && entry.tile) {
+        const tile = entry.tile;
+        const oldR = tile.row, oldC = tile.col;
+        if (oldR !== r || oldC !== c) moved = true;
+
+        tile.row = r;
+        tile.col = c;
+        board[r][c] = tile;
+
+        // Animate slide
+        const targetPos = gridPos(r, c);
+        animQueue.push({
+          type: 'slide',
+          tile,
+          from: tile.mesh.position.clone(),
+          to: targetPos,
+          start: performance.now(),
+          dur: ANIM_DUR
+        });
+
+        if (entry.mergeWith) {
+          moved = true;
+          const consumed = entry.mergeWith;
+          // Animate consumed tile to same position then remove
+          animQueue.push({
+            type: 'slide',
+            tile: consumed,
+            from: consumed.mesh.position.clone(),
+            to: targetPos,
+            start: performance.now(),
+            dur: ANIM_DUR,
+            removeAfter: true
+          });
+          // After slide, merge
+          allMerges.push({ survivor: tile, consumed, newVal: entry.newVal, r, c });
+          pointsGained += entry.newVal;
+        }
+      } else {
+        board[r][c] = null;
+      }
+    }
+  }
+
+  if (!moved) return;
+
+  animating = true;
+  score += pointsGained;
+  if (score > bestScore) {
+    bestScore = score;
+    try { localStorage.setItem('mr_best', String(bestScore)); } catch(e){}
+  }
+  updateScore();
+
+  if (pointsGained > 0) pulseScore();
+
+  // Schedule post-animation
+  setTimeout(() => {
+    // Process merges
+    allMerges.forEach(m => {
+      // Remove consumed
+      const idx = tiles3D.indexOf(m.consumed);
+      if (idx >= 0) tiles3D.splice(idx, 1);
+      removeTile(m.consumed);
+
+      // Update survivor
+      m.survivor.value = m.newVal;
+      updateTileVisual(m.survivor);
+      board[m.r][m.c] = m.survivor;
+
+      // Pop animation
+      animQueue.push({
+        type: 'pop',
+        tile: m.survivor,
+        start: performance.now(),
+        dur: POP_DUR
+      });
+
+      // Particles!
+      const pos = gridPos(m.r, m.c);
+      spawnParticles(pos, getColor(m.newVal), m.newVal >= 64 ? 16 : 10);
+
+      // Screen shake for big merges
+      if (m.newVal >= 64) {
+        shakeIntensity = Math.min(m.newVal / 512, 0.15);
+        shakeT = 0.25;
+      }
+    });
+
+    // Spawn new tile
+    addRandomTile();
+
+    // Check win/loss
+    setTimeout(() => {
+      animating = false;
+      checkGameState();
+    }, SPAWN_DUR + 30);
+  }, ANIM_DUR + 10);
+}
+
+function checkGameState() {
+  // Win check
+  for (let r = 0; r < GRID; r++)
+    for (let c = 0; c < GRID; c++)
+      if (board[r][c] && board[r][c].value >= 2048) {
+        showOverlay('YOU WIN!', 'Tile 2048 reached!');
+        return;
+      }
+
+  // Loss check
+  for (let r = 0; r < GRID; r++)
+    for (let c = 0; c < GRID; c++) {
+      if (!board[r][c]) return; // empty cell exists
+      const v = board[r][c].value;
+      if (c < GRID - 1 && board[r][c + 1] && board[r][c + 1].value === v) return;
+      if (r < GRID - 1 && board[r + 1][c] && board[r + 1][c].value === v) return;
+    }
+
+  showOverlay('GAME OVER', 'No moves left. Score: ' + score);
+}
+
+// === UI ===
+function updateScore() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('best').textContent = bestScore;
+}
+
+function pulseScore() {
+  const el = document.getElementById('score');
+  el.classList.add('pulse');
+  setTimeout(() => el.classList.remove('pulse'), 200);
+}
+
+function showOverlay(title, msg) {
+  gameActive = false;
+  document.getElementById('ov-title').textContent = title;
+  document.getElementById('ov-msg').textContent = msg;
+  document.getElementById('overlay').classList.add('show');
+}
+
+function newGame() {
+  document.getElementById('overlay').classList.remove('show');
+  initBoard();
+}
+
+document.getElementById('btn-new').addEventListener('click', newGame);
+document.getElementById('ov-btn').addEventListener('click', newGame);
+
+// === INPUT: SWIPE ===
+let touchStartX = 0, touchStartY = 0, touching = false;
+const SWIPE_THRESHOLD = 30;
+
+document.addEventListener('touchstart', e => {
+  if (!gameActive) return;
+  touching = true;
+  touchStartX = e.touches[0].clientX;
+  touchStartY = e.touches[0].clientY;
+}, { passive: true });
+
+document.addEventListener('touchmove', e => {
+  e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('touchend', e => {
+  if (!touching || !gameActive) return;
+  touching = false;
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+  if (Math.abs(dx) < SWIPE_THRESHOLD && Math.abs(dy) < SWIPE_THRESHOLD) return;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    doMove(dx > 0 ? 'right' : 'left');
+  } else {
+    doMove(dy > 0 ? 'down' : 'up');
+  }
+}, { passive: true });
+
+// === INPUT: KEYBOARD ===
+document.addEventListener('keydown', e => {
+  if (!gameActive) return;
+  const map = {
+    ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
+    a: 'left', d: 'right', w: 'up', s: 'down',
+    KeyA: 'left', KeyD: 'right', KeyW: 'up', KeyS: 'down'
+  };
+  const dir = map[e.key] || map[e.code];
+  if (dir) { e.preventDefault(); doMove(dir); }
+});
+
+// === ANIMATION LOOP ===
+let lastTime = performance.now();
+
+function easeOutBack(t) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+function easeOutQuad(t) { return 1 - (1 - t) * (1 - t); }
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  // Process animations
+  for (let i = animQueue.length - 1; i >= 0; i--) {
+    const a = animQueue[i];
+    const elapsed = now - a.start;
+    let t = Math.min(elapsed / a.dur, 1);
+
+    if (a.type === 'slide') {
+      const et = easeOutQuad(t);
+      a.tile.mesh.position.lerpVectors(a.from, a.to, et);
+      if (t >= 1) {
+        a.tile.mesh.position.copy(a.to);
+        if (a.removeAfter) {
+          removeTile(a.tile);
+          const idx = tiles3D.indexOf(a.tile);
+          if (idx >= 0) tiles3D.splice(idx, 1);
+        }
+        animQueue.splice(i, 1);
+      }
+    } else if (a.type === 'spawn') {
+      const et = easeOutBack(t);
+      const s = et;
+      a.tile.mesh.scale.set(s, s, s);
+      if (t >= 1) {
+        a.tile.mesh.scale.set(1, 1, 1);
+        animQueue.splice(i, 1);
+      }
+    } else if (a.type === 'pop') {
+      let s;
+      if (t < 0.4) {
+        s = 1 + 0.3 * (t / 0.4);
+      } else {
+        s = 1.3 - 0.3 * ((t - 0.4) / 0.6);
+      }
+      a.tile.mesh.scale.set(s, s, s);
+      if (t >= 1) {
+        a.tile.mesh.scale.set(1, 1, 1);
+        animQueue.splice(i, 1);
+      }
+    }
+  }
+
+  // Particles
+  updateParticles(dt);
+
+  // Screen shake
+  if (shakeT > 0) {
+    shakeT -= dt;
+    const intensity = shakeIntensity * (shakeT / 0.25);
+    cam.position.set(
+      camOrigin.x + (Math.random() - 0.5) * intensity,
+      camOrigin.y + (Math.random() - 0.5) * intensity * 0.5,
+      camOrigin.z + (Math.random() - 0.5) * intensity
+    );
+    if (shakeT <= 0) cam.position.copy(camOrigin);
+  }
+
+  renderer.render(scene, cam);
+}
+
+// === RESIZE ===
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  const a = w / h;
+  cam.left = -viewSize * a / 2;
+  cam.right = viewSize * a / 2;
+  cam.top = viewSize / 2;
+  cam.bottom = -viewSize / 2;
+  cam.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+
+// === START ===
+initBoard();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>DOT RUSH — Canvas2D Renderer Exp</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #06030f; overflow: hidden; touch-action: none; font-family: monospace; }
+    canvas { display: block; position: fixed; top: 0; left: 0; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0; pointer-events: none;
+      padding: 14px 16px; display: flex; justify-content: space-between; align-items: center;
+    }
+    #score { color: #e8ffcc; font: bold 22px monospace; letter-spacing: 0.06em;
+      text-shadow: 0 0 12px rgba(180,255,80,0.8); }
+    #lives { color: #ff4466; font: bold 18px monospace; letter-spacing: 0.1em; }
+    #wave-label {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.4); font: 11px monospace; letter-spacing: 0.2em;
+      pointer-events: none;
+    }
+    #overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(4,1,12,0.93); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; color: white; text-align: center;
+    }
+    #overlay h1 { font: bold 28px monospace; color: #b4ff50; margin-bottom: 8px;
+      letter-spacing: 0.12em; text-shadow: 0 0 20px rgba(180,255,80,0.9); }
+    #overlay .sub { font: 13px monospace; color: rgba(255,255,255,0.5);
+      margin-bottom: 28px; letter-spacing: 0.08em; }
+    #overlay button {
+      background: transparent; border: 1px solid rgba(180,255,80,0.6);
+      color: #b4ff50; padding: 12px 34px; font: bold 14px monospace;
+      letter-spacing: 0.1em; cursor: pointer; transition: all 0.15s;
+    }
+    #overlay button:hover { background: rgba(180,255,80,0.08); }
+    #overlay.hidden { display: none; }
+    #score-pop {
+      position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%);
+      font: bold 32px monospace; color: #ffe840; pointer-events: none;
+      opacity: 0; letter-spacing: 0.08em;
+      text-shadow: 0 0 20px rgba(255,230,40,0.9);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud">
+    <div id="score">0</div>
+    <div id="lives">♦♦♦</div>
+  </div>
+  <div id="wave-label">TAP DOTS BEFORE THEY VANISH</div>
+  <div id="score-pop"></div>
+  <div id="overlay" class="start-screen">
+    <h1>DOT RUSH</h1>
+    <div class="sub">EXP 01 · CANVAS 2D · RENDERER TEST</div>
+    <div class="sub" style="margin-bottom:16px; font-size:11px; color:rgba(255,255,255,0.3);">tap dots before they shrink to zero</div>
+    <button id="start-btn">TAP TO START</button>
+  </div>
+
+  <script>
+    // Telegram Mini App
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.expand();
+      window.Telegram.WebApp.ready();
+    }
+
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const livesEl = document.getElementById('lives');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('start-btn');
+    const scorePop = document.getElementById('score-pop');
+
+    let W, H;
+    function resize() {
+      W = canvas.width = window.innerWidth;
+      H = canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Game state
+    let score = 0;
+    let lives = 3;
+    let combo = 0;
+    let wave = 1;
+    let dots = [];
+    let particles = [];
+    let running = false;
+    let spawnTimer = 0;
+    let spawnInterval = 90; // frames
+    let frameCount = 0;
+
+    const COLORS = ['#b4ff50','#50e8ff','#ff4466','#ffe840','#c880ff','#ff9030'];
+
+    function spawnDot() {
+      const margin = 60;
+      const x = margin + Math.random() * (W - margin*2);
+      const y = margin + Math.random() * (H - margin*2 - 80);
+      const r = 28 + Math.random() * 20;
+      const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+      const lifeMax = Math.max(80, 200 - wave * 8); // shrinks faster each wave
+      dots.push({ x, y, r, rMax: r, color, life: lifeMax, lifeMax, hit: false, popScale: 1 });
+    }
+
+    function spawnParticles(x, y, color, count) {
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 5;
+        particles.push({
+          x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+          color, r: 2 + Math.random() * 4, life: 1, decay: 0.04 + Math.random() * 0.04
+        });
+      }
+    }
+
+    function showPop(text) {
+      scorePop.textContent = text;
+      scorePop.style.opacity = '1';
+      setTimeout(() => { scorePop.style.opacity = '0'; }, 400);
+    }
+
+    function onTap(cx, cy) {
+      if (!running) return;
+      let hit = false;
+      for (let i = dots.length - 1; i >= 0; i--) {
+        const d = dots[i];
+        if (d.hit) continue;
+        const dx = cx - d.x, dy = cy - d.y;
+        if (dx*dx + dy*dy < (d.r + 12) * (d.r + 12)) {
+          d.hit = true;
+          combo++;
+          const pts = combo >= 5 ? combo * 2 : combo;
+          score += pts;
+          scoreEl.textContent = score;
+          if (combo >= 3) showPop(`x${combo}!`);
+          spawnParticles(d.x, d.y, d.color, 10);
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) {
+        combo = 0;
+        // ripple effect at miss
+        particles.push({ x: cx, y: cy, vx: 0, vy: 0, color: 'rgba(255,60,60,0.6)',
+          r: 30, life: 1, decay: 0.07, ring: true });
+      }
+    }
+
+    function updateLivesUI() {
+      const symbols = ['♦','♦','♦'];
+      livesEl.textContent = symbols.slice(0, lives).join('') + (lives < 3 ? '◇'.repeat(3-lives) : '');
+    }
+
+    function gameOver() {
+      running = false;
+      overlay.innerHTML = `
+        <h1 style="color:#ff4466">GAME OVER</h1>
+        <div class="sub">SCORE: ${score}</div>
+        <div class="sub" style="margin-bottom:20px; font-size:11px; color:rgba(255,255,255,0.3);">
+          CANVAS 2D · ${frameCount} frames rendered
+        </div>
+        <button id="start-btn" onclick="startGame()">PLAY AGAIN</button>
+      `;
+      overlay.classList.remove('hidden');
+    }
+
+    function startGame() {
+      score = 0; lives = 3; combo = 0; wave = 1;
+      dots = []; particles = [];
+      spawnTimer = 0; spawnInterval = 90; frameCount = 0;
+      scoreEl.textContent = '0';
+      updateLivesUI();
+      overlay.classList.add('hidden');
+      running = true;
+    }
+
+    startBtn.addEventListener('click', startGame);
+
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      const rect = canvas.getBoundingClientRect();
+      onTap(t.clientX - rect.left, t.clientY - rect.top);
+    }, { passive: false });
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      onTap(e.clientX - rect.left, e.clientY - rect.top);
+    });
+
+    function draw() {
+      requestAnimationFrame(draw);
+      ctx.clearRect(0, 0, W, H);
+
+      // Background grid (subtle)
+      ctx.strokeStyle = 'rgba(180,255,80,0.03)';
+      ctx.lineWidth = 1;
+      const gs = 60;
+      for (let x = 0; x < W; x += gs) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+      for (let y = 0; y < H; y += gs) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+      if (!running) return;
+      frameCount++;
+
+      // Spawn
+      spawnTimer++;
+      if (spawnTimer >= spawnInterval) {
+        spawnTimer = 0;
+        const count = 1 + Math.floor(wave / 3);
+        for (let i = 0; i < count; i++) spawnDot();
+        spawnInterval = Math.max(30, 90 - wave * 5);
+      }
+
+      // Wave progression
+      if (score > wave * 15) {
+        wave++;
+        document.getElementById('wave-label').textContent = `WAVE ${wave}`;
+        setTimeout(() => document.getElementById('wave-label').textContent = 'TAP DOTS BEFORE THEY VANISH', 1200);
+      }
+
+      // Update + draw dots
+      for (let i = dots.length - 1; i >= 0; i--) {
+        const d = dots[i];
+        if (d.hit) {
+          d.popScale += 0.25;
+          d.r = d.rMax * (1 + (d.popScale - 1) * 0.5);
+          const alpha = Math.max(0, 1 - (d.popScale - 1) / 0.8);
+          if (alpha <= 0) { dots.splice(i, 1); continue; }
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.arc(d.x, d.y, d.r, 0, Math.PI*2);
+          ctx.fillStyle = d.color;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          continue;
+        }
+        d.life--;
+        if (d.life <= 0) {
+          // Missed — lose life
+          lives--;
+          combo = 0;
+          updateLivesUI();
+          spawnParticles(d.x, d.y, '#ff4466', 6);
+          dots.splice(i, 1);
+          if (lives <= 0) { gameOver(); return; }
+          continue;
+        }
+        const frac = d.life / d.lifeMax;
+        d.r = d.rMax * frac;
+
+        // Glow
+        const grd = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, d.r * 1.8);
+        grd.addColorStop(0, d.color + 'cc');
+        grd.addColorStop(0.5, d.color + '44');
+        grd.addColorStop(1, d.color + '00');
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r * 1.8, 0, Math.PI*2);
+        ctx.fillStyle = grd;
+        ctx.fill();
+
+        // Core
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r, 0, Math.PI*2);
+        ctx.fillStyle = d.color;
+        ctx.fill();
+
+        // Ring (urgency)
+        if (frac < 0.3) {
+          ctx.globalAlpha = 0.7 + Math.sin(Date.now() * 0.04) * 0.3;
+          ctx.beginPath();
+          ctx.arc(d.x, d.y, d.r + 6, 0, Math.PI*2);
+          ctx.strokeStyle = '#ff4466';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+
+        // Progress ring
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r + 3, -Math.PI/2, -Math.PI/2 + Math.PI*2*frac);
+        ctx.strokeStyle = d.color + '80';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Update + draw particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life -= p.decay;
+        if (p.life <= 0) { particles.splice(i, 1); continue; }
+        p.x += p.vx; p.y += p.vy;
+        p.vy += 0.08;
+        ctx.globalAlpha = p.life;
+        if (p.ring) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * (2 - p.life), 0, Math.PI*2);
+          ctx.strokeStyle = p.color;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2);
+          ctx.fillStyle = p.color;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+    draw();
+  </script>
+</body>
+</html>

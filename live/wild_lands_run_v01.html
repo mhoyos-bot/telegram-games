@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Wild Lands: Spirit Run</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#060d1a;touch-action:none;user-select:none}
+canvas{display:block}
+#ui{position:fixed;top:0;left:0;right:0;bottom:0;pointer-events:none;font-family:monospace}
+#score{position:absolute;top:16px;left:50%;transform:translateX(-50%);color:#aaddff;font-size:26px;font-weight:bold;letter-spacing:0.1em;text-shadow:0 0 12px rgba(100,200,255,0.7)}
+#dist{position:absolute;top:48px;left:50%;transform:translateX(-50%);color:rgba(150,200,255,0.5);font-size:12px;letter-spacing:0.2em}
+#best{position:absolute;top:16px;right:16px;color:rgba(255,200,80,0.6);font-size:11px;letter-spacing:0.15em}
+#combo{position:absolute;top:80px;left:50%;transform:translateX(-50%);color:#ffcc44;font-size:18px;font-weight:bold;letter-spacing:0.1em;opacity:0;transition:opacity 0.2s;text-shadow:0 0 10px rgba(255,200,50,0.8)}
+#lane-hint{position:absolute;bottom:28px;left:0;right:0;text-align:center;color:rgba(255,255,255,0.25);font-size:11px;letter-spacing:0.2em;pointer-events:none}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(4,10,22,0.88);pointer-events:all;transition:opacity 0.35s}
+#overlay h1{color:#88ddff;font-size:42px;font-weight:bold;letter-spacing:0.12em;text-shadow:0 0 30px rgba(80,180,255,0.6);margin-bottom:8px}
+#ov-sub{color:rgba(180,220,255,0.6);font-size:13px;letter-spacing:0.18em;margin-bottom:6px}
+#ov-score{color:#ffdd44;font-size:56px;font-weight:bold;margin:6px 0;text-shadow:0 0 20px rgba(255,210,50,0.5);min-height:64px}
+#ov-best{color:rgba(150,200,255,0.5);font-size:12px;letter-spacing:0.15em;margin-bottom:24px}
+#ov-btn{padding:14px 44px;background:linear-gradient(135deg,#2288cc,#44aaff);color:#fff;font-size:18px;font-weight:bold;letter-spacing:0.1em;border:none;border-radius:40px;cursor:pointer;box-shadow:0 4px 20px rgba(50,150,255,0.4);pointer-events:all;transition:transform 0.1s}
+#ov-btn:active{transform:scale(0.95)}
+.spop{position:absolute;color:#44ffcc;font-size:20px;font-weight:bold;pointer-events:none;text-shadow:0 0 8px rgba(50,255,180,0.8);animation:popUp 0.7s forwards}
+@keyframes popUp{0%{transform:translateY(0) scale(1);opacity:1}100%{transform:translateY(-55px) scale(1.3);opacity:0}}
+#flash{position:fixed;inset:0;pointer-events:none;background:rgba(255,80,80,0);transition:background 0.06s}
+</style>
+</head>
+<body>
+<div id="flash"></div>
+<div id="ui">
+  <div id="score">0</div>
+  <div id="dist">0m</div>
+  <div id="best">BEST 0</div>
+  <div id="combo"></div>
+  <div id="lane-hint">◀ TAP LEFT / RIGHT ▶</div>
+</div>
+<div id="overlay">
+  <h1>WILD LANDS</h1>
+  <div id="ov-sub">SPIRIT RUN</div>
+  <div id="ov-score"></div>
+  <div id="ov-best"></div>
+  <button id="ov-btn" onclick="startGame()">RUN</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+// ── CONFIG ──────────────────────────────────────────────────
+const LANES = [-2.4, 0, 2.4];
+const CHUNK_LEN = 14;
+const NUM_CHUNKS = 7;
+const SAFE_CHUNKS = 2;          // first N chunks have no obstacles
+const START_SPEED = 7;
+const MAX_SPEED = 22;
+const ACCEL = 0.06;
+const HOP_SPEED = 7;
+const HOP_H = 0.35;
+const HIT_Z = 1.3;
+const HIT_X = 0.85;
+const COLLECT_Z = 1.0;
+const COLLECT_X = 0.9;
+
+// ── THREE SETUP ─────────────────────────────────────────────
+let renderer, scene, camera, clock;
+
+(function setup() {
+  renderer = new THREE.WebGLRenderer({ antialias: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.insertBefore(renderer.domElement, document.body.firstChild);
+
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x060d1a, 0.028);
+  scene.background = new THREE.Color(0x060d1a);
+
+  camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 90);
+  camera.position.set(0, 5.5, 9.5);
+  camera.lookAt(0, 0.5, -6);
+
+  clock = new THREE.Clock();
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0x223355, 1.1));
+  const moon = new THREE.DirectionalLight(0x7799cc, 0.9);
+  moon.position.set(-4, 12, 4);
+  scene.add(moon);
+  const fill = new THREE.DirectionalLight(0x334466, 0.4);
+  fill.position.set(4, 3, -5);
+  scene.add(fill);
+
+  buildStars();
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+})();
+
+// ── STARS ────────────────────────────────────────────────────
+function buildStars() {
+  const N = 500, pos = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    pos[i*3]   = (Math.random() - 0.5) * 120;
+    pos[i*3+1] = 6 + Math.random() * 35;
+    pos[i*3+2] = (Math.random() - 0.5) * 120 - 20;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.13, sizeAttenuation: true })));
+}
+
+// ── CHUNK POOL ───────────────────────────────────────────────
+const TRACK_W = 8;
+const chunkPool = [];
+let activeChunks = [];
+let frontZ = 0;   // next spawn Z (negative = ahead)
+let chunkCount = 0;
+
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x12321e });
+const edgeMat   = new THREE.MeshLambertMaterial({ color: 0x0a1f13 });
+const borderMat = new THREE.MeshLambertMaterial({ color: 0x223344 });
+
+function makeChunk() {
+  const g = new THREE.Group();
+  // Ground
+  g.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(TRACK_W, 0.3, CHUNK_LEN), groundMat), { position: new THREE.Vector3(0, -0.15, 0) }));
+  // Side strips
+  [-TRACK_W/2 - 3, TRACK_W/2 + 3].forEach(sx => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(6, 0.3, CHUNK_LEN), edgeMat);
+    m.position.set(sx, -0.15, 0);
+    g.add(m);
+  });
+  // Lane divider dots (decorative)
+  [-2.4, 2.4].forEach(lx => {
+    for (let dz = -CHUNK_LEN/2 + 1; dz < CHUNK_LEN/2; dz += 3) {
+      const dot = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.01, 0.6), borderMat);
+      dot.position.set(lx, 0.01, dz);
+      g.add(dot);
+    }
+  });
+  g.visible = false;
+  scene.add(g);
+  return g;
+}
+
+for (let i = 0; i < NUM_CHUNKS + 2; i++) chunkPool.push(makeChunk());
+
+function getChunk() {
+  return chunkPool.find(c => !c.visible) || makeChunk();
+}
+
+function spawnChunk(z, isSafe) {
+  const c = getChunk();
+  c.position.set(0, 0, z);
+  c.visible = true;
+  activeChunks.push(c);
+  if (!isSafe) populateChunk(c, z);
+  chunkCount++;
+}
+
+
+// ── OBSTACLE POOL ────────────────────────────────────────────
+const obstaclePool = [];
+const activeObstacles = [];
+
+const OBS_TYPES = [
+  { geo: new THREE.DodecahedronGeometry(0.52, 0), color: 0x556677, yOff: 0.52 },
+  { geo: new THREE.ConeGeometry(0.38, 1.5, 5),    color: 0x882233, yOff: 0.75 },
+  { geo: new THREE.BoxGeometry(0.55, 1.1, 0.55),  color: 0x334455, yOff: 0.55 },
+  { geo: new THREE.CylinderGeometry(0.1, 0.45, 1.2, 6), color: 0x445533, yOff: 0.6 },
+];
+
+function getObstacle(typeIdx) {
+  let o = obstaclePool.find(o => !o.active && o.typeIdx === typeIdx);
+  if (!o) {
+    const t = OBS_TYPES[typeIdx];
+    const mesh = new THREE.Mesh(t.geo, new THREE.MeshLambertMaterial({ color: t.color }));
+    mesh.active = false;
+    mesh.typeIdx = typeIdx;
+    scene.add(mesh);
+    obstaclePool.push(mesh);
+    o = mesh;
+  }
+  return o;
+}
+
+function spawnObstacle(x, z, typeIdx) {
+  const t = OBS_TYPES[typeIdx];
+  const o = getObstacle(typeIdx);
+  o.position.set(x, t.yOff, z);
+  o.rotation.y = Math.random() * Math.PI * 2;
+  o.visible = true;
+  o.active = true;
+  activeObstacles.push(o);
+}
+
+// ── COLLECTIBLE POOL ─────────────────────────────────────────
+const collectPool = [];
+const activeCollects = [];
+const collectGeo = new THREE.OctahedronGeometry(0.26, 0);
+
+function getCollect() {
+  let c = collectPool.find(c => !c.active);
+  if (!c) {
+    const m = new THREE.Mesh(collectGeo, new THREE.MeshBasicMaterial({ color: 0x44ffcc }));
+    m.active = false;
+    scene.add(m);
+    collectPool.push(m);
+    c = m;
+  }
+  return c;
+}
+
+function spawnCollect(x, z) {
+  const c = getCollect();
+  c.position.set(x, 0.8, z);
+  c.visible = true;
+  c.active = true;
+  c.userData.phase = Math.random() * Math.PI * 2;
+  activeCollects.push(c);
+}
+
+// ── CHUNK POPULATION ─────────────────────────────────────────
+function populateChunk(chunk, z) {
+  const cz = z; // center of chunk
+  const hz = CHUNK_LEN / 2;
+
+  // Decide obstacle pattern
+  const pattern = Math.floor(Math.random() * 5);
+  const blockedLanes = new Set();
+
+  if (pattern === 0) {
+    // One obstacle in random lane
+    const lane = Math.floor(Math.random() * 3);
+    const oz = cz - hz * 0.3 - Math.random() * hz * 0.4;
+    spawnObstacle(LANES[lane], oz, Math.floor(Math.random() * OBS_TYPES.length));
+    blockedLanes.add(lane);
+  } else if (pattern === 1) {
+    // Two obstacles in different lanes
+    const shuffled = [0,1,2].sort(() => Math.random() - 0.5);
+    [shuffled[0], shuffled[1]].forEach((lane, i) => {
+      const oz = cz - hz * 0.2 - i * hz * 0.35 - Math.random() * hz * 0.2;
+      spawnObstacle(LANES[lane], oz, Math.floor(Math.random() * OBS_TYPES.length));
+      blockedLanes.add(lane);
+    });
+  } else if (pattern === 2) {
+    // Two adjacent lanes blocked (player must go to safe side)
+    const start = Math.floor(Math.random() * 2); // 0 or 1
+    [start, start+1].forEach(lane => {
+      const oz = cz - hz * 0.25 - Math.random() * hz * 0.3;
+      spawnObstacle(LANES[lane], oz, Math.floor(Math.random() * OBS_TYPES.length));
+      blockedLanes.add(lane);
+    });
+  } else {
+    // One obstacle
+    const lane = Math.floor(Math.random() * 3);
+    const oz = cz - hz * 0.4 - Math.random() * hz * 0.2;
+    spawnObstacle(LANES[lane], oz, Math.floor(Math.random() * OBS_TYPES.length));
+    blockedLanes.add(lane);
+  }
+
+  // Collectibles in open lane(s)
+  const openLanes = [0,1,2].filter(l => !blockedLanes.has(l));
+  if (openLanes.length > 0 && Math.random() > 0.25) {
+    const cl = openLanes[Math.floor(Math.random() * openLanes.length)];
+    const numOrbs = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < numOrbs; i++) {
+      spawnCollect(LANES[cl], cz - hz * 0.15 - i * 1.6 - Math.random() * 0.5);
+    }
+  }
+
+  // Ambient trees on sides
+  if (Math.random() > 0.4) {
+    const sx = TRACK_W / 2 + 1.5 + Math.random() * 3;
+    const sign = Math.random() > 0.5 ? 1 : -1;
+    addAmbientTree(sx * sign, cz - hz * 0.5 + Math.random() * hz);
+  }
+}
+
+// ── AMBIENT TREES ────────────────────────────────────────────
+const treePool = [];
+const activeTrees = [];
+
+function addAmbientTree(x, z) {
+  let grp = treePool.find(g => !g.active);
+  if (!grp) {
+    grp = new THREE.Group();
+    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x3d2010 });
+    const leafMat  = new THREE.MeshLambertMaterial({ color: 0x0d2a15 });
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.18, 0.9, 5), trunkMat);
+    trunk.position.y = 0.45;
+    grp.add(trunk);
+    [0, 0.7, 1.3].forEach((h, i) => {
+      const r = 1.1 - i * 0.25;
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(r, 1.0, 5), leafMat);
+      cone.position.y = 1.1 + h;
+      grp.add(cone);
+    });
+    grp.active = false;
+    scene.add(grp);
+    treePool.push(grp);
+  }
+  grp.position.set(x, 0, z);
+  grp.rotation.y = Math.random() * Math.PI * 2;
+  grp.visible = true;
+  grp.active = true;
+  activeTrees.push(grp);
+}
+
+// ── PLAYER ───────────────────────────────────────────────────
+let playerGrp;
+let playerMeshes = [];
+
+function buildPlayer() {
+  playerGrp = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({ color: 0x66bbee });
+  const darkMat = new THREE.MeshLambertMaterial({ color: 0x3388aa });
+  const lightMat = new THREE.MeshLambertMaterial({ color: 0xaaddff });
+
+  // Body
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.52, 0.95), mat);
+  body.position.y = 0.5;
+  playerGrp.add(body);
+
+  // Head
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.48, 0.48), mat);
+  head.position.set(0, 0.96, 0.32);
+  playerGrp.add(head);
+
+  // Snout
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.2, 0.22), lightMat);
+  snout.position.set(0, 0.87, 0.57);
+  playerGrp.add(snout);
+
+  // Ears
+  [[-0.17, 0], [0.17, 0]].forEach(([ex]) => {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.28, 4), darkMat);
+    ear.position.set(ex, 1.3, 0.2);
+    playerGrp.add(ear);
+  });
+
+  // Tail
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.65, 4), lightMat);
+  tail.position.set(0, 0.55, -0.62);
+  tail.rotation.x = -0.5;
+  playerGrp.add(tail);
+
+  // Legs (4)
+  [[-0.22, -0.36], [0.22, -0.36], [-0.22, 0.32], [0.22, 0.32]].forEach(([lx, lz]) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.38, 0.18), darkMat);
+    leg.position.set(lx, 0.19, lz);
+    playerGrp.add(leg);
+  });
+
+  // Spirit glow ring
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.5, 0.85, 12),
+    new THREE.MeshBasicMaterial({ color: 0x44ccff, transparent: true, opacity: 0.22, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.02;
+  playerGrp.add(ring);
+
+  playerGrp.position.set(LANES[1], 0, 0);
+  scene.add(playerGrp);
+  playerMeshes = playerGrp.children.filter(c => c.isMesh);
+}
+
+buildPlayer();
+
+// ── PARTICLE SYSTEM ───────────────────────────────────────────
+const MAX_P = 200;
+const pPool = [];
+const pGeo = new THREE.BoxGeometry(0.13, 0.13, 0.13);
+
+function getP(color) {
+  let p = pPool.find(p => !p.alive);
+  if (!p) {
+    if (pPool.length >= MAX_P) return null;
+    const m = new THREE.Mesh(pGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    m.visible = false;
+    scene.add(m);
+    p = { mesh: m, alive: false, life: 0, maxLife: 0, vx: 0, vy: 0, vz: 0 };
+    pPool.push(p);
+  }
+  p.mesh.material.color.setHex(color);
+  return p;
+}
+
+function burst(x, y, z, color, n, power) {
+  power = power || 1;
+  for (let i = 0; i < n; i++) {
+    const p = getP(color);
+    if (!p) break;
+    const spd = (2 + Math.random() * 4) * power;
+    const ang = Math.random() * Math.PI * 2;
+    p.vx = Math.cos(ang) * spd;
+    p.vy = 1.5 + Math.random() * 3 * power;
+    p.vz = (Math.sin(ang) * spd * 0.5) + (Math.random() - 0.5);
+    p.maxLife = p.life = 0.4 + Math.random() * 0.35;
+    p.mesh.position.set(x, y, z);
+    p.mesh.scale.setScalar(1);
+    p.mesh.visible = true;
+    p.alive = true;
+  }
+}
+
+function updateParticles(dt) {
+  for (const p of pPool) {
+    if (!p.alive) continue;
+    p.life -= dt;
+    if (p.life <= 0) { p.alive = false; p.mesh.visible = false; continue; }
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    p.vy -= 8 * dt;
+    p.mesh.scale.setScalar(Math.max(0.05, p.life / p.maxLife));
+  }
+}
+
+// ── GAME STATE ───────────────────────────────────────────────
+let state = 'idle'; // idle | running | dead | over
+let speed, score, dist, bestScore = 0;
+let targetLane, curLane;
+let hopPhase = 0;
+let collected = 0, combo = 0, comboTimer = 0;
+let shakeAmt = 0;
+let tick = 0;
+
+// ── INPUT ────────────────────────────────────────────────────
+let touchX0 = 0, touchT0 = 0;
+
+function handleAction(isLeft) {
+  if (state === 'idle' || state === 'over') { startGame(); return; }
+  if (state !== 'running') return;
+  if (isLeft) { if (targetLane > 0) { targetLane--; haptic('light'); } }
+  else        { if (targetLane < 2) { targetLane++; haptic('light'); } }
+}
+
+function haptic(t) { try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred(t); } catch(_e) {} }
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft')  handleAction(true);
+  if (e.key === 'ArrowRight') handleAction(false);
+  if (e.key === ' ')          handleAction(null); // start
+});
+
+renderer.domElement.addEventListener('touchstart', e => {
+  e.preventDefault();
+  touchX0 = e.touches[0].clientX;
+  touchT0 = Date.now();
+}, { passive: false });
+
+renderer.domElement.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (state === 'idle' || state === 'over') { startGame(); return; }
+  const dx = e.changedTouches[0].clientX - touchX0;
+  const dt = Date.now() - touchT0;
+  if (Math.abs(dx) > 15 || dt < 220) handleAction(dx <= 0);
+}, { passive: false });
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'touch') return; // handled by touch
+  handleAction(e.clientX < innerWidth / 2);
+});
+
+// ── START / RESET ─────────────────────────────────────────────
+function startGame() {
+  score = 0; dist = 0; collected = 0; combo = 0; comboTimer = 0;
+  speed = START_SPEED; hopPhase = 0; shakeAmt = 0; tick = 0;
+  targetLane = 1; curLane = 1;
+
+  // Clear pools
+  activeObstacles.forEach(o => { o.visible = false; o.active = false; });
+  activeObstacles.length = 0;
+  activeCollects.forEach(c => { c.visible = false; c.active = false; });
+  activeCollects.length = 0;
+  activeTrees.forEach(t => { t.visible = false; t.active = false; });
+  activeTrees.length = 0;
+  activeChunks.forEach(c => { c.visible = false; });
+  activeChunks.length = 0;
+  chunkCount = 0;
+
+  // Spawn chunks: first 2 safe, rest populated
+  frontZ = 0;
+  for (let i = 0; i < NUM_CHUNKS; i++) {
+    const z = -i * CHUNK_LEN;
+    spawnChunk(z, i < SAFE_CHUNKS);
+  }
+  frontZ = -(NUM_CHUNKS - 1) * CHUNK_LEN;
+
+  playerGrp.position.set(LANES[1], 0, 0);
+  playerGrp.visible = true;
+  playerGrp.scale.setScalar(1);
+
+  state = 'running';
+  hideOverlay();
+
+  document.getElementById('lane-hint').style.opacity = '1';
+  setTimeout(() => document.getElementById('lane-hint').style.opacity = '0', 3000);
+}
+
+// ── HUD ──────────────────────────────────────────────────────
+const scoreEl = document.getElementById('score');
+const distEl  = document.getElementById('dist');
+const bestEl  = document.getElementById('best');
+const comboEl = document.getElementById('combo');
+const flashEl = document.getElementById('flash');
+
+function updateHUD() {
+  scoreEl.textContent = score;
+  distEl.textContent  = Math.floor(dist) + 'm';
+  bestEl.textContent  = 'BEST ' + bestScore;
+}
+
+function showScorePop(px, py, val) {
+  const el = document.createElement('div');
+  el.className = 'spop';
+  el.textContent = '+' + val;
+  el.style.left = (px - 16) + 'px';
+  el.style.top  = (py - 24) + 'px';
+  document.getElementById('ui').appendChild(el);
+  setTimeout(() => el.remove(), 700);
+}
+
+function flashDamage() {
+  flashEl.style.background = 'rgba(255,60,60,0.35)';
+  setTimeout(() => flashEl.style.background = 'rgba(255,60,60,0)', 80);
+}
+
+// ── OVERLAY ───────────────────────────────────────────────────
+function hideOverlay() {
+  const ov = document.getElementById('overlay');
+  ov.style.opacity = '0';
+  setTimeout(() => ov.style.display = 'none', 350);
+}
+
+function showOverlay(isGameOver) {
+  const ov = document.getElementById('overlay');
+  document.querySelector('#overlay h1').textContent = isGameOver ? 'YOU FELL' : 'WILD LANDS';
+  document.getElementById('ov-sub').textContent = isGameOver ? 'the spirits scatter…' : 'SPIRIT RUN';
+  document.getElementById('ov-score').textContent = isGameOver ? score : '';
+  document.getElementById('ov-best').textContent = isGameOver ? ('BEST  ' + bestScore) : '';
+  document.getElementById('ov-btn').textContent = isGameOver ? 'RUN AGAIN' : 'RUN';
+  ov.style.display = 'flex';
+  setTimeout(() => ov.style.opacity = '1', 30);
+}
+
+// ── DEATH ─────────────────────────────────────────────────────
+function killPlayer() {
+  state = 'dead';
+  haptic('heavy');
+  const px = playerGrp.position.x, py = 1, pz = playerGrp.position.z;
+  burst(px, py, pz, 0x44aaff, 28, 1.4);
+  burst(px, py, pz, 0xffffff, 14, 1.0);
+  burst(px, py, pz, 0xffcc44, 10, 0.8);
+  playerGrp.visible = false;
+  shakeAmt = 2.0;
+  flashDamage();
+  if (score > bestScore) bestScore = score;
+  setTimeout(() => { state = 'over'; showOverlay(true); }, 1600);
+}
+
+// ── COLLISION ─────────────────────────────────────────────────
+function checkCollisions() {
+  const px = playerGrp.position.x;
+  const pz = 0; // player world Z is always 0
+
+  // Obstacles
+  for (let i = activeObstacles.length - 1; i >= 0; i--) {
+    const o = activeObstacles[i];
+    if (!o.active) continue;
+    if (Math.abs(o.position.z - pz) < HIT_Z && Math.abs(o.position.x - px) < HIT_X) {
+      killPlayer(); return;
+    }
+    // Recycle behind player
+    if (o.position.z > 8) {
+      o.visible = false; o.active = false;
+      activeObstacles.splice(i, 1);
+    }
+  }
+
+  // Collectibles
+  for (let i = activeCollects.length - 1; i >= 0; i--) {
+    const c = activeCollects[i];
+    if (!c.active) continue;
+    if (Math.abs(c.position.z - pz) < COLLECT_Z && Math.abs(c.position.x - px) < COLLECT_X) {
+      // Collect!
+      collected++;
+      combo++;
+      comboTimer = 1.8;
+      const pts = 5 * (combo >= 5 ? 3 : combo >= 3 ? 2 : 1);
+      score += pts;
+
+      // Screen-space approx for score pop
+      const sp = c.position.clone().project(camera);
+      showScorePop((sp.x + 1) / 2 * innerWidth, (1 - sp.y) / 2 * innerHeight, pts);
+
+      burst(c.position.x, c.position.y, pz, 0x44ffcc, 14, 0.8);
+      burst(c.position.x, c.position.y, pz, 0xffffff, 6, 0.6);
+      haptic('light');
+
+      c.visible = false; c.active = false;
+      activeCollects.splice(i, 1);
+      continue;
+    }
+    // Recycle
+    if (c.position.z > 8) {
+      c.visible = false; c.active = false;
+      activeCollects.splice(i, 1);
+    }
+  }
+
+  // Trees — recycle
+  for (let i = activeTrees.length - 1; i >= 0; i--) {
+    const t = activeTrees[i];
+    if (t.position.z > 15) {
+      t.visible = false; t.active = false;
+      activeTrees.splice(i, 1);
+    }
+  }
+}
+
+// ── MAIN UPDATE ───────────────────────────────────────────────
+const BASE_CAM_Y = 5.5, BASE_CAM_Z = 9.5;
+
+function update(dt) {
+  if (state !== 'running') return;
+  tick++;
+
+  speed = Math.min(MAX_SPEED, speed + ACCEL * dt);
+  const moved = speed * dt;
+  dist += moved;
+  score = Math.floor(dist / 3) + collected * 5;
+
+  // Smooth lane switch
+  const targetX = LANES[targetLane];
+  playerGrp.position.x += (targetX - playerGrp.position.x) * 11 * dt;
+
+  // Hop
+  hopPhase += dt * HOP_SPEED;
+  playerGrp.position.y = Math.max(0, Math.abs(Math.sin(hopPhase)) * HOP_H);
+
+  // Player tilt toward direction
+  playerGrp.rotation.z = (targetX - playerGrp.position.x) * -0.4;
+
+  // Scroll world
+  activeChunks.forEach(c => c.position.z += moved);
+  activeObstacles.forEach(o => { if (o.active) o.position.z += moved; });
+  activeCollects.forEach(c => { if (c.active) c.position.z += moved; });
+  activeTrees.forEach(t => { if (t.active) t.position.z += moved; });
+
+  // Animate collectibles
+  activeCollects.forEach(c => {
+    c.position.y = 0.8 + Math.sin(c.userData.phase + tick * 0.06) * 0.13;
+    c.rotation.y += dt * 2.5;
+  });
+
+  // Recycle chunks and spawn new
+  for (let i = activeChunks.length - 1; i >= 0; i--) {
+    const c = activeChunks[i];
+    if (c.position.z > CHUNK_LEN * 0.8) {
+      c.visible = false;
+      activeChunks.splice(i, 1);
+      frontZ -= CHUNK_LEN;
+      spawnChunk(frontZ, false);
+    }
+  }
+
+  // Camera follow + shake
+  camera.position.x += (playerGrp.position.x * 0.25 - camera.position.x) * 6 * dt;
+  if (shakeAmt > 0) {
+    shakeAmt = Math.max(0, shakeAmt - dt * 6);
+    camera.position.y = BASE_CAM_Y + (Math.random() - 0.5) * shakeAmt * 0.35;
+    camera.position.z = BASE_CAM_Z + (Math.random() - 0.5) * shakeAmt * 0.18;
+  } else {
+    camera.position.y += (BASE_CAM_Y - camera.position.y) * 8 * dt;
+    camera.position.z += (BASE_CAM_Z - camera.position.z) * 8 * dt;
+  }
+
+  // Combo timer
+  comboTimer = Math.max(0, comboTimer - dt);
+  if (comboTimer <= 0 && combo > 0) {
+    combo = 0;
+    comboEl.style.opacity = '0';
+  } else if (combo >= 3) {
+    comboEl.textContent = 'x' + combo + ' COMBO';
+    comboEl.style.opacity = '1';
+  }
+
+  checkCollisions();
+  updateHUD();
+}
+
+// ── RENDER LOOP ───────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  update(dt);
+  updateParticles(dt);
+  // Idle creature animation in dead/over state
+  if (state === 'dead' || state === 'over' || state === 'idle') {
+    updateParticles(dt);
+  }
+  renderer.render(scene, camera);
+}
+
+// ── INIT WORLD & START ────────────────────────────────────────
+// Pre-spawn some idle chunks for title screen
+(function initWorld() {
+  for (let i = 0; i < 5; i++) {
+    const c = getChunk();
+    c.position.set(0, 0, -i * CHUNK_LEN);
+    c.visible = true;
+    activeChunks.push(c);
+  }
+  frontZ = -4 * CHUNK_LEN;
+  updateHUD();
+  showOverlay(false);
+  animate();
+})();
+
+// Telegram integration
+try {
+  if (window.Telegram?.WebApp) {
+    window.Telegram.WebApp.ready();
+    window.Telegram.WebApp.expand();
+  }
+} catch(_e) {}
+
+// Global startGame exposed for inline onclick
+window.startGame = startGame;
+</script>
+</body>
+</html>

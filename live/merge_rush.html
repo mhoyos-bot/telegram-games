@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover">
+<title>Merge Rush</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{
+  width:100%;height:100%;overflow:hidden;background:#080818;
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  touch-action:none;user-select:none;-webkit-user-select:none;
+  -webkit-touch-callout:none;
+}
+canvas{display:block;position:fixed;inset:0;width:100%!important;height:100%!important}
+#hud{position:fixed;inset:0;pointer-events:none;z-index:10}
+#top-bar{
+  position:absolute;top:0;left:0;right:0;
+  display:flex;justify-content:space-around;align-items:center;
+  padding:10px 8px 8px;
+  background:rgba(4,4,22,0.85);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-bottom:1px solid rgba(100,60,255,0.2);
+}
+.bar-cell{display:flex;flex-direction:column;align-items:center}
+.bar-lbl{font-size:9px;color:#4455bb;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:2px}
+.bar-val{font-size:22px;font-weight:900;color:#FFE44D;line-height:1}
+#best-val{color:#9977cc;font-size:16px}
+#combo-bar{
+  position:absolute;top:58px;left:50%;transform:translateX(-50%);
+  font-size:26px;font-weight:900;color:#00FFCC;
+  text-shadow:0 0 20px rgba(0,255,204,0.9);
+  opacity:0;transition:opacity 0.3s;white-space:nowrap;
+}
+#combo-bar.show{opacity:1}
+#hint{
+  position:absolute;bottom:24px;left:0;right:0;
+  text-align:center;font-size:13px;color:#556;
+}
+#gameover{
+  position:fixed;inset:0;z-index:100;
+  display:none;flex-direction:column;align-items:center;justify-content:center;
+  background:rgba(4,4,20,0.92);
+  backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  pointer-events:all;
+}
+#gameover.active{display:flex}
+#gameover h1{font-size:34px;font-weight:900;color:#f0e8ff;letter-spacing:3px;margin-bottom:6px;text-transform:uppercase}
+#go-sub{font-size:13px;color:#776699;margin-bottom:20px}
+#go-score{font-size:58px;font-weight:900;color:#FFE44D;text-shadow:0 0 28px rgba(255,228,77,0.6);margin-bottom:6px}
+#go-best{font-size:15px;color:#00FFCC;margin-bottom:30px;opacity:0;transition:opacity 0.4s;text-shadow:0 0 10px rgba(0,255,204,0.7)}
+#go-best.show{opacity:1}
+#restart-btn{
+  padding:14px 48px;border:none;border-radius:14px;
+  background:linear-gradient(135deg,#5533FF,#AA33CC);
+  color:#fff;font-size:15px;font-weight:700;letter-spacing:1.5px;
+  cursor:pointer;text-transform:uppercase;
+  box-shadow:0 4px 24px rgba(85,51,255,0.6);
+  transition:transform 0.1s;pointer-events:all;
+}
+#restart-btn:active{transform:scale(0.93)}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="top-bar">
+    <div class="bar-cell">
+      <div class="bar-lbl">Score</div>
+      <div class="bar-val" id="score-val">0</div>
+    </div>
+    <div class="bar-cell">
+      <div class="bar-lbl">Merges</div>
+      <div class="bar-val" id="merge-val" style="color:#ff88ff">0</div>
+    </div>
+    <div class="bar-cell">
+      <div class="bar-lbl">Best</div>
+      <div class="bar-val" id="best-val">0</div>
+    </div>
+  </div>
+  <div id="combo-bar"></div>
+  <div id="hint">TAP to select · TAP matching gem to MERGE</div>
+</div>
+<div id="gameover">
+  <h1>Board Full</h1>
+  <div id="go-sub">The gems ran out of space</div>
+  <div id="go-score">0</div>
+  <div id="go-best">★ NEW BEST ★</div>
+  <button id="restart-btn">Play Again</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// MERGE RUSH v05 — Lane 002 merge_rush
+// lc_lane_002_unknown_b0b06a | feel:juice | hook:instant_start
+// Single-file Three.js r128, STD-025 compliant
+
+try { Telegram.WebApp.ready(); Telegram.WebApp.expand(); } catch(_e) {}
+
+function haptic(s){ try{ Telegram.WebApp.HapticFeedback.impactOccurred(s); }catch(_e){} }
+function hapticNotif(s){ try{ Telegram.WebApp.HapticFeedback.notificationOccurred(s); }catch(_e){} }
+
+// ── SCENE ──
+const W = window.innerWidth, H = window.innerHeight;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x080818, 0.028);
+
+const camera = new THREE.PerspectiveCamera(52, W/H, 0.1, 80);
+camera.position.set(0, 9.5, 9);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x080818);
+document.body.appendChild(renderer.domElement);
+
+// Lights
+const aLight = new THREE.AmbientLight(0xffffff, 0.45);
+scene.add(aLight);
+const dLight = new THREE.DirectionalLight(0xffffff, 0.7);
+dLight.position.set(4, 10, 6);
+scene.add(dLight);
+const pA = new THREE.PointLight(0x8844ff, 2.0, 25);
+pA.position.set(-5, 5, 3);
+scene.add(pA);
+const pB = new THREE.PointLight(0x00ffcc, 1.5, 25);
+pB.position.set(5, 5, -3);
+scene.add(pB);
+
+// ── CONFIG ──
+const COLS = 4, ROWS = 5;
+const CELL = 2.1;
+const OX = -(COLS-1)*CELL/2;
+const OZ = -(ROWS-1)*CELL/2;
+const MAX_LVL = 7;
+
+const TIERS = [
+  { col: 0xFF3355, emCol: 0xFF3355, pts: 10 },
+  { col: 0xFF8833, emCol: 0xFF8833, pts: 30 },
+  { col: 0xFFDD22, emCol: 0xFFDD22, pts: 70 },
+  { col: 0x44FF88, emCol: 0x44FF88, pts: 150 },
+  { col: 0x00FFCC, emCol: 0x00FFCC, pts: 320 },
+  { col: 0x6699FF, emCol: 0x6699FF, pts: 680 },
+  { col: 0xFF44FF, emCol: 0xFF44FF, pts: 1500 },
+];
+
+// Geometries per tier (reused across pieces)
+const GEOS = [
+  new THREE.DodecahedronGeometry(0.62, 0),
+  new THREE.OctahedronGeometry(0.70, 0),
+  new THREE.IcosahedronGeometry(0.66, 0),
+  new THREE.TetrahedronGeometry(0.78, 0),
+  new THREE.DodecahedronGeometry(0.72, 1),
+  new THREE.OctahedronGeometry(0.78, 1),
+  new THREE.SphereGeometry(0.78, 10, 10),
+];
+
+// ── GRID BASE ──
+const baseGeo = new THREE.BoxGeometry(CELL*0.92, 0.07, CELL*0.92);
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    const mat = new THREE.MeshStandardMaterial({ color: 0x11112a, roughness: 0.9, metalness: 0.1 });
+    const m = new THREE.Mesh(baseGeo, mat);
+    m.position.set(OX + c*CELL, -0.6, OZ + r*CELL);
+    scene.add(m);
+  }
+}
+
+// ── BOARD STATE ──
+const board = Array.from({length: ROWS}, () => Array(COLS).fill(null));
+let selected = null;
+let score = 0;
+let bestScore = 0;
+let mergeCount = 0;
+let shakeAmt = 0;
+let gameOver = false;
+let frame = 0;
+let blocked = false; // prevents input during animations
+
+// DOM refs
+const scoreEl = document.getElementById('score-val');
+const mergeEl = document.getElementById('merge-val');
+const bestEl = document.getElementById('best-val');
+const comboEl = document.getElementById('combo-bar');
+const goEl = document.getElementById('gameover');
+const goScoreEl = document.getElementById('go-score');
+const goBestEl = document.getElementById('go-best');
+let comboTimer = null;
+
+function updateScore(add) {
+  score += add;
+  if (score > bestScore) bestScore = score;
+  scoreEl.textContent = score;
+  bestEl.textContent = bestScore;
+  // bump animation
+  scoreEl.style.transform = 'scale(1.35)';
+  setTimeout(() => { scoreEl.style.transform = ''; }, 140);
+}
+
+function showCombo(text, color) {
+  comboEl.textContent = text;
+  comboEl.style.color = color;
+  comboEl.style.textShadow = `0 0 20px ${color}`;
+  comboEl.classList.add('show');
+  if (comboTimer) clearTimeout(comboTimer);
+  comboTimer = setTimeout(() => comboEl.classList.remove('show'), 1100);
+}
+
+// ── PIECE FACTORY ──
+function cellWorld(row, col) {
+  return new THREE.Vector3(OX + col*CELL, 0, OZ + row*CELL);
+}
+
+function makePiece(lvl, row, col, fromAbove) {
+  const t = TIERS[lvl - 1];
+  const mat = new THREE.MeshStandardMaterial({
+    color: t.col,
+    emissive: t.emCol,
+    emissiveIntensity: 0.28,
+    roughness: 0.25,
+    metalness: 0.5,
+  });
+  const mesh = new THREE.Mesh(GEOS[lvl - 1], mat);
+  const wp = cellWorld(row, col);
+  mesh.position.copy(wp);
+  if (fromAbove) mesh.position.y = 5.5;
+  scene.add(mesh);
+
+  const piece = {
+    mesh, mat, lvl, row, col,
+    alive: true,
+    dropping: fromAbove,
+    dropVel: 0,
+    bounceT: -1,
+    phase: Math.random() * Math.PI * 2,
+  };
+  board[row][col] = piece;
+  return piece;
+}
+
+function removePiece(p) {
+  scene.remove(p.mesh);
+  p.mat.dispose();
+  p.alive = false;
+  board[p.row][p.col] = null;
+}
+
+// ── PARTICLES ──
+const P_COUNT = 140;
+const pGeo = new THREE.SphereGeometry(0.13, 4, 3);
+const parts = [];
+let pIdx = 0;
+for (let i = 0; i < P_COUNT; i++) {
+  const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 });
+  const mesh = new THREE.Mesh(pGeo, m);
+  mesh.visible = false;
+  scene.add(mesh);
+  parts.push({ mesh, mat: m, vx:0, vy:0, vz:0, life:0, maxLife:1 });
+}
+
+function emitBurst(pos, color, count) {
+  for (let i = 0; i < count; i++) {
+    const p = parts[pIdx++ % P_COUNT];
+    p.mesh.visible = true;
+    p.mesh.position.copy(pos);
+    p.mat.color.setHex(color);
+    const spd = 3 + Math.random() * 5;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = (Math.random() - 0.5) * Math.PI;
+    p.vx = Math.cos(theta) * Math.cos(phi) * spd;
+    p.vy = Math.abs(Math.sin(phi)) * spd + 1.5;
+    p.vz = Math.sin(theta) * Math.cos(phi) * spd;
+    p.maxLife = 0.45 + Math.random() * 0.35;
+    p.life = p.maxLife;
+  }
+}
+
+// ── RINGS ──
+const rings = [];
+function spawnRing(pos, color) {
+  const geo = new THREE.RingGeometry(0.1, 0.45, 18);
+  const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(pos);
+  mesh.position.y += 0.1;
+  mesh.rotation.x = -Math.PI / 2;
+  scene.add(mesh);
+  rings.push({ mesh, mat, life: 1.0 });
+}
+
+// ── FLOAT TEXT ──
+const floaties = [];
+function spawnFloat(text, sx, sy, color) {
+  const el = document.createElement('div');
+  el.style.cssText = `position:fixed;left:${sx}px;top:${sy}px;transform:translate(-50%,-50%);
+    pointer-events:none;font-family:Arial;font-weight:900;font-size:28px;
+    color:${color};text-shadow:0 0 14px ${color};z-index:20;`;
+  el.textContent = text;
+  document.body.appendChild(el);
+  floaties.push({ el, y: sy, life: 1.0 });
+}
+
+// ── SELECTION HIGHLIGHT ──
+const selRingGeo = new THREE.TorusGeometry(0.92, 0.07, 8, 24);
+const selRingMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+const selRing = new THREE.Mesh(selRingGeo, selRingMat);
+selRing.visible = false;
+scene.add(selRing);
+
+// ── RAYCASTING ──
+const raycaster = new THREE.Raycaster();
+const mouse2d = new THREE.Vector2();
+
+function pickPiece(ex, ey) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse2d.x = ((ex - rect.left) / rect.width) * 2 - 1;
+  mouse2d.y = -((ey - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse2d, camera);
+
+  let hit = null;
+  let nearest = Infinity;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const p = board[r][c];
+      if (!p || !p.alive || p.dropping) continue;
+      const dist = raycaster.ray.distanceToPoint(p.mesh.position);
+      if (dist < 0.95) {
+        const cd = camera.position.distanceTo(p.mesh.position);
+        if (cd < nearest) { nearest = cd; hit = p; }
+      }
+    }
+  }
+  return hit;
+}
+
+// ── MERGE LOGIC ──
+function doMerge(a, b, sx, sy) {
+  blocked = true;
+  const newLvl = Math.min(a.lvl + 1, MAX_LVL + 1);
+  const midPos = a.mesh.position.clone().add(b.mesh.position).multiplyScalar(0.5);
+  const color = TIERS[Math.min(newLvl - 1, MAX_LVL - 1)].col;
+
+  emitBurst(a.mesh.position.clone(), color, 14);
+  emitBurst(b.mesh.position.clone(), color, 14);
+  spawnRing(midPos, color);
+  spawnRing(a.mesh.position.clone(), color);
+  spawnRing(b.mesh.position.clone(), color);
+
+  const pts = TIERS[Math.min(newLvl - 1, MAX_LVL - 1)].pts;
+  updateScore(pts);
+  mergeCount++;
+  mergeEl.textContent = mergeCount;
+
+  // Float score text
+  const hexStr = '#' + color.toString(16).padStart(6, '0');
+  spawnFloat('+' + pts, sx, sy, hexStr);
+
+  // Combo text
+  const comboTexts = ['MERGE!','NICE!','SWEET!','SICK!','INSANE!','GODLIKE!'];
+  const comboIdx = Math.min(Math.floor(pts / 100), comboTexts.length - 1);
+  showCombo(newLvl >= MAX_LVL ? '✦ MAX MERGE! ✦' : comboTexts[comboIdx], hexStr);
+
+  haptic(newLvl >= 5 ? 'heavy' : 'medium');
+  shakeAmt = 0.1 + newLvl * 0.03;
+
+  const destRow = b.row, destCol = b.col;
+  removePiece(a);
+  removePiece(b);
+  selected = null;
+  selRing.visible = false;
+
+  if (newLvl <= MAX_LVL) {
+    const np = makePiece(newLvl, destRow, destCol, false);
+    np.mesh.position.copy(midPos);
+    np.mesh.position.y = 1.8;
+    np.dropping = true;
+    np.dropVel = -3;
+    np.bounceT = 0;
+
+    if (newLvl >= MAX_LVL) {
+      emitBurst(midPos, 0xffffff, 35);
+      shakeAmt = 0.38;
+      hapticNotif('success');
+    }
+  }
+
+  setTimeout(() => {
+    spawnRandom();
+    setTimeout(() => {
+      checkGameOver();
+      blocked = false;
+    }, 500);
+  }, 280);
+}
+
+function deselect() {
+  if (selected) {
+    selected.mat.emissiveIntensity = 0.28;
+    selected = null;
+  }
+  selRing.visible = false;
+}
+
+// ── INPUT ──
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (gameOver || blocked) return;
+  const hit = pickPiece(e.clientX, e.clientY);
+
+  if (!hit) { deselect(); return; }
+
+  if (selected === null) {
+    selected = hit;
+    hit.mat.emissiveIntensity = 1.0;
+    haptic('light');
+  } else if (selected === hit) {
+    deselect();
+  } else if (selected.lvl === hit.lvl) {
+    doMerge(selected, hit, e.clientX, e.clientY);
+  } else {
+    deselect();
+    selected = hit;
+    hit.mat.emissiveIntensity = 1.0;
+    haptic('light');
+  }
+});
+
+// ── BOARD INIT ──
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+function spawnRandom() {
+  const empties = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (!board[r][c]) empties.push([r, c]);
+  if (empties.length === 0) return false;
+  const [r, c] = empties[Math.floor(Math.random() * empties.length)];
+  const lvl = Math.random() < 0.68 ? 1 : (Math.random() < 0.72 ? 2 : 3);
+  makePiece(lvl, r, c, true);
+  return true;
+}
+
+function checkGameOver() {
+  let hasMerge = false;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!board[r][c]) return; // empty cell = not over
+      // Check neighbors for same-level
+      const lvl = board[r][c].lvl;
+      if (r > 0 && board[r-1][c] && board[r-1][c].lvl === lvl) { hasMerge = true; break; }
+      if (r < ROWS-1 && board[r+1][c] && board[r+1][c].lvl === lvl) { hasMerge = true; break; }
+      if (c > 0 && board[r][c-1] && board[r][c-1].lvl === lvl) { hasMerge = true; break; }
+      if (c < COLS-1 && board[r][c+1] && board[r][c+1].lvl === lvl) { hasMerge = true; break; }
+    }
+  }
+  // Board full AND no same-level adjacent pair anywhere
+  // Also check non-adjacent: allow any 2 same-level pieces (any position)
+  let levelCounts = new Array(MAX_LVL + 1).fill(0);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (board[r][c]) levelCounts[board[r][c].lvl]++;
+  const anyPair = levelCounts.some(cnt => cnt >= 2);
+  if (!anyPair) {
+    triggerGameOver();
+  }
+}
+
+function triggerGameOver() {
+  gameOver = true;
+  goScoreEl.textContent = score;
+  goBestEl.classList.toggle('show', score >= bestScore && score > 0);
+  goEl.classList.add('active');
+  hapticNotif('error');
+}
+
+function initBoard() {
+  // Clear
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (board[r][c]) { removePiece(board[r][c]); }
+    }
+  }
+  score = 0; mergeCount = 0; gameOver = false; selected = null; blocked = false;
+  shakeAmt = 0; selRing.visible = false;
+  scoreEl.textContent = '0';
+  mergeEl.textContent = '0';
+  goEl.classList.remove('active');
+
+  // Seed ~38% of board with lvl 1-3
+  const cells = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) cells.push([r, c]);
+  shuffle(cells);
+  const seedCount = Math.floor(ROWS * COLS * 0.38);
+  for (let i = 0; i < seedCount; i++) {
+    const [r, c] = cells[i];
+    const lvl = Math.random() < 0.65 ? 1 : (Math.random() < 0.7 ? 2 : 3);
+    makePiece(lvl, r, c, true);
+  }
+}
+
+document.getElementById('restart-btn').addEventListener('click', initBoard);
+
+// ── CAMERA BASE ──
+const CAM_BASE_Y = camera.position.y;
+const CAM_BASE_Z = camera.position.z;
+
+// ── ANIMATION LOOP ──
+const clock = new THREE.Clock();
+
+(function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  frame++;
+
+  // Animate fill lights
+  pA.position.x = Math.sin(frame * 0.011) * 6;
+  pA.position.z = Math.cos(frame * 0.008) * 6;
+  pB.position.x = Math.cos(frame * 0.009) * 6;
+  pB.position.z = Math.sin(frame * 0.013) * 6;
+
+  // Screen shake
+  if (shakeAmt > 0.008) {
+    camera.position.x = (Math.random() - 0.5) * shakeAmt * 1.8;
+    camera.position.y = CAM_BASE_Y + (Math.random() - 0.5) * shakeAmt * 0.8;
+    camera.position.z = CAM_BASE_Z + (Math.random() - 0.5) * shakeAmt * 0.8;
+    shakeAmt *= 0.76;
+  } else {
+    camera.position.x = 0;
+    camera.position.y = CAM_BASE_Y;
+    camera.position.z = CAM_BASE_Z;
+  }
+
+  // Pieces
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const p = board[r][c];
+      if (!p || !p.alive) continue;
+
+      // Drop animation
+      if (p.dropping) {
+        p.dropVel += dt * 18;
+        p.mesh.position.y -= p.dropVel * dt;
+        if (p.mesh.position.y <= 0) {
+          p.mesh.position.y = 0;
+          p.dropping = false;
+          p.dropVel = 0;
+          p.bounceT = 0;
+          haptic('light');
+        }
+      }
+
+      // Landing bounce
+      if (p.bounceT >= 0 && p.bounceT < 1) {
+        p.bounceT += dt * 5;
+        const b = Math.sin(p.bounceT * Math.PI) * 0.32;
+        p.mesh.scale.setScalar(1 + b);
+        if (p.bounceT >= 1) { p.mesh.scale.setScalar(1); p.bounceT = -1; }
+      }
+
+      // Pulse (idle)
+      if (p !== selected && p.bounceT < 0 && !p.dropping) {
+        const pulse = 1 + Math.sin(frame * 0.055 + p.phase) * 0.04;
+        p.mesh.scale.setScalar(pulse);
+      }
+
+      // Selected: float + spin
+      if (p === selected) {
+        p.mesh.position.y = 0.4 + Math.sin(frame * 0.11) * 0.09;
+        p.mesh.rotation.y += dt * 2.2;
+        p.mesh.scale.setScalar(1.12);
+        // Update selection ring
+        selRing.visible = true;
+        selRing.position.copy(p.mesh.position);
+        selRing.position.y = 0.02;
+        selRing.rotation.y = frame * 0.04;
+        selRingMat.color.setHex(TIERS[p.lvl - 1].col);
+      } else if (!p.dropping && p.bounceT < 0) {
+        p.mesh.rotation.y += dt * 0.5;
+        // Snap Y
+        if (Math.abs(p.mesh.position.y) > 0.01) {
+          p.mesh.position.y *= 0.85;
+        }
+      }
+    }
+  }
+
+  if (selected === null) selRing.visible = false;
+
+  // Particles
+  for (const p of parts) {
+    if (!p.mesh.visible) continue;
+    p.life -= dt;
+    if (p.life <= 0) { p.mesh.visible = false; continue; }
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    p.vy -= dt * 14;
+    const t = p.life / p.maxLife;
+    p.mat.opacity = t;
+    p.mesh.scale.setScalar(t * 0.9 + 0.1);
+  }
+
+  // Rings
+  for (let i = rings.length - 1; i >= 0; i--) {
+    const r = rings[i];
+    r.life -= dt * 2.0;
+    if (r.life <= 0) { scene.remove(r.mesh); r.mat.dispose(); rings.splice(i, 1); continue; }
+    r.mesh.scale.setScalar((1 - r.life) * 9 + 0.5);
+    r.mat.opacity = r.life * 0.75;
+  }
+
+  // Floaties
+  for (let i = floaties.length - 1; i >= 0; i--) {
+    const f = floaties[i];
+    f.life -= dt * 1.6;
+    if (f.life <= 0) { f.el.remove(); floaties.splice(i, 1); continue; }
+    f.y -= dt * 55;
+    f.el.style.top = f.y + 'px';
+    f.el.style.opacity = f.life;
+  }
+
+  renderer.render(scene, camera);
+})();
+
+// ── RESIZE ──
+window.addEventListener('resize', () => {
+  const nW = window.innerWidth, nH = window.innerHeight;
+  camera.aspect = nW / nH;
+  camera.updateProjectionMatrix();
+  renderer.setSize(nW, nH);
+});
+
+// ── START ──
+initBoard();
+</script>
+</body>
+</html>

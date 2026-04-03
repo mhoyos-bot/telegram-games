@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>GRID RUSH</title>
+<!-- GRID RUSH v3 | ga_grid_movement_20260329_2045 | Three.js r128 | mechanic:grid_movement score:75.71 -->
+<!-- STD-031: 416L — justified: STD-025 single-file HTML5 game (CSS + HTML + Three.js scene + all game logic). -->
+<!-- STD-025: single-file HTML, CDN Three.js r128, 14KB, MeshBasicMaterial only, no shadow maps.             -->
+<!-- Kernel: NO — standalone game build per STD-025, no kernel/event_bus/GOLD wiring.                        -->
+<!-- Bloodflow: pointerup/keydown → slide() → [100ms anim] → afterMove() → checkGems+checkEnemy → tickEnemies() → render() -->
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;touch-action:none;background:#060610;font-family:'Segoe UI',sans-serif}
+#ui{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;
+  align-items:flex-start;padding:16px 20px;pointer-events:none;z-index:10}
+#sc{color:#14f195;font-size:32px;font-weight:700;text-shadow:0 0 14px #14f19588;line-height:1}
+#lv{color:#ff4466;font-size:18px;margin-top:3px}
+#bst{color:#334;font-size:13px}
+#ov{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;
+  justify-content:center;z-index:20;background:#00000099}
+#ov h2{color:#ff4466;font-size:52px;font-weight:900;letter-spacing:2px;margin-bottom:10px}
+.pts{color:#14f195;font-size:26px;margin-bottom:20px}
+.hint{color:#ffffff55;font-size:15px;animation:blink 1.3s infinite}
+@keyframes blink{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes floatup{to{opacity:0;transform:translate(-50%,-170%)}}
+.pop{position:fixed;pointer-events:none;z-index:30;font-size:20px;font-weight:700;
+  color:#ffcc00;text-shadow:0 0 8px #ffcc0088;transform:translate(-50%,-50%);
+  animation:floatup .65s ease-out forwards}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div><div id="sc">0</div><div id="lv">&#x2665;&#x2665;&#x2665;</div></div>
+  <div id="bst">BEST: 0</div>
+</div>
+<div id="ov">
+  <h2>GAME OVER</h2>
+  <div class="pts" id="pts">Score: 0</div>
+  <div class="hint">TAP TO PLAY AGAIN</div>
+</div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.128/build/three.module.min.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+
+// — Telegram —
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const haptic = (t='light') => { try { tg?.HapticFeedback?.impactOccurred(t); } catch (_e) { /* no haptic in browser */ } };
+
+// — Renderer —
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+
+// — Camera: orthographic top-down —
+const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+cam.position.set(0, 10, 0.001);
+cam.lookAt(0, 0, 0);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060610);
+scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+
+// — Grid constants —
+const G = 7, C = 1.0, HALF = G * C / 2;
+const gw = (gx, gy) => ({ x: gx * C - HALF + C / 2, z: gy * C - HALF + C / 2 });
+
+function fitCam() {
+  const a = window.innerWidth / window.innerHeight, p = HALF + 1.3;
+  if (a < 1) { cam.left=-p; cam.right=p; cam.top=p/a; cam.bottom=-p/a; }
+  else        { cam.left=-p*a; cam.right=p*a; cam.top=p; cam.bottom=-p; }
+  cam.updateProjectionMatrix();
+}
+fitCam();
+window.addEventListener('resize', () => { renderer.setSize(window.innerWidth, window.innerHeight); fitCam(); });
+
+// — Grid floor —
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(G * C + 0.1, G * C + 0.1),
+  new THREE.MeshBasicMaterial({ color: 0x0c0c1f })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// Grid lines
+const lm = new THREE.LineBasicMaterial({ color: 0x191930 });
+for (let i = 0; i <= G; i++) {
+  const v = i * C - HALF;
+  [
+    [v, .01, -HALF, v,   .01, HALF],
+    [-HALF, .01, v, HALF, .01, v  ],
+  ].forEach(([x1,y1,z1,x2,y2,z2]) => {
+    scene.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1,y1,z1), new THREE.Vector3(x2,y2,z2)]),
+      lm
+    ));
+  });
+}
+
+// Border glow
+const border = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(G * C + .06, .1, G * C + .06)),
+  new THREE.LineBasicMaterial({ color: 0x14f195 })
+);
+border.position.y = 0.01;
+scene.add(border);
+
+// — Helpers —
+const mkBox = (color, s) => new THREE.Mesh(
+  new THREE.BoxGeometry(s, s, s),
+  new THREE.MeshBasicMaterial({ color })
+);
+const placeAt = (mesh, gx, gy) => { const p = gw(gx, gy); mesh.position.x = p.x; mesh.position.z = p.z; };
+
+// — Player —
+const pm = mkBox(0x14f195, C * .72);
+pm.position.y = C * .36;
+scene.add(pm);
+
+const rm = new THREE.Mesh(
+  new THREE.RingGeometry(C * .44, C * .54, 20),
+  new THREE.MeshBasicMaterial({ color: 0x14f195, side: THREE.DoubleSide, transparent: true, opacity: .4 })
+);
+rm.rotation.x = -Math.PI / 2;
+rm.position.y = 0.02;
+scene.add(rm);
+
+// — Gem pool (5) —
+const GP = [], GL = [];
+for (let i = 0; i < 5; i++) {
+  const m = new THREE.Mesh(
+    new THREE.OctahedronGeometry(C * .28, 0),
+    new THREE.MeshBasicMaterial({ color: 0xffcc00 })
+  );
+  m.position.y = C * .4; m.visible = false; scene.add(m); GP.push(m);
+}
+
+// — Enemy pool (5) —
+const EP = [], EL = [];
+for (let i = 0; i < 5; i++) {
+  const m = mkBox(0xff3355, C * .68);
+  m.position.y = C * .34; m.visible = false; scene.add(m); EP.push(m);
+}
+
+// — Obstacle pool (8) —
+const OP = [], OS = new Set(); // OS = obstacle set "gx,gy"
+for (let i = 0; i < 8; i++) {
+  const m = mkBox(0x263545, C * .9);
+  m.position.y = C * .45; m.visible = false; scene.add(m); OP.push(m);
+}
+
+// — Particle pool (24) —
+const PP = Array.from({ length: 24 }, () => {
+  const m = mkBox(0xffcc00, .09);
+  m.material.transparent = true; m.visible = false; scene.add(m);
+  return { mesh: m, vx: 0, vy: 0, vz: 0, life: 0, max: 1 };
+});
+
+// — Game state —
+let px = 3, py = 3, score = 0, lives = 3, alive = true, moving = false, invin = false;
+let best = +(localStorage.getItem('gr3_best') || 0);
+let ax0 = 0, az0 = 0, ax1 = 0, az1 = 0, at = 0, doAnim = false;
+let shk = 0, shkT = 0;
+
+// — UI refs —
+const scEl = document.getElementById('sc');
+const lvEl = document.getElementById('lv');
+const bEl  = document.getElementById('bst');
+const ovEl = document.getElementById('ov');
+const ptEl = document.getElementById('pts');
+
+// — Lookups —
+const cellKey = (x, y) => `${x},${y}`;
+const isWall  = (x, y) => x < 0 || y < 0 || x >= G || y >= G || OS.has(cellKey(x, y));
+const eneAt   = (x, y) => EL.find(e => e.gx === x && e.gy === y);
+const gemAt   = (x, y) => GL.find(g => g.gx === x && g.gy === y);
+
+const shake = (pow, dur) => { shk = Math.max(shk, pow); shkT = Math.max(shkT, dur); };
+
+function burst(x, y, z, color) {
+  let n = 0;
+  for (const p of PP) {
+    if (p.life <= 0 && n < 7) {
+      p.mesh.position.set(x, y, z);
+      p.mesh.material.color.setHex(color);
+      p.vx = (Math.random() - .5) * .14;
+      p.vy = .07 + Math.random() * .07;
+      p.vz = (Math.random() - .5) * .14;
+      p.max = .45 + Math.random() * .2; p.life = p.max; p.mesh.visible = true; n++;
+    }
+  }
+}
+
+function scorePopup(wx, wz) {
+  const v = new THREE.Vector3(wx, 0, wz).project(cam);
+  const el = document.createElement('div');
+  el.className = 'pop'; el.textContent = '+10';
+  el.style.left = ((v.x + 1) / 2 * window.innerWidth) + 'px';
+  el.style.top  = ((-v.y + 1) / 2 * window.innerHeight) + 'px';
+  document.body.appendChild(el);
+  setTimeout(() => { try { el.remove(); } catch (_e) { /* already removed */ } }, 700);
+}
+
+function setUI() {
+  scEl.textContent = score;
+  lvEl.innerHTML   = '&#x2665;'.repeat(lives) + '&#x2661;'.repeat(Math.max(0, 3 - lives));
+  bEl.textContent  = 'BEST: ' + best;
+}
+
+function emptyCell(minDist = 0) {
+  for (let t = 0; t < 80; t++) {
+    const gx = Math.floor(Math.random() * G), gy = Math.floor(Math.random() * G);
+    const d  = Math.abs(gx - px) + Math.abs(gy - py);
+    if (!isWall(gx, gy) && !eneAt(gx, gy) && !(gx === px && gy === py) && !gemAt(gx, gy) && d >= minDist)
+      return { gx, gy };
+  }
+  return null;
+}
+
+function spawnGem() {
+  if (GL.length >= 5) return;
+  const c = emptyCell(); if (!c) return;
+  const m = GP.find(x => !x.visible); if (!m) return;
+  placeAt(m, c.gx, c.gy); m.visible = true;
+  GL.push({ gx: c.gx, gy: c.gy, mesh: m });
+}
+
+function spawnEne() {
+  const want = Math.min(1 + Math.floor(score / 40), 4);
+  if (EL.length >= want) return;
+  const c = emptyCell(4); if (!c) return;
+  const m = EP.find(x => !x.visible); if (!m) return;
+  placeAt(m, c.gx, c.gy); m.visible = true;
+  EL.push({ gx: c.gx, gy: c.gy, mesh: m });
+}
+
+function initGame() {
+  GP.forEach(m => m.visible = false); GL.length = 0;
+  EP.forEach(m => m.visible = false); EL.length = 0;
+  OP.forEach(m => m.visible = false); OS.clear();
+  PP.forEach(p => { p.life = 0; p.mesh.visible = false; });
+  score = 0; lives = 3; alive = true; moving = false; invin = false; doAnim = false;
+  pm.visible = true; rm.visible = true;
+  pm.material.color.setHex(0x14f195);
+  ovEl.style.display = 'none';
+
+  // Place obstacles, avoid Manhattan-dist<=2 from centre (3,3)
+  let n = 0;
+  for (let t = 0; t < 100 && n < 6; t++) {
+    const gx = Math.floor(Math.random() * G), gy = Math.floor(Math.random() * G);
+    if (Math.abs(gx - 3) + Math.abs(gy - 3) > 2 && !OS.has(cellKey(gx, gy))) {
+      OS.add(cellKey(gx, gy));
+      placeAt(OP[n], gx, gy); OP[n].visible = true; n++;
+    }
+  }
+
+  px = 3; py = 3;
+  const pp = gw(3, 3);
+  pm.position.x = pp.x; pm.position.z = pp.z;
+  rm.position.x = pp.x; rm.position.z = pp.z;
+
+  for (let i = 0; i < 3; i++) spawnGem();
+  spawnEne();
+  setUI();
+}
+
+// — Slide: move until hitting wall/enemy —
+function slide(dx, dy) {
+  if (!alive || moving) return;
+  let cx = px, cy = py, nx = cx + dx, ny = cy + dy;
+  let moved = false, hitEne = false;
+
+  while (!isWall(nx, ny)) {
+    if (eneAt(nx, ny)) { hitEne = true; shake(.06, .2); haptic('medium'); break; }
+    cx = nx; cy = ny; moved = true; nx += dx; ny += dy;
+  }
+
+  if (!moved) { shake(.03, .1); return; }
+  if (!hitEne && isWall(nx, ny)) { shake(.04, .16); haptic('light'); }
+
+  px = cx; py = cy;
+  const tp = gw(cx, cy);
+  ax0 = pm.position.x; az0 = pm.position.z;
+  ax1 = tp.x; az1 = tp.z;
+  at = 0; doAnim = true; moving = true;
+}
+
+function afterMove() {
+  moving = false;
+  // Collect gems
+  for (let i = GL.length - 1; i >= 0; i--) {
+    const g = GL[i];
+    if (g.gx === px && g.gy === py) {
+      burst(g.mesh.position.x, g.mesh.position.y, g.mesh.position.z, 0xffcc00);
+      scorePopup(g.mesh.position.x, g.mesh.position.z);
+      g.mesh.visible = false; GL.splice(i, 1);
+      score += 10; haptic('medium'); spawnGem(); spawnEne(); setUI();
+    }
+  }
+  if (!invin) { const h = eneAt(px, py); if (h) damage(); }
+  if (alive) tickEnemies();
+}
+
+function damage() {
+  if (!alive) return;
+  lives--; haptic('heavy'); shake(.14, .45);
+  burst(pm.position.x, pm.position.y, pm.position.z, 0xff3355);
+  setUI();
+  if (lives <= 0) {
+    alive = false; pm.visible = false; rm.visible = false;
+    setTimeout(() => {
+      if (score > best) { best = score; localStorage.setItem('gr3_best', best); }
+      ptEl.textContent = 'Score: ' + score;
+      ovEl.style.display = 'flex'; setUI();
+    }, 700);
+  } else {
+    // Brief invincibility with flash
+    invin = true; pm.material.color.setHex(0xffffff);
+    let f = 0;
+    const iv = setInterval(() => {
+      f++; pm.visible = f % 2 === 0;
+      if (f >= 8) { clearInterval(iv); pm.visible = true; pm.material.color.setHex(0x14f195); invin = false; }
+    }, 160);
+  }
+}
+
+function tickEnemies() {
+  EL.forEach(e => {
+    const dx = px - e.gx, dy = py - e.gy;
+    const dirs = Math.abs(dx) >= Math.abs(dy)
+      ? [[Math.sign(dx), 0], [0, Math.sign(dy)]]
+      : [[0, Math.sign(dy)], [Math.sign(dx), 0]];
+    dirs.push([-Math.sign(dx), 0], [0, -Math.sign(dy)]);
+    for (const [ex, ey] of dirs) {
+      if (!ex && !ey) continue;
+      const nx = e.gx + ex, ny = e.gy + ey;
+      if (!isWall(nx, ny) && !eneAt(nx, ny)) {
+        e.gx = nx; e.gy = ny; placeAt(e.mesh, nx, ny); break;
+      }
+    }
+  });
+  if (!invin) { const h = eneAt(px, py); if (h) damage(); }
+}
+
+// — Input —
+let ptx = 0, pty = 0;
+renderer.domElement.addEventListener('pointerdown', e => { ptx = e.clientX; pty = e.clientY; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!alive) { initGame(); return; }
+  const dx = e.clientX - ptx, dy = e.clientY - pty;
+  if (Math.abs(dx) < 28 && Math.abs(dy) < 28) return;
+  Math.abs(dx) > Math.abs(dy) ? slide(dx > 0 ? 1 : -1, 0) : slide(0, dy > 0 ? 1 : -1);
+});
+window.addEventListener('keydown', e => {
+  if (!alive) { if (e.key === ' ' || e.key === 'Enter') initGame(); return; }
+  const km = { ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,-1], ArrowDown:[0,1],
+               a:[-1,0], d:[1,0], w:[0,-1], s:[0,1] };
+  if (km[e.key]) { e.preventDefault(); slide(...km[e.key]); }
+});
+
+// — Main loop —
+let prevTs = 0;
+function loop(ts) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((ts - prevTs) / 1000, .08); prevTs = ts;
+  const t = ts * .001;
+
+  // Player slide animation (100ms ease-out)
+  if (doAnim) {
+    at += dt;
+    const tt = Math.min(at / .1, 1), ease = tt * (2 - tt);
+    pm.position.x = ax0 + (ax1 - ax0) * ease;
+    pm.position.z = az0 + (az1 - az0) * ease;
+    rm.position.x = pm.position.x; rm.position.z = pm.position.z;
+    if (tt >= 1) { doAnim = false; afterMove(); }
+  }
+
+  // Particles
+  for (const p of PP) {
+    if (p.life > 0) {
+      p.life -= dt;
+      p.mesh.position.x += p.vx; p.mesh.position.y += p.vy; p.mesh.position.z += p.vz;
+      p.vy -= .009;
+      p.mesh.material.opacity = Math.max(0, p.life / p.max);
+      p.mesh.visible = p.life > 0;
+    }
+  }
+
+  // Screen shake
+  if (shkT > 0) {
+    shkT -= dt;
+    cam.position.x = shkT > 0 ? (Math.random() - .5) * shk * 2 : 0;
+    cam.position.z = shkT > 0 ? (Math.random() - .5) * shk * 2 : 0;
+    if (shkT <= 0) shk = 0;
+  }
+
+  // Gem bob + spin
+  GL.forEach((g, i) => {
+    g.mesh.rotation.y = t * 2 + i * 1.4;
+    g.mesh.position.y = C * .36 + Math.sin(t * 3 + i) * .06;
+  });
+  // Enemy pulse
+  EL.forEach((e, i) => { const s = .92 + Math.sin(t * 5 + i * 1.8) * .06; e.mesh.scale.setScalar(s); });
+  // Ring glow
+  rm.material.opacity = .3 + Math.sin(t * 4) * .12;
+
+  renderer.render(scene, cam);
+}
+
+initGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
